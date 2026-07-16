@@ -1,8 +1,8 @@
 use redlilium_ecs::SnapshotResource;
 use serde::{Deserialize, Serialize};
 
-/// Game score resource. Captures pre-play value and restores on Stop.
-/// No PlayModeAware hooks needed — snapshot restore handles state reset.
+/// Game score resource. Implements SnapshotResource so warm-restart reload
+/// (ADR-020) restores its value across a dylib swap.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct GameScore {
     pub value: u32,

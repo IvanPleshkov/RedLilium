@@ -53,11 +53,51 @@ const COMMANDS: &[&str] = &[
     "new_asset",
     "save_prefab",
     "spawn_prefab",
+    "save_scene",
+    "load_scene",
     "pick",
     "pick_rect",
     "reload_game",
     "set_gizmo_mode",
+    "play",
+    "pause",
+    "resume",
+    "stop",
+    "restart",
 ];
+
+/// A play-session lifecycle request (`play` / `pause` / `resume` / `stop`),
+/// applied by the shell between frames — dispatch cannot create or drop the
+/// play world from inside the editing world's frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayRequest {
+    Play,
+    Pause,
+    Resume,
+    Stop,
+}
+
+/// The hosted game's status, surfaced in the `state` response (ADR-037).
+/// The shell refreshes this snapshot once per frame before dispatch.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct GameStatus {
+    /// `"static"` (game-owned editor binary), `"dylib"` (`REDLILIUM_GAME`),
+    /// or `"none"`.
+    pub hosted: &'static str,
+    /// Play worlds boot from a Tier-1 behavior dylib (vs the hosted module).
+    pub behavior_override: bool,
+    /// Game sources changed since the behavior module was (re)built.
+    pub stale: bool,
+    /// A `cargo build` is running in the background.
+    pub rebuilding: bool,
+    /// The last build relinked the editor binary itself — a Tier-2 process
+    /// restart is required; no swap happened.
+    pub restart_required: bool,
+    /// The behavior module's component schemas diverge from the authoring
+    /// (static) image: play runs the new code, authoring the new fields
+    /// needs a restart.
+    pub schema_diverged: bool,
+}
 
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
 #[derive(Default)]
@@ -69,6 +109,13 @@ pub struct RemoteCommands {
     /// A game-module reload was requested; the shell executes it between
     /// frames (dispatch cannot — the reload replaces the whole world).
     reload_game: bool,
+    /// A play-session request; the shell applies it between frames.
+    play_request: Option<PlayRequest>,
+    /// A Tier-2 exec-restart was requested (ADR-037); the shell writes the
+    /// session carry, winds the loop down, and execs the fresh binary.
+    restart: bool,
+    /// Hosted-game status for the `state` response (shell-refreshed).
+    pub game_status: Option<GameStatus>,
 }
 
 impl RemoteCommands {
@@ -88,6 +135,18 @@ impl RemoteCommands {
     /// reload (see `game_host::reload_game`) between frames.
     pub fn take_reload(&mut self) -> bool {
         std::mem::take(&mut self.reload_game)
+    }
+
+    /// Take the play-session request, if one arrived. The shell applies it
+    /// between frames (see `crate::play::PlaySession`).
+    pub fn take_play_request(&mut self) -> Option<PlayRequest> {
+        self.play_request.take()
+    }
+
+    /// Take the Tier-2 restart request, if one arrived (see
+    /// `crate::session`).
+    pub fn take_restart(&mut self) -> bool {
+        std::mem::take(&mut self.restart)
     }
 }
 
@@ -524,6 +583,7 @@ pub fn inject_screenshot_pass(
     world: &World,
     device: &Arc<GraphicsDevice>,
     graph: &mut RenderGraph,
+    source: Option<Arc<redlilium_graphics::Texture>>,
 ) {
     let Some(job) = &mut rc.screenshot else {
         return;
@@ -531,19 +591,30 @@ pub fn inject_screenshot_pass(
     if job.layout.is_some() {
         return; // already injected
     }
-    let Some(scene_handle) = world
-        .has_resource::<ScenePass>()
-        .then(|| world.resource::<ScenePass>().0)
-        .flatten()
-    else {
-        return; // no scene pass this frame — try again next frame
-    };
-    let Some(color) = world
-        .read_all::<CameraTarget>()
-        .ok()
-        .and_then(|t| t.iter().next().map(|(_, target)| target.color.clone()))
-    else {
-        return;
+    // The texture to capture. `Some` = the play session's view camera (the
+    // game camera, or the pause flyover) — it was rendered in an earlier
+    // submit of this frame, so cross-submit sync covers the copy and no
+    // intra-graph edge is needed. `None` = the editing world's scene camera:
+    // first CameraTarget, ordered after this frame's scene pass.
+    let (color, after) = match source {
+        Some(color) => (color, None),
+        None => {
+            let Some(scene_handle) = world
+                .has_resource::<ScenePass>()
+                .then(|| world.resource::<ScenePass>().0)
+                .flatten()
+            else {
+                return; // no scene pass this frame — try again next frame
+            };
+            let Some(color) = world
+                .read_all::<CameraTarget>()
+                .ok()
+                .and_then(|t| t.iter().next().map(|(_, target)| target.color.clone()))
+            else {
+                return;
+            };
+            (color, Some(scene_handle))
+        }
     };
 
     let size = color.size();
@@ -577,7 +648,9 @@ pub fn inject_screenshot_pass(
         TransferOperation::readback_buffer(buffer.clone(), 0..total as usize, job.result.clone()),
     ]));
     let handle = graph.add_transfer_pass(pass);
-    graph.add_dependency(handle, scene_handle);
+    if let Some(scene_handle) = after {
+        graph.add_dependency(handle, scene_handle);
+    }
 
     job.layout = Some((w, h, padded_bpr, bgra));
     job._buffer = Some(buffer);
@@ -652,7 +725,7 @@ fn dispatch(
                 },
             );
         }
-        "state" => cmd_state(world, conn, id),
+        "state" => cmd_state(world, conn, id, rc.game_status),
         "inspect" => {
             let Some(entity) = str_param("entity").and_then(|s| find_entity(world, &s)) else {
                 return send_err(world, conn, id, "unknown entity");
@@ -832,6 +905,28 @@ fn dispatch(
             rc.reload_game = true;
             send(world, conn, &OkResp { id, ok: true });
         }
+        // Tier-2 exec-restart (ADR-037): the shell writes the session carry
+        // (open scene + camera pose), winds the loop down, and execs the
+        // fresh binary. `ok: true` means *queued*; the connection then drops
+        // — reconnect via the re-published `.redlilium/editor.port`.
+        "restart" => {
+            rc.restart = true;
+            send(world, conn, &OkResp { id, ok: true });
+        }
+        // Play-session lifecycle (EDITOR_REBUILD.md §4.3): the shell boots a
+        // game world (the standalone composition) from the hosted module,
+        // seeded with the current scene; `stop` drops it. `ok: true` means
+        // *queued* — applied between frames; requires REDLILIUM_GAME. While
+        // playing, `screenshot` captures the play world's camera.
+        "play" | "pause" | "resume" | "stop" => {
+            rc.play_request = Some(match cmd.as_str() {
+                "play" => PlayRequest::Play,
+                "pause" => PlayRequest::Pause,
+                "resume" => PlayRequest::Resume,
+                _ => PlayRequest::Stop,
+            });
+            send(world, conn, &OkResp { id, ok: true });
+        }
         // The generic path: any action in the ActionRegistry, invoked by name
         // with a natural-RON parameter map. Same queue -> history route as
         // the specialized commands; spawn-style actions report the created
@@ -912,7 +1007,7 @@ fn dispatch(
                 world
                     .resource::<AssetProcessor>()
                     .vfs()
-                    .write(&vfs_path, Vec::new()),
+                    .write(&vfs_path, spec.content),
             );
             if let Err(e) = write {
                 world
@@ -971,6 +1066,72 @@ fn dispatch(
                 }
                 Err(e) => send_err(world, conn, id, &format!("write {path}: {e}")),
             }
+        }
+        // Persist the world's scene content as a `.scene` asset (#2) — the
+        // wire twin of File > Save. `path` (VFS `"mount/path"`) is optional
+        // and defaults to the world's current scene; the chosen path is
+        // recorded back as current and returned.
+        "save_scene" => {
+            let path = str_param("path")
+                .or_else(|| world.resource::<crate::core::CurrentScene>().0.clone());
+            let Some(path) = path else {
+                return send_err(world, conn, id, "missing 'path' (and no current scene)");
+            };
+            let ron = match redlilium_ecs::serialize_scene_ron(world) {
+                Ok(ron) => ron,
+                Err(e) => return send_err(world, conn, id, &format!("serialize: {e}")),
+            };
+            let write = pollster::block_on(
+                world
+                    .resource::<AssetProcessor>()
+                    .vfs()
+                    .write(&path, ron.into_bytes()),
+            );
+            match write {
+                Ok(()) => {
+                    world.resource_mut::<crate::core::CurrentScene>().0 = Some(path.clone());
+                    log::info!("remote: saved scene {path}");
+                    #[derive(Serialize)]
+                    struct SceneResp {
+                        id: i64,
+                        ok: bool,
+                        path: String,
+                    }
+                    send(world, conn, &SceneResp { id, ok: true, path });
+                }
+                Err(e) => send_err(world, conn, id, &format!("write {path}: {e}")),
+            }
+        }
+        // Open a `.scene` asset (#2): an undoable replace of the world's
+        // scene content (editor entities survive; undo restores the previous
+        // content). The response lands after the queued action executes.
+        "load_scene" => {
+            let Some(path) = str_param("path") else {
+                return send_err(world, conn, id, "missing 'path'");
+            };
+            let data =
+                match pollster::block_on(world.resource::<AssetProcessor>().vfs().read(&path)) {
+                    Ok(data) => data,
+                    Err(e) => return send_err(world, conn, id, &format!("read {path}: {e}")),
+                };
+            let scene = match redlilium_ecs::serialize::decode::<
+                redlilium_ecs::serialize::SerializedWorld,
+            >(&data, redlilium_ecs::serialize::Format::Ron)
+            {
+                Ok(scene) => scene,
+                Err(e) => return send_err(world, conn, id, &format!("decode {path}: {e}")),
+            };
+            let action = redlilium_ecs::ReplaceSceneAction::new(scene, &path);
+            let result = push_action(world, Box::new(action));
+            world.resource_mut::<crate::core::CurrentScene>().0 = Some(path);
+            rc.parked.push(Parked::Write {
+                conn,
+                id,
+                entity: None,
+                component: None,
+                spawned: None,
+                result,
+            });
         }
         // Entity under a point / all entities in a region, in scene-image
         // coordinates (what `screenshot` shows). Resolved by the entity-index
@@ -1108,7 +1269,7 @@ fn entity_spec(e: Entity) -> String {
     format!("{}@{}", e.index(), e.spawn_tick())
 }
 
-fn cmd_state(world: &World, conn: u64, id: i64) {
+fn cmd_state(world: &World, conn: u64, id: i64, game: Option<GameStatus>) {
     #[derive(Serialize)]
     struct EntityRow {
         entity: String,
@@ -1120,8 +1281,13 @@ fn cmd_state(world: &World, conn: u64, id: i64) {
     struct StateResp {
         id: i64,
         ok: bool,
+        /// The scene asset the world content belongs to (VFS `"mount/path"`,
+        /// #112) — `None` before the first save/load picks one.
+        scene: Option<String>,
         entities: Vec<EntityRow>,
         selection: Vec<String>,
+        /// Hosted-game status (ADR-037): stale/rebuilding/restart markers.
+        game: Option<GameStatus>,
     }
     let entities: Vec<EntityRow> = world
         .iter_entities()
@@ -1152,8 +1318,10 @@ fn cmd_state(world: &World, conn: u64, id: i64) {
         &StateResp {
             id,
             ok: true,
+            scene: world.resource::<crate::core::CurrentScene>().0.clone(),
             entities,
             selection,
+            game,
         },
     );
 }

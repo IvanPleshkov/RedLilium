@@ -57,7 +57,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::runner::EcsRunner;
 use crate::system::SystemsContainer;
-use crate::system::{ApplyStateTransition, NextState, State, StateTransition, States, SystemError};
+use crate::system::{ApplyStateTransition, NextState, State, StateTransition, States};
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
@@ -211,23 +211,6 @@ impl Default for Time {
 }
 
 // ---------------------------------------------------------------------------
-// GameActive resource
-// ---------------------------------------------------------------------------
-
-/// World-visible mirror of [`Schedules::is_game_active`] (#67).
-///
-/// `Schedules` is driven **externally** (the app owns it and calls
-/// [`run_frame`](Schedules::run_frame)), so it is not a world resource and
-/// systems cannot read its `game_active` flag directly. `run_frame` publishes
-/// this resource each frame (from the field, before any schedule runs) and reads
-/// it back afterwards, so play-mode systems can flip it — see
-/// [`GameActiveCondition`](crate::system::condition::GameActiveCondition) /
-/// [`NotGameActiveCondition`](crate::system::condition::NotGameActiveCondition),
-/// which gate game vs. editor systems on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GameActive(pub bool);
-
-// ---------------------------------------------------------------------------
 // State checker (type-erased)
 // ---------------------------------------------------------------------------
 
@@ -277,10 +260,6 @@ pub struct Schedules {
     fixed_accumulator: f64,
     max_fixed_steps: u32,
     startup_done: bool,
-    /// Whether game schedules (FixedUpdate, Update, PostUpdate) are active.
-    /// Default: true (for standalone runtime without PlayControl).
-    /// Set to false by editor at init, true on Play, false on Stop.
-    game_active: bool,
 }
 
 impl Schedules {
@@ -292,7 +271,6 @@ impl Schedules {
     ///
     /// Fixed timestep defaults to 1/60 seconds. Change with
     /// [`set_fixed_timestep()`](Schedules::set_fixed_timestep).
-    /// Game schedules are active by default (for standalone runtime).
     pub fn new() -> Self {
         Self {
             schedules: HashMap::new(),
@@ -301,7 +279,6 @@ impl Schedules {
             fixed_accumulator: 0.0,
             max_fixed_steps: Self::DEFAULT_MAX_FIXED_STEPS,
             startup_done: false,
-            game_active: true,
         }
     }
 
@@ -396,24 +373,6 @@ impl Schedules {
         self.startup_done = true;
     }
 
-    /// Activates or deactivates game schedules (FixedUpdate, Update, PostUpdate).
-    /// When false, FixedUpdate is skipped in run_frame; other schedules still run
-    /// but systems can filter via run conditions.
-    pub fn set_game_active(&mut self, active: bool) {
-        self.game_active = active;
-    }
-
-    /// Returns whether game schedules are currently active.
-    pub fn is_game_active(&self) -> bool {
-        self.game_active
-    }
-
-    /// Resets the fixed-timestep accumulator to 0.
-    /// Call this on Stop to prevent catch-up burst iterations on the next Play.
-    pub fn reset_fixed_accumulator(&mut self) {
-        self.fixed_accumulator = 0.0;
-    }
-
     /// Runs the [`Startup`] schedule once.
     ///
     /// Subsequent calls are no-ops. Call this before your main loop.
@@ -445,10 +404,10 @@ impl Schedules {
     /// 6. Run [`Update`]
     /// 7. Run [`PostUpdate`]
     ///
-    /// If any panic occurs in FixedUpdate or Update while Playing,
-    /// the game is automatically paused and PlayControl.panicked is set.
+    /// Panics in FixedUpdate or Update are caught by the runner and logged;
+    /// they no longer pause anything here — a host that wants to freeze on
+    /// panic simply stops calling `run_frame`.
     pub fn run_frame(&mut self, world: &mut World, runner: &EcsRunner, delta_time: f64) {
-        use crate::std::play_mode::{PanicInfo, PlayControl, PlayState};
         use log::error;
 
         // 1. Update Time resource
@@ -462,12 +421,6 @@ impl Schedules {
             time.elapsed += delta_time;
             time.fixed_delta = self.fixed_timestep;
         }
-
-        // Publish game_active into the world so run conditions can read it (#67).
-        // PreUpdate play-mode transitions may flip it below; FixedUpdate and the
-        // gated conditions then observe the change this same frame, and it is
-        // synced back to the field at the end of run_frame.
-        world.insert_resource(GameActive(self.game_active));
 
         // 2. Swap reactive trigger buffers and advance event queues exactly
         //    once per frame. Doing this per runner.run would make Triggers<M>
@@ -487,80 +440,42 @@ impl Schedules {
         // 4. Check state transitions and run OnExit / OnEnter
         self.run_state_transitions(world, runner);
 
-        // 4b. Advance the dual clocks (#67), after PreUpdate so a play-mode
-        //     transition this frame takes effect immediately. `RealTime`
-        //     always advances. `GameTime` advances only while the game
-        //     simulates: `GameActive` covers Playing in the editor and the
-        //     always-on standalone runtime, while Paused (where `GameActive`
-        //     stays true but the game must freeze) forces an effective scale
-        //     of 0 — systems still run, they just see a zero game delta.
+        // 4b. Advance the dual clocks, after PreUpdate so any state transition
+        //     this frame takes effect immediately. `RealTime` always advances.
+        //     `GameTime` advances every ticked frame with its own scale —
+        //     freezing is the host simply not calling `run_frame` (e.g. a
+        //     paused editor play-session).
         if world.has_resource::<crate::RealTime>() {
             world.resource_mut::<crate::RealTime>().advance(delta_time);
         }
         if world.has_resource::<crate::GameTime>() {
-            let paused = world.has_resource::<PlayControl>()
-                && world.resource::<PlayControl>().state() == PlayState::Paused;
-            let active = world.resource::<GameActive>().0;
             let mut game_time = world.resource_mut::<crate::GameTime>();
-            let scale = if active && !paused {
-                game_time.scale()
-            } else {
-                0.0
-            };
+            let scale = game_time.scale();
             game_time.tick(delta_time, scale);
         }
 
-        // 5. FixedUpdate accumulator (only if game_active). Read the world mirror
-        //    so a PreUpdate play-mode transition (above) takes effect this frame.
-        //    Debt is clamped so a long stall runs at most `max_fixed_steps`
-        //    catch-up iterations instead of spiraling (each over-budget frame
-        //    adding more debt than it retires).
-        let game_active_now = world.resource::<GameActive>().0;
-        if game_active_now && !self.game_active {
-            // Play just became active this frame (the PreUpdate transition
-            // flipped the mirror; `self.game_active` still holds last frame's
-            // value). Drop residual fixed-step debt from the previous session
-            // so the new session's first frame cannot fire an early step.
-            self.fixed_accumulator = 0.0;
+        // 5. FixedUpdate accumulator. Debt is clamped so a long stall runs at
+        //    most `max_fixed_steps` catch-up iterations instead of spiraling
+        //    (each over-budget frame adding more debt than it retires).
+        self.fixed_accumulator += delta_time;
+        let max_debt = self.fixed_timestep * self.max_fixed_steps as f64;
+        if self.fixed_accumulator > max_debt {
+            self.fixed_accumulator = max_debt;
         }
-        if game_active_now {
-            self.fixed_accumulator += delta_time;
-            let max_debt = self.fixed_timestep * self.max_fixed_steps as f64;
-            if self.fixed_accumulator > max_debt {
-                self.fixed_accumulator = max_debt;
-            }
-            if let Some(schedule) = self.schedules.get(&ScheduleId::of::<FixedUpdate>()) {
-                while self.fixed_accumulator >= self.fixed_timestep {
-                    // Set effective delta to fixed timestep
-                    world.resource_mut::<Time>().delta = self.fixed_timestep;
-                    let errors = runner.run(world, schedule);
-                    for err in errors {
-                        error!("System error in FixedUpdate: {}", err);
-                        // If currently Playing, pause and record panic
-                        if world.has_resource::<PlayControl>() {
-                            let play_control = world.resource::<PlayControl>();
-                            if play_control.state() == PlayState::Playing {
-                                drop(play_control);
-                                let tick = world.current_tick();
-                                let SystemError::Panicked { system, message } = err;
-                                let panic_info = PanicInfo {
-                                    message,
-                                    system,
-                                    schedule: "FixedUpdate".to_string(),
-                                    tick,
-                                };
-                                world.resource_mut::<PlayControl>().set_panic(panic_info);
-                                world.resource_mut::<PlayControl>().pause();
-                            }
-                        }
-                    }
-                    self.fixed_accumulator -= self.fixed_timestep;
+        if let Some(schedule) = self.schedules.get(&ScheduleId::of::<FixedUpdate>()) {
+            while self.fixed_accumulator >= self.fixed_timestep {
+                // Set effective delta to fixed timestep
+                world.resource_mut::<Time>().delta = self.fixed_timestep;
+                let errors = runner.run(world, schedule);
+                for err in errors {
+                    error!("System error in FixedUpdate: {}", err);
                 }
-            } else {
-                // No FixedUpdate schedule registered — just drain accumulator
-                // to prevent unbounded growth.
-                self.fixed_accumulator %= self.fixed_timestep;
+                self.fixed_accumulator -= self.fixed_timestep;
             }
+        } else {
+            // No FixedUpdate schedule registered — just drain accumulator
+            // to prevent unbounded growth.
+            self.fixed_accumulator %= self.fixed_timestep;
         }
 
         // Restore effective delta to frame delta
@@ -571,23 +486,6 @@ impl Schedules {
             let errors = runner.run(world, schedule);
             for err in errors {
                 error!("System error in Update: {}", err);
-                // If currently Playing, pause and record panic
-                if world.has_resource::<PlayControl>() {
-                    let play_control = world.resource::<PlayControl>();
-                    if play_control.state() == PlayState::Playing {
-                        drop(play_control);
-                        let tick = world.current_tick();
-                        let SystemError::Panicked { system, message } = err;
-                        let panic_info = PanicInfo {
-                            message,
-                            system,
-                            schedule: "Update".to_string(),
-                            tick,
-                        };
-                        world.resource_mut::<PlayControl>().set_panic(panic_info);
-                        world.resource_mut::<PlayControl>().pause();
-                    }
-                }
             }
         }
 
@@ -598,11 +496,6 @@ impl Schedules {
                 error!("System error in PostUpdate: {}", err);
             }
         }
-
-        // Sync the world mirror back to the field so a play-mode transition this
-        // frame persists (the field seeds next frame's publish, and external
-        // readers / tests see it via `is_game_active`).
-        self.game_active = world.resource::<GameActive>().0;
 
         // 8. Advance the change-detection tick. Systems already get their own
         //    per-run ticks inside the runner; this bump is for out-of-band
@@ -1022,200 +915,10 @@ mod tests {
         schedules.run_frame(&mut world, &runner, 0.016);
     }
 
+    /// FixedUpdate always runs — there is no more "game active" gate. A
+    /// paused/stopped play session simply doesn't call `run_frame` at all.
     #[test]
-    fn fixed_update_panic_pauses_while_playing() {
-        use crate::ExclusiveSystem as _;
-        use crate::std::play_mode::{ManagePlayModeTransitions, PlayControl, PlayState};
-
-        struct PanicSystem;
-        impl System for PanicSystem {
-            type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                Err(SystemError::Panicked {
-                    system: "PanicSystem".to_string(),
-                    message: "test panic in FixedUpdate".to_string(),
-                })
-            }
-        }
-
-        let mut world = World::new();
-        let mut schedules = Schedules::new();
-        let runner = EcsRunner::single_thread();
-
-        // Set up PlayControl and transition to Playing
-        world.insert_resource(PlayControl::new());
-        world.insert_resource(crate::GameTime::default());
-        let mut control = world.resource_mut::<PlayControl>();
-        control.play();
-        drop(control);
-
-        // Apply the transition
-        let mut manage_system = ManagePlayModeTransitions;
-        manage_system.run(&mut world).unwrap();
-
-        // Verify now in Playing state
-        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
-
-        // Add panic system to FixedUpdate
-        schedules.get_mut::<FixedUpdate>().add(PanicSystem);
-
-        // Run frame - should trigger pause + set panic
-        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
-
-        // Verify panic info was set
-        let control = world.resource::<PlayControl>();
-        let panic_info = control.panic_info();
-        assert!(
-            panic_info.is_some(),
-            "Panic info should be set after FixedUpdate error"
-        );
-        assert_eq!(panic_info.unwrap().schedule, "FixedUpdate");
-        assert!(panic_info.unwrap().message.contains("test panic"));
-    }
-
-    #[test]
-    fn update_panic_pauses_while_playing() {
-        use crate::ExclusiveSystem as _;
-        use crate::std::play_mode::{ManagePlayModeTransitions, PlayControl, PlayState};
-
-        struct PanicSystem;
-        impl System for PanicSystem {
-            type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                Err(SystemError::Panicked {
-                    system: "PanicSystem".to_string(),
-                    message: "test panic in Update".to_string(),
-                })
-            }
-        }
-
-        let mut world = World::new();
-        let mut schedules = Schedules::new();
-        let runner = EcsRunner::single_thread();
-
-        // Set up PlayControl and transition to Playing
-        world.insert_resource(PlayControl::new());
-        world.insert_resource(crate::GameTime::default());
-        let mut control = world.resource_mut::<PlayControl>();
-        control.play();
-        drop(control);
-
-        let mut manage_system = ManagePlayModeTransitions;
-        manage_system.run(&mut world).unwrap();
-
-        // Verify now in Playing state
-        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
-
-        // Add panic system to Update
-        schedules.get_mut::<Update>().add(PanicSystem);
-
-        // Run frame - should trigger pause + set panic
-        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
-
-        // Verify panic info was set
-        let control = world.resource::<PlayControl>();
-        let panic_info = control.panic_info();
-        assert!(
-            panic_info.is_some(),
-            "Panic info should be set after Update error"
-        );
-        assert_eq!(panic_info.unwrap().schedule, "Update");
-    }
-
-    #[test]
-    fn preupdate_panic_does_not_pause() {
-        use crate::ExclusiveSystem as _;
-        use crate::std::play_mode::{ManagePlayModeTransitions, PlayControl, PlayState};
-
-        struct PanicSystem;
-        impl System for PanicSystem {
-            type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                Err(SystemError::Panicked {
-                    system: "PanicSystem".to_string(),
-                    message: "test panic in PreUpdate".to_string(),
-                })
-            }
-        }
-
-        let mut world = World::new();
-        let mut schedules = Schedules::new();
-        let runner = EcsRunner::single_thread();
-
-        // Set up PlayControl and transition to Playing
-        world.insert_resource(PlayControl::new());
-        world.insert_resource(crate::GameTime::default());
-        let mut control = world.resource_mut::<PlayControl>();
-        control.play();
-        drop(control);
-
-        let mut manage_system = ManagePlayModeTransitions;
-        manage_system.run(&mut world).unwrap();
-
-        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
-
-        // Add panic system to PreUpdate
-        schedules.get_mut::<PreUpdate>().add(PanicSystem);
-
-        // Run frame - should NOT trigger pause (not a game schedule)
-        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
-
-        // Verify state is still Playing
-        let control = world.resource::<PlayControl>();
-        assert_eq!(control.state(), PlayState::Playing);
-
-        // Verify panic info was NOT set (PreUpdate is not a game schedule)
-        assert!(
-            control.panic_info().is_none(),
-            "PreUpdate panic should not set panic info"
-        );
-    }
-
-    #[test]
-    fn panic_while_stopped_does_not_trigger_pause() {
-        use crate::std::play_mode::{PlayControl, PlayState};
-
-        struct PanicSystem;
-        impl System for PanicSystem {
-            type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                Err(SystemError::Panicked {
-                    system: "PanicSystem".to_string(),
-                    message: "test panic while stopped".to_string(),
-                })
-            }
-        }
-
-        let mut world = World::new();
-        let mut schedules = Schedules::new();
-        let runner = EcsRunner::single_thread();
-
-        // Set up PlayControl in Stopped state (default)
-        world.insert_resource(PlayControl::new());
-
-        // Add panic system to Update
-        schedules.get_mut::<Update>().add(PanicSystem);
-
-        // Run frame - should log error but NOT trigger pause
-        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
-
-        // Verify state is still Stopped
-        let control = world.resource::<PlayControl>();
-        assert_eq!(
-            control.state(),
-            PlayState::Stopped,
-            "Panic while stopped should not change state"
-        );
-
-        // Verify panic info was NOT set (not Playing)
-        assert!(
-            control.panic_info().is_none(),
-            "Panic while stopped should not set panic info"
-        );
-    }
-
-    #[test]
-    fn game_active_flag_skip_fixed_update() {
+    fn fixed_update_always_runs() {
         let counter = Arc::new(AtomicU32::new(0));
         let mut world = World::new();
         let mut schedules = Schedules::new();
@@ -1225,363 +928,30 @@ mod tests {
             .get_mut::<FixedUpdate>()
             .add(IncrementSystem(counter.clone()));
 
-        // Run with game_active = false
-        schedules.set_game_active(false);
         schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
 
-        // Verify: FixedUpdate didn't run (counter = 0)
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
-
-        // Run with game_active = true
-        schedules.set_game_active(true);
         schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
-
-        // Verify: FixedUpdate ran (counter = 1)
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
+    /// `run_frame` drives both clocks unconditionally: `RealTime` always
+    /// advances, and `GameTime` advances every ticked frame at its own
+    /// scale — freezing is the host simply not calling `run_frame`.
     #[test]
-    fn game_active_flag_check() {
-        let mut schedules = Schedules::new();
-
-        // Default: game_active = true
-        assert!(schedules.is_game_active());
-
-        // Set to false
-        schedules.set_game_active(false);
-        assert!(!schedules.is_game_active());
-
-        // Set back to true
-        schedules.set_game_active(true);
-        assert!(schedules.is_game_active());
-    }
-
-    #[test]
-    fn reset_fixed_accumulator_prevents_burst() {
-        let counter = Arc::new(AtomicU32::new(0));
+    fn game_time_and_real_time_advance_unconditionally() {
         let mut world = World::new();
         let mut schedules = Schedules::new();
         let runner = EcsRunner::single_thread();
 
-        schedules.set_fixed_timestep(0.25);
-        schedules
-            .get_mut::<FixedUpdate>()
-            .add(IncrementSystem(counter.clone()));
-
-        // Simulate long pause: accumulate 0.5 (2 steps worth)
-        schedules.fixed_accumulator = 0.5;
-
-        // Reset accumulator on Stop
-        schedules.reset_fixed_accumulator();
-        assert_eq!(schedules.fixed_accumulator, 0.0);
-
-        // Next frame should run exactly 1 step, not burst
-        schedules.set_game_active(true);
-        schedules.run_frame(&mut world, &runner, 0.25);
-
-        // Verify: only 1 FixedUpdate iteration, not 2+ from catch-up
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-    }
-
-    /// #67: `run_frame` must drop residual fixed-step debt on the
-    /// inactive→active edge itself. The Stop transition runs inside the world
-    /// (`Schedules` is externally driven, not a world resource), so it cannot
-    /// reach the accumulator — production-parity harness: transitions flow
-    /// through `ManagePlayModeTransitions` in PreUpdate, exactly like the app.
-    #[test]
-    fn fixed_accumulator_resets_on_play_activation_edge() {
-        use crate::std::play_mode::{
-            ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayState,
-        };
-
-        let counter = Arc::new(AtomicU32::new(0));
-        let mut world = World::new();
-        let mut schedules = Schedules::new();
-        let runner = EcsRunner::single_thread();
-
-        world.insert_resource(PlayControl::default());
-        world.insert_resource(PlayModeAwareRegistry::default());
-        world.insert_resource(crate::GameTime::default());
-
-        schedules.set_fixed_timestep(0.1);
-        schedules.set_game_active(false); // editor starts stopped
-        schedules
-            .get_mut::<PreUpdate>()
-            .add_exclusive(ManagePlayModeTransitions);
-        schedules
-            .get_mut::<FixedUpdate>()
-            .add(IncrementSystem(counter.clone()));
-
-        // First play session: accrue debt normally.
-        world.resource_mut::<PlayControl>().play();
-        schedules.run_frame(&mut world, &runner, 0.06); // edge fires, 0.06 accrued
-        schedules.run_frame(&mut world, &runner, 0.06); // 0.12 → one step
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-        // Stop the session.
-        world.resource_mut::<PlayControl>().stop();
-        schedules.run_frame(&mut world, &runner, 0.0);
-        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Stopped);
-
-        // Simulate a large residual left behind by the previous session.
-        schedules.fixed_accumulator = 0.09;
-
-        // Second play session: 0.05 of fresh time is below the timestep, so
-        // no step may fire — unless stale debt leaked across the session.
-        world.resource_mut::<PlayControl>().play();
-        schedules.run_frame(&mut world, &runner, 0.05);
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "residual fixed-step debt from the previous session fired an early step"
-        );
-    }
-
-    /// #67: a condition-skipped system keeps its `last_run` frozen, so an
-    /// editor system that gates off during play catches up on every play-time
-    /// change exactly once when it wakes at Stop — with no `last_run` surgery
-    /// anywhere. Production-parity harness: external `Schedules`, transitions
-    /// through `ManagePlayModeTransitions`, gating via run conditions.
-    #[test]
-    fn dormant_editor_system_catches_up_on_stop() {
-        use crate::std::play_mode::{
-            ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayState,
-        };
-        use crate::system::condition::{GameActiveCondition, NotGameActiveCondition};
-        use crate::{MaybeChanged, ReadAll, Transform, WriteAll};
-
-        /// Game system: nudges every Transform each frame while playing.
-        struct GameWriter;
-        impl System for GameWriter {
-            type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                ctx.lock::<(WriteAll<Transform>,)>()
-                    .execute(|(mut transforms,)| {
-                        let indices: Vec<u32> = transforms.iter().map(|(i, _)| i).collect();
-                        for i in indices {
-                            if let Some(mut t) = transforms.get_mut(i) {
-                                t.translation.x += 1.0;
-                            }
-                        }
-                    });
-                Ok(())
-            }
-        }
-
-        /// Editor system: counts entities whose Transform changed since its
-        /// own previous run.
-        struct EditorCounter(Arc<AtomicU32>);
-        impl System for EditorCounter {
-            type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                ctx.lock::<(ReadAll<Transform>, MaybeChanged<Transform>)>()
-                    .execute(|(transforms, changed)| {
-                        for (idx, _) in transforms.iter() {
-                            if changed.matches(idx) {
-                                self.0.fetch_add(1, Ordering::SeqCst);
-                            }
-                        }
-                    });
-                Ok(())
-            }
-        }
-
-        let seen = Arc::new(AtomicU32::new(0));
-        let mut world = World::new();
-        let mut schedules = Schedules::new();
-        let runner = EcsRunner::single_thread();
-
-        crate::register_std_components(&mut world);
-        world.insert_resource(PlayControl::default());
-        world.insert_resource(PlayModeAwareRegistry::default());
-        world.insert_resource(crate::GameTime::default());
-
-        let entity = world.spawn();
-        world.insert(entity, Transform::IDENTITY).unwrap();
-
-        schedules.set_game_active(false);
-        schedules
-            .get_mut::<PreUpdate>()
-            .add_exclusive(ManagePlayModeTransitions);
-        {
-            let update = schedules.get_mut::<Update>();
-            update.add_condition(GameActiveCondition);
-            update.add(GameWriter);
-            update
-                .add_edge::<GameActiveCondition, GameWriter>()
-                .expect("no cycle");
-            update.add_condition(NotGameActiveCondition);
-            update.add(EditorCounter(seen.clone()));
-            update
-                .add_edge::<NotGameActiveCondition, EditorCounter>()
-                .expect("no cycle");
-        }
-
-        let dt = 1.0 / 60.0;
-
-        // Frame 1 (stopped): the editor system runs and sees the setup insert.
-        schedules.run_frame(&mut world, &runner, dt);
-        assert_eq!(seen.load(Ordering::SeqCst), 1, "setup insert visible once");
-
-        // Play: the game writer mutates the transform for two frames; the
-        // editor system is condition-skipped and its last_run stays frozen.
-        world.resource_mut::<PlayControl>().play();
-        schedules.run_frame(&mut world, &runner, dt);
-        schedules.run_frame(&mut world, &runner, dt);
-        assert_eq!(
-            seen.load(Ordering::SeqCst),
-            1,
-            "dormant editor system must not observe play-time frames"
-        );
-
-        // Stop: the snapshot restore rewrites the transform (stamped with the
-        // current tick); the waking editor system catches up exactly once.
-        world.resource_mut::<PlayControl>().stop();
-        schedules.run_frame(&mut world, &runner, dt);
-        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Stopped);
-        assert_eq!(
-            seen.load(Ordering::SeqCst),
-            2,
-            "waking editor system must see play-time changes exactly once"
-        );
-
-        // Quiet frame: nothing changed since the editor system's last run.
-        schedules.run_frame(&mut world, &runner, dt);
-        assert_eq!(
-            seen.load(Ordering::SeqCst),
-            2,
-            "no phantom changes on a quiet frame"
-        );
-    }
-
-    /// #67: `run_frame` drives both clocks. RealTime always advances;
-    /// GameTime advances only while the game simulates — frozen while
-    /// Stopped (GameActive false) and while Paused (GameActive stays true,
-    /// but the effective scale is forced to 0).
-    #[test]
-    fn game_time_freezes_on_pause_and_stop() {
-        use crate::std::play_mode::{
-            ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry,
-        };
-
-        let mut world = World::new();
-        let mut schedules = Schedules::new();
-        let runner = EcsRunner::single_thread();
-
-        world.insert_resource(PlayControl::default());
-        world.insert_resource(PlayModeAwareRegistry::default());
         world.insert_resource(crate::GameTime::default());
         world.insert_resource(crate::RealTime::default());
 
-        schedules.set_game_active(false); // editor starts stopped
-        schedules
-            .get_mut::<PreUpdate>()
-            .add_exclusive(ManagePlayModeTransitions);
-
         let dt = 0.01;
-
-        // Stopped: RealTime advances, GameTime stays frozen.
         schedules.run_frame(&mut world, &runner, dt);
+        schedules.run_frame(&mut world, &runner, dt);
+
         assert!(world.resource::<crate::RealTime>().elapsed() > 0.0);
-        assert_eq!(world.resource::<crate::GameTime>().elapsed(), 0.0);
-
-        // Playing: GameTime advances (reset to 0 by the Play transition).
-        world.resource_mut::<PlayControl>().play();
-        schedules.run_frame(&mut world, &runner, dt);
-        schedules.run_frame(&mut world, &runner, dt);
-        let at_pause = world.resource::<crate::GameTime>().elapsed();
-        assert!(at_pause > 0.0, "GameTime must advance while playing");
-
-        // Paused: frozen, bit-identical (GameActive stays true; the freeze
-        // is the zero effective scale, not a scheduling skip).
-        world.resource_mut::<PlayControl>().pause();
-        schedules.run_frame(&mut world, &runner, dt);
-        schedules.run_frame(&mut world, &runner, dt);
-        assert_eq!(world.resource::<crate::GameTime>().elapsed(), at_pause);
-        assert_eq!(world.resource::<crate::GameTime>().delta(), 0.0);
-
-        // Resume: advances again from where it froze.
-        world.resource_mut::<PlayControl>().resume();
-        schedules.run_frame(&mut world, &runner, dt);
-        assert!(world.resource::<crate::GameTime>().elapsed() > at_pause);
-    }
-
-    /// #67: a Play→Stop cycle with no mutations must produce an *empty*
-    /// change set — the restore diffs each component against the snapshot
-    /// and skips value-identical ones, so a waking editor system sees no
-    /// phantom Changed storm.
-    #[test]
-    fn clean_stop_fires_no_changed_storm() {
-        use crate::std::play_mode::{
-            ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayState,
-        };
-        use crate::system::condition::NotGameActiveCondition;
-        use crate::{MaybeChanged, ReadAll, Transform};
-
-        /// Editor system: counts entities whose Transform changed since its
-        /// own previous run.
-        struct EditorCounter(Arc<AtomicU32>);
-        impl System for EditorCounter {
-            type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                ctx.lock::<(ReadAll<Transform>, MaybeChanged<Transform>)>()
-                    .execute(|(transforms, changed)| {
-                        for (idx, _) in transforms.iter() {
-                            if changed.matches(idx) {
-                                self.0.fetch_add(1, Ordering::SeqCst);
-                            }
-                        }
-                    });
-                Ok(())
-            }
-        }
-
-        let seen = Arc::new(AtomicU32::new(0));
-        let mut world = World::new();
-        let mut schedules = Schedules::new();
-        let runner = EcsRunner::single_thread();
-
-        crate::register_std_components(&mut world);
-        world.insert_resource(PlayControl::default());
-        world.insert_resource(PlayModeAwareRegistry::default());
-        world.insert_resource(crate::GameTime::default());
-
-        let entity = world.spawn();
-        world.insert(entity, Transform::IDENTITY).unwrap();
-
-        schedules.set_game_active(false);
-        schedules
-            .get_mut::<PreUpdate>()
-            .add_exclusive(ManagePlayModeTransitions);
-        {
-            let update = schedules.get_mut::<Update>();
-            update.add_condition(NotGameActiveCondition);
-            update.add(EditorCounter(seen.clone()));
-            update
-                .add_edge::<NotGameActiveCondition, EditorCounter>()
-                .expect("no cycle");
-        }
-
-        let dt = 1.0 / 60.0;
-
-        // Frame 1 (stopped): the editor system sees the setup insert once.
-        schedules.run_frame(&mut world, &runner, dt);
-        assert_eq!(seen.load(Ordering::SeqCst), 1, "setup insert visible once");
-
-        // Play for two frames — nothing mutates the transform.
-        world.resource_mut::<PlayControl>().play();
-        schedules.run_frame(&mut world, &runner, dt);
-        schedules.run_frame(&mut world, &runner, dt);
-
-        // Stop: the restore diff finds every component value-identical and
-        // skips it, so the waking editor system sees nothing changed.
-        world.resource_mut::<PlayControl>().stop();
-        schedules.run_frame(&mut world, &runner, dt);
-        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Stopped);
-        assert_eq!(
-            seen.load(Ordering::SeqCst),
-            1,
-            "a clean Play→Stop cycle must not fire a Changed storm"
-        );
+        assert!(world.resource::<crate::GameTime>().elapsed() > 0.0);
     }
 }

@@ -55,7 +55,7 @@ fn main() {
     let device = instance.create_device().expect("graphics device");
     // The persistent engine state that must survive the reload. No mounts: the
     // harness does not render, so unresolved asset handles are harmless.
-    let engine = EngineContext::new(device, &[]);
+    let engine = EngineContext::new(device, &[], &[]);
 
     // Child mode: run only the #57 panic phase (see the end of main).
     if std::env::args().any(|a| a == "--panic-child") {
@@ -68,7 +68,7 @@ fn main() {
     // allocator both sides), so the plugin handoff is sound; the module is held
     // alive past every App it builds (see GameModule docs).
     let module = unsafe { GameModule::load(&path) }.expect("load game module");
-    let app = App::boot(&engine, module.plugin(), 1.0);
+    let app = App::boot(&engine, module.plugin(), 1.0, None);
     let booted = app.world().iter_entities().count();
     println!("booted:   {booted} entities (build + spawn_scene)");
     assert!(booted > 0, "SpinDemo should spawn a scene");
@@ -146,7 +146,7 @@ fn run_panic_child(path: &str, engine: &EngineContext) -> ! {
     unsafe { std::env::set_var("REDLILIUM_DEMO_PANIC", "1") };
     let (module3, path3) =
         unsafe { GameModule::load_fresh_copy(path) }.expect("load panic-test module");
-    let app3 = App::boot(engine, module3.plugin(), 1.0);
+    let app3 = App::boot(engine, module3.plugin(), 1.0, None);
     let (mut world, mut schedules) = app3.into_parts();
 
     let runner = EcsRunner::multi_thread(2);

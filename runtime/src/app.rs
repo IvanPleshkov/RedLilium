@@ -7,12 +7,10 @@ use redlilium_ecs::sync::RwLock;
 
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, CameraRender, Component, EnsureCameraTargets, FlushUploads,
-    FrameRing, GameTime, HotReload, ManagePlayModeTransitions, MaterialInstanceLoad,
-    MaterialInstanceManager, MeshLoad, MeshManager, PipelineRegistry, PlayControl,
-    PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate, RealTime, Render, RenderSchedule,
-    Resource, ScenePass, ScheduleLabel, Schedules, System, SystemsContainer, TextureManager,
-    UnloadStrategy, UpdateCameraMatrices, UpdateGlobalTransforms, WindowInput, World,
-    register_rendering_components, register_std_components,
+    FrameRing, GameTime, HotReload, MaterialInstanceLoad, MeshLoad, PipelineRegistry, PostUpdate,
+    PreUpdate, RealTime, Render, RenderSchedule, Resource, ScenePass, ScheduleLabel, Schedules,
+    System, SystemsContainer, UnloadStrategy, UpdateCameraMatrices, UpdateGlobalTransforms,
+    WindowInput, World, register_rendering_components, register_std_components,
 };
 
 use crate::EngineContext;
@@ -46,7 +44,17 @@ pub struct App {
 }
 
 impl App {
-    pub(crate) fn new(engine: &EngineContext, aspect: f32) -> Self {
+    /// **The** game-world composition: resources and schedules that define
+    /// what a running game is (scene transitions in `PreUpdate`, transform /
+    /// camera / asset chains in `PostUpdate`, upload + forward pass in
+    /// `Render`).
+    ///
+    /// Every host builds the game through this one function — the standalone
+    /// build and the editor's Play mode get identical worlds by construction,
+    /// not by keeping two compositions in sync. Host-specific differences
+    /// (start scene, render destination, input source) live in the host loop
+    /// and the [`boot`](Self::boot) parameters, never in here.
+    pub fn new(engine: &EngineContext, aspect: f32) -> Self {
         let mut world = World::new();
         register_std_components(&mut world);
         register_rendering_components(&mut world);
@@ -63,31 +71,25 @@ impl App {
         world.insert_resource(frame_ring);
         let window_input = world.insert_resource(WindowInput::default());
 
-        // Dual-clock time management for Play/Pause support.
+        // Dual-clock time management: RealTime always advances; GameTime's
+        // scale/freeze is host-driven (the host simply doesn't call
+        // `run_frame` to freeze a play session — see `redlilium_ecs::std::time`).
         world.insert_resource(RealTime::default());
         world.insert_resource(GameTime::default());
 
-        // Play/Pause/Resume/Stop state machine for editor integration.
-        world.insert_resource(PlayControl::default());
-        let mut registry = PlayModeAwareRegistry::default();
-        // Register asset managers as PlayModeAware so they bump generation on Stop
-        // to force re-scan of unresolved refs after snapshot restore.
-        if world.has_resource::<MeshManager>() {
-            registry.register::<MeshManager>();
-        }
-        if world.has_resource::<MaterialInstanceManager>() {
-            registry.register::<MaterialInstanceManager>();
-        }
-        if world.has_resource::<TextureManager>() {
-            registry.register::<TextureManager>();
-        }
-        world.insert_resource(registry);
-        world.insert_resource(PlayStartTick(0));
+        // Host-control surface for game code (#100): request_exit etc.
+        world.insert_resource(crate::AppControl::default());
+
+        // Scene transitions (#101/#102): switch_to requests are applied by
+        // ApplySceneTransitions in PreUpdate (installed below).
+        world.register_inspector::<redlilium_ecs::SceneMember>();
+        world.insert_resource(redlilium_ecs::SceneManager::default());
 
         let mut schedules = Schedules::new();
         {
             let pre = schedules.get_mut::<PreUpdate>();
-            pre.add_exclusive(ManagePlayModeTransitions);
+            // Scene swaps happen at a defined point (never mid-schedule).
+            pre.add_exclusive(redlilium_ecs::ApplySceneTransitions);
         }
         {
             let post = schedules.get_mut::<PostUpdate>();
@@ -218,8 +220,9 @@ impl App {
         self
     }
 
-    /// Build another plugin into this app.
+    /// Build another plugin into this app (type registration + systems).
     pub fn add_plugin(&mut self, plugin: &dyn crate::Plugin) -> &mut Self {
+        plugin.register_types(&mut self.world);
         plugin.build(self);
         self
     }
@@ -238,10 +241,76 @@ impl App {
     /// a game from a loaded module; a warm reload uses [`reload`](Self::reload)
     /// instead, which restores the scene from a snapshot rather than spawning
     /// it. The caller drives startup/frames afterward (see the host loop).
-    pub fn boot(engine: &EngineContext, plugin: &dyn crate::Plugin, aspect: f32) -> Self {
+    ///
+    /// `start_scene` is the host's start-scene override: `Some(path)` supersedes
+    /// whatever scene the game requested in `spawn_scene` (a newer
+    /// [`SceneManager::switch_to`](redlilium_ecs::SceneManager::switch_to)
+    /// wins). The standalone build passes `None` (the game decides); the
+    /// editor's Play passes the scene currently open for editing.
+    pub fn boot(
+        engine: &EngineContext,
+        plugin: &dyn crate::Plugin,
+        aspect: f32,
+        start_scene: Option<&str>,
+    ) -> Self {
+        Self::boot_impl(engine, plugin, aspect, start_scene, None)
+    }
+
+    /// [`boot`](Self::boot) with the game's registrations scoped to `source`.
+    ///
+    /// The editor boots play worlds under the hosted module's [`SourceId`]
+    /// generation: the editing world already knows the game's types under
+    /// that generation, and the engine-wide generation registry refuses one
+    /// `TypeId` under two generations — one generation per mapped image.
+    /// Standalone hosts (one compilation, no dylib) use plain [`boot`].
+    pub fn boot_scoped(
+        engine: &EngineContext,
+        plugin: &dyn crate::Plugin,
+        aspect: f32,
+        start_scene: Option<&str>,
+        source: redlilium_ecs::SourceId,
+    ) -> Self {
+        Self::boot_impl(engine, plugin, aspect, start_scene, Some(source))
+    }
+
+    fn boot_impl(
+        engine: &EngineContext,
+        plugin: &dyn crate::Plugin,
+        aspect: f32,
+        start_scene: Option<&str>,
+        source: Option<redlilium_ecs::SourceId>,
+    ) -> Self {
         let mut app = Self::new(engine, aspect);
-        plugin.build(&mut app);
-        plugin.spawn_scene(&mut app);
+        match source {
+            None => {
+                plugin.register_types(&mut app.world);
+                plugin.build(&mut app);
+                plugin.spawn_scene(&mut app);
+            }
+            Some(source) => {
+                // Same scoped-build dance as `reload`: the plugin sees an App
+                // whose world carries the registration source.
+                let mut world = std::mem::take(&mut app.world);
+                world.with_registration_source(source, |scoped| {
+                    let mut temp_app = App {
+                        world: std::mem::take(scoped),
+                        schedules: std::mem::take(&mut app.schedules),
+                        window_input: app.window_input.clone(),
+                        aspect: app.aspect,
+                    };
+                    plugin.register_types(&mut temp_app.world);
+                    plugin.build(&mut temp_app);
+                    plugin.spawn_scene(&mut temp_app);
+                    app.world = std::mem::take(&mut temp_app.world);
+                    app.schedules = std::mem::take(&mut temp_app.schedules);
+                });
+            }
+        }
+        if let Some(scene) = start_scene {
+            app.world_mut()
+                .resource_mut::<redlilium_ecs::SceneManager>()
+                .switch_to(scene);
+        }
         app
     }
 
@@ -320,6 +389,7 @@ impl App {
                 window_input: app.window_input.clone(),
                 aspect: app.aspect,
             };
+            plugin.register_types(&mut temp_app.world);
             plugin.build(&mut temp_app);
             // Move changes back to outer scope
             app.world = std::mem::take(&mut temp_app.world);
@@ -341,8 +411,9 @@ impl App {
     }
 
     /// Handle to the [`WindowInput`] resource, kept by the host to forward
-    /// platform input events.
-    pub(crate) fn window_input(&self) -> Arc<RwLock<WindowInput>> {
+    /// platform input events (the standalone window loop and the editor's
+    /// scene view both feed the game through this).
+    pub fn window_input(&self) -> Arc<RwLock<WindowInput>> {
         self.window_input.clone()
     }
 
@@ -367,14 +438,16 @@ mod tests {
         tag: u32,
     }
 
-    /// The reload contract in miniature: `build` only registers, `spawn_scene`
-    /// populates. A reload re-runs `build` and restores the snapshot, so the
-    /// scene must survive without `spawn_scene` running again.
+    /// The reload contract in miniature: `register_types` registers,
+    /// `spawn_scene` populates, `build` adds nothing here. A reload re-runs
+    /// registration and restores the snapshot, so the scene must survive
+    /// without `spawn_scene` running again.
     struct BlipPlugin;
     impl Plugin for BlipPlugin {
-        fn build(&self, app: &mut App) {
-            app.register_component::<Blip>();
+        fn register_types(&self, world: &mut redlilium_ecs::World) {
+            world.register_inspector::<Blip>();
         }
+        fn build(&self, _app: &mut App) {}
         fn spawn_scene(&self, app: &mut App) {
             let world = app.world_mut();
             let e = world.spawn();
@@ -398,9 +471,7 @@ mod tests {
         let plugin = BlipPlugin;
 
         // First boot: registration + initial-scene spawn.
-        let mut app = App::new(&engine, 1.0);
-        plugin.build(&mut app);
-        plugin.spawn_scene(&mut app);
+        let app = App::boot(&engine, &plugin, 1.0, None);
         {
             let blips = app.world().read_all::<Blip>().unwrap();
             assert_eq!(blips.iter().count(), 1, "one Blip before reload");
@@ -433,6 +504,42 @@ mod tests {
         );
     }
 
+    /// The host's start-scene override: `boot(.., None)` leaves the game's
+    /// own `switch_to` request standing; `boot(.., Some(..))` supersedes it.
+    /// This is the parameter the editor's Play uses to start from the scene
+    /// open for editing instead of the game's default.
+    #[test]
+    fn boot_start_scene_override() {
+        struct ScenePlugin;
+        impl Plugin for ScenePlugin {
+            fn build(&self, _app: &mut App) {}
+            fn spawn_scene(&self, app: &mut App) {
+                app.world_mut()
+                    .resource_mut::<redlilium_ecs::SceneManager>()
+                    .switch_to("scenes/menu.scene");
+            }
+        }
+        let engine = test_engine();
+
+        let app = App::boot(&engine, &ScenePlugin, 1.0, None);
+        assert_eq!(
+            app.world()
+                .resource::<redlilium_ecs::SceneManager>()
+                .pending(),
+            Some("scenes/menu.scene"),
+            "without an override the game's request stands"
+        );
+
+        let app = App::boot(&engine, &ScenePlugin, 1.0, Some("scenes/level1.scene"));
+        assert_eq!(
+            app.world()
+                .resource::<redlilium_ecs::SceneManager>()
+                .pending(),
+            Some("scenes/level1.scene"),
+            "the host override supersedes the game's request"
+        );
+    }
+
     /// Phase 6, Step 4: Verify that capture() includes snapshot metadata
     /// with component schema hashes. This integration test confirms the
     /// end-to-end infrastructure is in place for schema validation.
@@ -442,9 +549,7 @@ mod tests {
         let engine = test_engine();
         let plugin = BlipPlugin;
 
-        let mut app = App::new(&engine, 1.0);
-        plugin.build(&mut app);
-        plugin.spawn_scene(&mut app);
+        let app = App::boot(&engine, &plugin, 1.0, None);
 
         // Capture the scene
         let snapshot = app.capture().unwrap();

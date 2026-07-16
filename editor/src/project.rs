@@ -16,6 +16,10 @@ pub struct ProjectConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectInfo {
     pub name: String,
+    /// Scene asset to open on startup (#2), as a VFS path `"mount/path"`
+    /// (e.g. `"game/scenes/level1.scene"`). Absent → the built-in demo scene.
+    #[serde(default)]
+    pub scene: Option<String>,
 }
 
 /// A single VFS mount point definition.
@@ -28,6 +32,13 @@ pub struct MountConfig {
     pub path: String,
     #[serde(default)]
     pub default: bool,
+    /// Treat this (filesystem) mount as a *local asset mount* (#105): scanned
+    /// into the asset DB at startup, watched for external edits, and its
+    /// `assets.db` persisted on change — exactly like the built-in `std` /
+    /// `project` mounts. Off by default: plain mounts (e.g. `shaders`) are
+    /// served through the VFS without asset-DB bookkeeping.
+    #[serde(default)]
+    pub scan: bool,
     /// `"filesystem"` (default) or `"sftp"`.
     #[serde(default = "default_mount_type")]
     pub r#type: String,
@@ -146,6 +157,27 @@ pub fn build_vfs(config: &ProjectConfig) -> Vfs {
     vfs
 }
 
+/// The editor's *local asset mounts* `(name, dir)`: the built-in `std` and
+/// `project` packs plus every project.toml filesystem mount opted in with
+/// `scan = true` (#105). Shared by the windowed and headless shells so both
+/// see the same asset mounts. Mount identity strings live for the whole
+/// editor process (leaked — the mount APIs are `&'static str` throughout).
+pub fn local_mounts(config: Option<&ProjectConfig>) -> Vec<(&'static str, &'static str)> {
+    let mut mounts: Vec<(&'static str, &'static str)> =
+        vec![("std", "std-assets"), ("project", "project-assets")];
+    if let Some(config) = config {
+        for mount in &config.mount {
+            if mount.scan && mount.r#type == "filesystem" {
+                mounts.push((
+                    Box::leak(mount.name.clone().into_boxed_str()),
+                    Box::leak(mount.path.clone().into_boxed_str()),
+                ));
+            }
+        }
+    }
+    mounts
+}
+
 /// Load project config, falling back to a default if the file doesn't exist.
 pub fn load_or_default(path: &Path) -> (ProjectConfig, Vfs) {
     let config = match load_project(path) {
@@ -162,11 +194,13 @@ pub fn load_or_default(path: &Path) -> (ProjectConfig, Vfs) {
             ProjectConfig {
                 project: ProjectInfo {
                     name: "Untitled".into(),
+                    scene: None,
                 },
                 mount: vec![MountConfig {
                     name: "assets".into(),
                     path: "./assets".into(),
                     default: true,
+                    scan: false,
                     r#type: "filesystem".into(),
                     host: None,
                     port: None,
@@ -179,4 +213,25 @@ pub fn load_or_default(path: &Path) -> (ProjectConfig, Vfs) {
 
     let vfs = build_vfs(&config);
     (config, vfs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The optional `[project] scene` key (#2): parsed when present, `None`
+    /// when absent (old project files stay valid).
+    #[test]
+    fn project_scene_key_is_optional() {
+        let with: ProjectConfig =
+            toml::from_str("[project]\nname = \"x\"\nscene = \"game/scenes/level1.scene\"\n")
+                .expect("parse");
+        assert_eq!(
+            with.project.scene.as_deref(),
+            Some("game/scenes/level1.scene")
+        );
+
+        let without: ProjectConfig = toml::from_str("[project]\nname = \"x\"\n").expect("parse");
+        assert_eq!(without.project.scene, None);
+    }
 }

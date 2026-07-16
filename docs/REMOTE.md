@@ -56,7 +56,7 @@ Claude): текстовый протокол, через который можн
 | Команда | Параметры | Ответ |
 |---|---|---|
 | `hello` | — | `proto`, `commands` |
-| `state` | — | `entities: [(entity, name, parent, components)]`, `selection` |
+| `state` | — | `scene` (текущая сцена, `"mount/path"` \| None), `entities: [(entity, name, parent, components)]`, `selection`, `game: Some((hosted, behavior_override, stale, rebuilding, restart_required, schema_diverged))` — статус захосченной игры (ADR-037): `hosted: "static"\|"dylib"\|"none"`; `stale` — исходники игры менялись после последней сборки; `rebuilding` — фоновый `cargo build` идёт; `restart_required` — свежий cdylib собран против изменившегося движка (fingerprint-гейт отказал в загрузке) — нужен рестарт бинаря (Tier 2); `schema_diverged` — схемы компонентов behavior-модуля разошлись со статическим образом (play на новом коде, авторинг новых полей — после рестарта) |
 | `inspect` | `entity` | `components: [(имя, натуральный RON)]` |
 | `edit_component` | `entity`, `component`, `data: <RON>` | снапшот компонента после применения |
 | `add_component` / `remove_component` | `entity`, `component` | ack после применения |
@@ -69,13 +69,19 @@ Claude): текстовый протокол, через который можн
 | `shutdown` | — | ack; редактор завершается |
 | `action` | `name`, `params: (…)` | ack после применения; spawn-действия возвращают `entities` |
 | `actions` | — | `[(имя, usage)]` — интроспекция реестра |
-| `new_asset` | `source`, `kind`, `dir?`, `name?` | `guid`, `path` — файл + запись в DB |
+| `new_asset` | `source`, `kind`, `dir?`, `name?` | `guid`, `path` — файл + запись в DB; `kind: "scene"` создаёт валидную пустую сцену (открывается через `load_scene`) |
 | `save_prefab` | `entity`, `path` | ack — поддерево записано как `.prefab` (RON) |
 | `spawn_prefab` | `path`, `parent?` | `entities` после применения (undoable) |
+| `save_scene` | `path?` (default — текущая сцена) | `path` — контент мира (без editor-сущностей) записан как `.scene`; путь становится текущей сценой |
+| `load_scene` | `path` | ack после применения (undoable) — замена контента мира на сцену; editor-сущности переживают, undo возвращает прежний контент |
 | `pick` | `x`, `y` | `entity: Some("i@t")` \| `None` — сущность под точкой |
 | `pick_rect` | `x`, `y`, `w`, `h` | `entities` — все сущности в регионе |
 | `set_gizmo_mode` | `mode: "translate"|"rotate"|"scale"` | ack — переключение режима трансформ-гизмо (не undoable) |
-| `reload_game` | — | ack = запрос принят; тёплый reload игрового модуля выполняется между кадрами (нужен `REDLILIUM_GAME=<cdylib>` при запуске и состояние Stopped; результат — в логе редактора). Сцена восстанавливается из снапшота, undo/selection сбрасываются, entity id меняются — после reload начинайте со `state` |
+| `reload_game` | — | ack = запрос принят. **Game-owned редактор с behavior_reload (ADR-037 Tier 1):** фоновая пересборка cdylib игры фиксированной инвокацией; по зелёному билду behavior-модуль свапается (живая play-сессия останавливается), следующий `play` идёт на новом коде, мир редактирования не трогается вовсе. Прогресс/результат — поля `game` в `state` (`rebuilding` → `behavior_override`/`restart_required`) и лог. Красный билд — старый модуль живёт, ошибки компиляции в `logs`. **Legacy dylib-хостинг (`REDLILIUM_GAME`):** тёплый reload между кадрами — сцена восстанавливается из снапшота, undo/selection сбрасываются, entity id меняются, после reload начинайте со `state`. Статический хостинг без behavior_reload — ошибка (Tier 2: перезапустите бинарь) |
+| `play` | — | ack = запрос принят; между кадрами собирается **play-мир** — полная игровая композиция (та же, что в standalone-билде) из захосченной игры (статически слинкованной в game-owned бинарь редактора, ADR-037, либо `REDLILIUM_GAME`-модуля), стартовая сцена = текущая сцена редактора (или меню игры, если сцена не открыта). Пока сессия жива, `screenshot` снимает камеру play-мира; `state`/`inspect` продолжают читать мир редактирования |
+| `pause` / `resume` | — | ack; пауза = игровые расписания не тикают (игровое время заморожено), а в play-мир инстанцируется инспекционный оверлей: EDITOR-сущности мира редактирования (данными, с флагами) + облётная камера — `screenshot` на паузе снимает её. Resume сносит оверлей целиком; поза облёта переживает паузы как значение |
+| `stop` | — | ack; play-мир дропается целиком, мир редактирования не был затронут |
+| `restart` | — | ack = запрос принят; Tier-2 exec-restart (ADR-037): редактор пишет session carry (текущая сцена + поза камеры) в `.redlilium/session.ron`, сворачивает цикл и exec-ает свежий бинарь с теми же argv. Соединение рвётся — переподключайтесь по пере-опубликованному `.redlilium/editor.port` (unix: PID сохраняется, это exec). Несохранённые правки сцены, undo и selection не переживают; в оконном редакторе запрос проходит через диалог unsaved changes |
 
 Координаты пикинга — в **пространстве картинки сцены** (те же пиксели, что
 выдаёт `screenshot`): агент смотрит на скриншот и тыкает в него. Резолв через
@@ -113,8 +119,8 @@ dt = 1/60; после нескольких спокойных тиков он б
 ## Эволюция
 
 Протокол версионируется числом в `hello`; развитие аддитивное. Зарезервировано
-на следующие срезы: `pick x y` (сущность под точкой через picking-пасс),
-`input` (инъекция ввода), `new_asset` / `drop_asset`, `play` / `stop`.
+на следующие срезы: `input` (инъекция ввода в play-мир), `drop_asset`,
+инспекция play-мира (remote-канал, направленный на игровой мир).
 
 ## Реестр действий
 

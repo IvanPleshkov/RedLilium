@@ -99,54 +99,6 @@ pub(crate) fn condition_checker<R: ConditionResult + 'static>(
     result.downcast_ref::<R>().is_some_and(|r| r.passed())
 }
 
-// ============================================================================
-// Run Conditions for Editor/Game Schedule Separation (#67)
-// ============================================================================
-
-/// Condition system: runs only when the game is active (Playing or Paused).
-/// Used to gate game systems from running in stopped/editor context.
-pub struct GameActiveCondition;
-
-impl crate::system::System for GameActiveCondition {
-    type Result = Condition<()>;
-
-    fn run<'a>(
-        &'a self,
-        ctx: &'a crate::system::SystemContext<'a>,
-    ) -> Result<Self::Result, crate::system::SystemError> {
-        ctx.lock::<(crate::query::Res<super::schedule::GameActive>,)>()
-            .execute(|(game_active,)| {
-                if game_active.0 {
-                    Ok(Condition::True(()))
-                } else {
-                    Ok(Condition::False)
-                }
-            })
-    }
-}
-
-/// Condition system: runs only when the game is NOT active (Stopped, editor context).
-/// Used to gate editor-only systems like DrawGrid, DrawSelectionAabb.
-pub struct NotGameActiveCondition;
-
-impl crate::system::System for NotGameActiveCondition {
-    type Result = Condition<()>;
-
-    fn run<'a>(
-        &'a self,
-        ctx: &'a crate::system::SystemContext<'a>,
-    ) -> Result<Self::Result, crate::system::SystemError> {
-        ctx.lock::<(crate::query::Res<super::schedule::GameActive>,)>()
-            .execute(|(game_active,)| {
-                if !game_active.0 {
-                    Ok(Condition::True(()))
-                } else {
-                    Ok(Condition::False)
-                }
-            })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

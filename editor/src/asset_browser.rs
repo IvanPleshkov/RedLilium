@@ -57,6 +57,10 @@ pub struct AssetBrowser {
     /// Pending asset creation from the "New" context menu: (source, dir, kind).
     /// Drained by the editor, which writes the file + DB record.
     pending_new: Option<(String, String, String)>,
+    /// Pending scene open from a double-clicked `.scene` file: (source, path).
+    /// Drained by the editor, which reads the file and queues the undoable
+    /// scene replace (#112).
+    pending_open_scene: Option<(String, String)>,
     /// Active inline rename: (source, file_path, edit_buffer).
     renaming: Option<(String, String, String)>,
     /// Committed rename to apply: (source, old_path, new_name). Drained by editor.
@@ -98,6 +102,7 @@ impl AssetBrowser {
             pending_component_export: None,
             pending_prefab_export: None,
             pending_new: None,
+            pending_open_scene: None,
             renaming: None,
             pending_rename: None,
             pending_move: None,
@@ -158,6 +163,12 @@ impl AssetBrowser {
     /// Take the pending "New asset" intent: `(source, dir, kind)`, if any.
     pub fn take_pending_new(&mut self) -> Option<(String, String, String)> {
         self.pending_new.take()
+    }
+
+    /// A `.scene` file the user double-clicked, to be opened as the edited
+    /// scene: `(source, path)`. Drained by the editor (#112).
+    pub fn take_pending_open_scene(&mut self) -> Option<(String, String)> {
+        self.pending_open_scene.take()
     }
 
     /// After the editor creates an asset, refresh the directory listing and select
@@ -570,6 +581,7 @@ impl AssetBrowser {
         bg.context_menu(|ui| {
             ui.menu_button("New", |ui| {
                 for (label, kind) in [
+                    ("Scene", "scene"),
                     ("Vertex Layout", "vertex_layout"),
                     ("Material", "material"),
                     ("Material Instance", "material_instance"),
@@ -672,6 +684,11 @@ impl AssetBrowser {
             // Select a file as an asset (drives the asset inspector).
             if !entry.is_dir && response.clicked() {
                 self.selected_file = Some((source.clone(), file_path.clone()));
+            }
+
+            // Double-click a scene asset → open it as the edited scene (#112).
+            if !entry.is_dir && response.double_clicked() && entry.name.ends_with(".scene") {
+                self.pending_open_scene = Some((source.clone(), file_path.clone()));
             }
 
             if response.double_clicked() && entry.is_dir {

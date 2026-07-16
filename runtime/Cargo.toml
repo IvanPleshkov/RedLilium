@@ -14,13 +14,15 @@ redlilium-graphics = { path = "../graphics", default-features = false, features 
     "dummy",
     "wgpu-backend",
 ] }
-redlilium-ecs = { path = "../ecs", features = ["rendering"] }
+redlilium-ecs = { path = "../ecs", features = ["rendering", "serialize-ron"] }
 redlilium-assets = { path = "../assets" }
 redlilium-vfs = { path = "../vfs" }
 
 winit = { workspace = true }
 log = { workspace = true }
 bytemuck = { workspace = true }
+# The egui controller's app slot (ArcEguiApp) is parking_lot-typed.
+parking_lot = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 redlilium-graphics = { path = "../graphics" }

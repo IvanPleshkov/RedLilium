@@ -34,14 +34,9 @@ pub fn draw_play_mode_indicator(ui: &mut egui::Ui, play_state: PlayState) {
 
 /// Draw the play/pause/stop controls inline in a horizontal UI region.
 ///
-/// Used inside the titlebar / menu bar. Returns an action if a button was clicked,
-/// or None if no button was clicked.
-/// If `paused_due_to_panic` is true, the Resume button is disabled.
-pub fn draw_play_controls(
-    ui: &mut egui::Ui,
-    play_state: PlayState,
-    paused_due_to_panic: bool,
-) -> Option<PlayAction> {
+/// Used inside the titlebar / menu bar. Returns an action if a button was
+/// clicked, or None if no button was clicked.
+pub fn draw_play_controls(ui: &mut egui::Ui, play_state: PlayState) -> Option<PlayAction> {
     match play_state {
         PlayState::Editing => {
             if ui.button("\u{25B6} Play").clicked() {
@@ -60,9 +55,7 @@ pub fn draw_play_controls(
             None
         }
         PlayState::Paused => {
-            let resume_btn =
-                ui.add_enabled(!paused_due_to_panic, egui::Button::new("\u{25B6} Resume"));
-            if resume_btn.clicked() {
+            if ui.button("\u{25B6} Resume").clicked() {
                 return Some(PlayAction::Resume);
             }
             if ui.button("\u{23F9} Stop").clicked() {
@@ -71,6 +64,70 @@ pub fn draw_play_controls(
             None
         }
     }
+}
+
+/// Tier-1 build status for the titlebar indicator (ADR-037) — a compact
+/// mirror of `remote_commands::GameStatus`'s behavior-reload fields.
+#[derive(Debug, Clone, Copy)]
+pub struct GameBuildStatus {
+    pub stale: bool,
+    pub rebuilding: bool,
+    pub restart_required: bool,
+    pub schema_diverged: bool,
+}
+
+/// What the user asked for through the game-build indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameBuildAction {
+    /// Rebuild the game cdylib (Tier 1).
+    Rebuild,
+    /// Exec-restart the editor with session carry (Tier 2).
+    Restart,
+}
+
+/// Draw the game-build indicator: a rebuild button when sources went stale,
+/// progress while cargo runs, a restart button when only a process restart
+/// helps, and the schema-divergence warning.
+pub fn draw_game_build_indicator(
+    ui: &mut egui::Ui,
+    status: GameBuildStatus,
+) -> Option<GameBuildAction> {
+    if status.restart_required {
+        if ui
+            .button("\u{27F3} Restart editor")
+            .on_hover_text(
+                "The rebuilt game was compiled against a changed engine (fingerprint \
+                 mismatch) — restart the editor to pick everything up (scene and camera \
+                 pose carry over)",
+            )
+            .clicked()
+        {
+            return Some(GameBuildAction::Restart);
+        }
+        return None;
+    }
+    if status.rebuilding {
+        ui.spinner();
+        ui.colored_label(egui::Color32::from_rgb(200, 180, 50), "building game…");
+        return None;
+    }
+    let mut action = None;
+    if status.stale
+        && ui
+            .button("\u{27F3} Rebuild game")
+            .on_hover_text("Game sources changed — rebuild the cdylib for the next Play")
+            .clicked()
+    {
+        action = Some(GameBuildAction::Rebuild);
+    }
+    if status.schema_diverged {
+        ui.colored_label(egui::Color32::from_rgb(200, 180, 50), "\u{26A0} schemas")
+            .on_hover_text(
+                "Behavior module's component schemas diverged from the editor's static image: \
+                 play runs the new code, authoring the changed fields needs an editor restart",
+            );
+    }
+    action
 }
 
 /// Draw the gizmo mode switch (W/E/R shortcuts do the same); returns the

@@ -63,7 +63,7 @@ static STD_ASSETS: &[(&str, &[u8])] = &[
     ),
 ];
 
-fn pack_for(dir: &str) -> Option<&'static [(&'static str, &'static [u8])]> {
+fn pack_for(dir: &str) -> Option<crate::EmbeddedPack> {
     match dir {
         "std-assets" => Some(STD_ASSETS),
         _ => None,
@@ -72,21 +72,33 @@ fn pack_for(dir: &str) -> Option<&'static [(&'static str, &'static [u8])]> {
 
 /// A [`MemoryProvider`] populated with the embedded pack for `dir`, or `None` if
 /// no pack is embedded for that mount (e.g. an empty `project-assets`). `dir` is
-/// the mount's source directory as configured in `GameConfig::mounts`.
+/// the mount's source directory as configured in `GameConfig::mounts`. Game
+/// packs supplied through `GameConfig::embedded_packs` (#108) take this path
+/// via [`provider_from`] instead.
 pub fn provider_for(dir: &str) -> Option<MemoryProvider> {
-    let files = pack_for(dir)?;
+    pack_for(dir).map(provider_from)
+}
+
+/// A [`MemoryProvider`] populated with the given pack table (a game pack from
+/// `GameConfig::embedded_packs`).
+pub fn provider_from(files: crate::EmbeddedPack) -> MemoryProvider {
     let provider = MemoryProvider::new();
     for &(path, bytes) in files {
         provider.insert(path, bytes.to_vec());
     }
-    Some(provider)
+    provider
 }
 
 /// The embedded `assets.db` (RON text) for `dir`, or `None` if not embedded.
 /// Read directly (not through the async VFS) so `EngineContext::new` can merge
 /// the database synchronously, mirroring the native `std::fs` path.
 pub fn assets_db_text(dir: &str) -> Option<String> {
-    let files = pack_for(dir)?;
+    db_text_from(pack_for(dir)?)
+}
+
+/// The `assets.db` (RON text) inside the given pack table, or `None` if the
+/// pack does not carry one.
+pub fn db_text_from(files: crate::EmbeddedPack) -> Option<String> {
     let bytes = files
         .iter()
         .find(|(p, _)| *p == "assets.db")

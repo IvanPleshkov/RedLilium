@@ -1,9 +1,8 @@
-use redlilium_ecs::{PlayModeAware, SnapshotResource};
+use redlilium_ecs::SnapshotResource;
 use serde::{Deserialize, Serialize};
 
 /// Deterministic PRNG for reproducible gameplay. Uses PCG-like algorithm.
-/// Implements PlayModeAware to reset to seed on Play.
-/// Implements SnapshotResource to restore state on Stop.
+/// Implements SnapshotResource so warm-restart reload restores its state.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct GameRNG {
     seed: u64,
@@ -35,16 +34,4 @@ impl GameRNG {
 
 impl SnapshotResource for GameRNG {
     const NAME: &'static str = "GameRNG";
-}
-
-impl PlayModeAware for GameRNG {
-    fn on_play_start(&mut self) {
-        self.state = self.seed;
-    }
-
-    fn on_pause(&mut self) {}
-
-    fn on_resume(&mut self) {}
-
-    fn on_stop(&mut self) {}
 }

@@ -327,6 +327,39 @@ mod tests {
         );
     }
 
+    // Dropping a world must release ALL of its registrations — one decrement
+    // per type, matching record_type_source's per-type increment. (Regression:
+    // World::drop used to decrement once per *generation*, so a world with
+    // two or more types kept its dead generation "active" forever, blocking
+    // supersession on the next reload.)
+    #[test]
+    fn world_drop_releases_every_registration_of_a_generation() {
+        use crate::sync::RwLock;
+        use std::sync::Arc;
+
+        struct MarkerB;
+
+        let shared_registry = Arc::new(RwLock::new(crate::GameGenerationRegistry::new()));
+        let gen1 = shared_registry.write().allocate_generation();
+
+        {
+            let mut world = World::new();
+            world.insert_resource_shared(shared_registry.clone());
+            // TWO types under the same generation.
+            world.with_registration_source(gen1, |w| {
+                w.register_component::<Marker>();
+                w.register_component::<MarkerB>();
+            });
+            assert!(shared_registry.read().is_generation_active(gen1.0));
+        } // world drops here
+
+        assert!(
+            !shared_registry.read().is_generation_active(gen1.0),
+            "generation must be dead once the only world holding its \
+             registrations is dropped"
+        );
+    }
+
     // If a generation is still active (has registrations), a conflicting
     // re-registration should panic — this is the fail-fast that prevents UB.
     #[test]

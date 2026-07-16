@@ -51,9 +51,29 @@ impl EngineContext {
     /// load their `assets.db` files into one merged database, and create the
     /// GPU resource managers.
     ///
+    /// On wasm, a mount whose source dir has an entry in `embedded_packs`
+    /// (`GameConfig::embedded_packs`, #108) is served from that in-memory
+    /// table; otherwise the built-in `std-assets` embed (or an empty provider)
+    /// is used. Native ignores `embedded_packs` — mounts come off the
+    /// filesystem.
+    ///
     /// Unlike the editor, the runtime does not scan mounts or persist the
     /// database — a shipped game consumes the committed `assets.db` as-is.
-    pub fn new(device: Arc<GraphicsDevice>, mounts: &[(&'static str, &'static str)]) -> Self {
+    pub fn new(
+        device: Arc<GraphicsDevice>,
+        mounts: &[(&'static str, &'static str)],
+        embedded_packs: &[(&'static str, crate::EmbeddedPack)],
+    ) -> Self {
+        // Referenced only from the wasm branches below; native mounts come off
+        // the filesystem.
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+        let embedded = |dir: &str| -> Option<crate::EmbeddedPack> {
+            embedded_packs
+                .iter()
+                .find(|&&(d, _)| d == dir)
+                .map(|&(_, files)| files)
+        };
+
         let mut vfs = Vfs::new();
         for &(name, dir) in mounts {
             #[cfg(not(target_arch = "wasm32"))]
@@ -64,11 +84,26 @@ impl EngineContext {
             #[cfg(target_arch = "wasm32")]
             vfs.mount(
                 name,
-                crate::embedded_assets::provider_for(dir).unwrap_or_default(),
+                match embedded(dir) {
+                    Some(files) => crate::embedded_assets::provider_from(files),
+                    None => crate::embedded_assets::provider_for(dir).unwrap_or_default(),
+                },
             );
         }
         let ctx = Self::with_vfs(device, vfs);
         for &(name, dir) in mounts {
+            #[cfg(target_arch = "wasm32")]
+            if let Some(files) = embedded(dir) {
+                match crate::embedded_assets::db_text_from(files) {
+                    Some(text) => {
+                        if let Err(e) = ctx.asset_db.write().merge_ron(name, &text) {
+                            log::error!("failed to parse {name} assets.db: {e}");
+                        }
+                    }
+                    None => log::warn!("embedded pack '{name}' has no assets.db ({dir})"),
+                }
+                continue;
+            }
             ctx.load_mount_db(name, dir);
         }
         ctx
@@ -87,6 +122,7 @@ impl EngineContext {
             .with_loader::<MaterialLoader>()
             .with_loader::<MaterialInstanceLoader>()
             .with_loader::<TextureLoader>()
+            .with_loader::<redlilium_ecs::SceneLoader>()
             .build();
 
         Self {

@@ -22,8 +22,8 @@ pub use function::{
 };
 pub use par_for_each::ParConfig;
 pub use schedule::{
-    FixedUpdate, GameActive, PostUpdate, PreUpdate, Render, ScheduleId, ScheduleLabel, Schedules,
-    Startup, Time, Update,
+    FixedUpdate, PostUpdate, PreUpdate, Render, ScheduleId, ScheduleLabel, Schedules, Startup,
+    Time, Update,
 };
 pub use state::{ApplyStateTransition, NextState, State, StateTransition, States, init_state};
 pub use traits::{

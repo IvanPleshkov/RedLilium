@@ -1,27 +1,29 @@
 //! Hosting a game module inside the editor (#58, ADR-020 slice C3).
 //!
-//! The editor owns a long-lived world with editor-only state (undo history,
-//! selection, remote transport, GPU-backed renderers). A game module's
-//! `Plugin::build` plants systems, component registrations, and closures —
-//! all pointing into the module's mapped image — into that world. A reload
-//! therefore cannot swap the dylib under a live world.
+//! The editing world hosts **only the game's type registrations**
+//! (`Plugin::register_types`): the inspector and scene serialization must
+//! understand game components, but no game system, resource, or entity ever
+//! enters the editing world — running the game is the play world's job
+//! (EDITOR_REBUILD.md). Even so, registrations are `fn` pointers into the
+//! module's mapped image (component meta, serialize/restore hooks, storage
+//! drop glue), so a reload still cannot swap the dylib under a live world.
 //!
 //! The reload here follows the **proven `App::reload` shape** instead of
 //! surgical in-place unloading: capture a whole-world snapshot, tear the old
 //! world down *while the old image is still mapped*, swap the module (from a
 //! fresh temp copy — see [`GameModule::load_fresh_copy`]), stand up a
 //! replacement world (resources + schedules, zero entities), re-run
-//! `Plugin::build` under a fresh [`SourceId`] generation, and restore the
-//! snapshot. Editor entities (camera pose included) ride the same snapshot;
-//! shell-owned resources (remote transport, egui, debug renderer) are
-//! *adopted* across as the same `Arc`s. Undo history and selection reset by
-//! design.
+//! `Plugin::register_types` under a fresh [`SourceId`] generation, and restore
+//! the snapshot. Editor entities (camera pose included) ride the same
+//! snapshot; shell-owned resources (remote transport, egui, debug renderer)
+//! are *adopted* across as the same `Arc`s. Undo history and selection reset
+//! by design.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use redlilium_ecs::{Camera, EcsRunner, Entity, PlayControl, PlayState, SourceId, World};
-use redlilium_runtime::{App, EngineContext, GameModule};
+use redlilium_ecs::{Camera, EcsRunner, Entity, SourceId, World};
+use redlilium_runtime::{EngineContext, GameModule, GameModuleError};
 
 use crate::core::{EditorWorld, EditorWorldParams, create_editor_world_base, spawn_editor_camera};
 use crate::scene_view::SceneViewState;
@@ -41,6 +43,11 @@ const QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `EditorWorld` and tear worlds down first (reload does this internally;
 /// shutdown relies on drop order in the shell).
 pub struct GameHost {
+    /// Tier-1 behavior override (ADR-037): a cdylib of the same game whose
+    /// plugin boots play worlds, while authoring stays on `module`. Declared
+    /// before `module` so it drops first (its play worlds are torn down by
+    /// the shells before any swap/drop).
+    behavior: Option<BehaviorModule>,
     /// `None` only transiently inside [`swap`](Self::swap).
     module: Option<GameModule>,
     generation: SourceId,
@@ -51,10 +58,34 @@ pub struct GameHost {
     temp_path: Option<PathBuf>,
 }
 
+/// The Tier-1 module: play worlds boot from it; the editing world never
+/// sees it. It shares the authoring generation — the cdylib and the static
+/// rlib come from one rustc invocation, so their `TypeId`s are identical
+/// (see [`GameHost::load_behavior`]).
+struct BehaviorModule {
+    module: GameModule,
+    /// Mapped temp copy (`None` for the static test seam).
+    temp_path: Option<PathBuf>,
+}
+
+/// How the behavior module's component schemas compare to the authoring
+/// (static) image's — by name, via the serializer's schema hashes; `TypeId`s
+/// are image-specific and useless across the boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SchemaVerdict {
+    /// Same components, same schema hashes: authoring fully covers the
+    /// behavior module — the Tier-1 hot loop.
+    Matching,
+    /// These components differ (missing on one side or hash mismatch): play
+    /// runs the new code, but authoring the changed fields needs a Tier-2
+    /// editor restart.
+    Diverged(Vec<String>),
+}
+
 impl GameHost {
-    /// Load a game cdylib from `path` (via a unique temp copy), register its
-    /// types under a fresh generation, build its systems into `ew`, and spawn
-    /// its scene.
+    /// Load a game cdylib from `path` (via a unique temp copy) and register
+    /// its types into `ew` under a fresh generation. Nothing else of the game
+    /// enters the editing world — no systems, no resources, no scene.
     ///
     /// # Safety
     ///
@@ -65,19 +96,19 @@ impl GameHost {
         path: impl Into<PathBuf>,
         engine: &EngineContext,
         ew: &mut EditorWorld,
-        aspect: f32,
     ) -> Result<Self, String> {
         let path = path.into();
         let (module, temp_path) =
             unsafe { GameModule::load_fresh_copy(&path) }.map_err(|e| e.to_string())?;
         let generation = engine.generation_registry().write().allocate_generation();
         let host = Self {
+            behavior: None,
             module: Some(module),
             generation,
             source_path: Some(path),
             temp_path: Some(temp_path),
         };
-        host.build_into(ew, aspect, true);
+        host.register_into(ew);
         log::info!(
             "game module loaded (generation {:?}, image {:?})",
             host.generation,
@@ -86,24 +117,23 @@ impl GameHost {
         Ok(host)
     }
 
-    /// Host a statically linked plugin (no dylib). The generation machinery
-    /// runs identically — tests use this to exercise the reload flow without
-    /// building a cdylib.
-    #[cfg_attr(not(test), allow(dead_code))] // test seam + future built-in games
+    /// Host a statically linked plugin (no dylib): the production path for a
+    /// game-owned editor binary (ADR-037), and the reload-flow test seam. The
+    /// generation machinery runs identically to the dylib path.
     pub fn from_static(
         plugin: Box<dyn redlilium_runtime::Plugin>,
         engine: &EngineContext,
         ew: &mut EditorWorld,
-        aspect: f32,
     ) -> Self {
         let generation = engine.generation_registry().write().allocate_generation();
         let host = Self {
+            behavior: None,
             module: Some(GameModule::from_static(plugin)),
             generation,
             source_path: None,
             temp_path: None,
         };
-        host.build_into(ew, aspect, true);
+        host.register_into(ew);
         host
     }
 
@@ -113,32 +143,164 @@ impl GameHost {
         self.generation
     }
 
-    /// Re-run `Plugin::build` (and optionally `spawn_scene`) against `ew`,
-    /// with registrations scoped to this host's generation. Mirrors
-    /// `App::reload`'s scoped-build: the world and schedules are moved into a
-    /// temporary [`App`] for the plugin's benefit and moved back after.
-    pub fn build_into(&self, ew: &mut EditorWorld, aspect: f32, spawn_scene: bool) {
+    /// Load a freshly built game cdylib as the **behavior module** (Tier 1,
+    /// ADR-037): subsequent play worlds boot from it; authoring stays on the
+    /// static module and the editing world is not touched. Returns how the
+    /// dylib's component schemas compare to the authoring image's.
+    ///
+    /// The behavior module registers under the **authoring generation**, not
+    /// a fresh one: the cdylib and the static rlib come from the same rustc
+    /// invocation of the game crate, so their `TypeId`s are **identical** —
+    /// a separate generation would make the registry's cross-generation
+    /// conflict check fire on the first play-world registration (an
+    /// uncatchable cross-image panic → process abort). Same `TypeId`s, same
+    /// generation: registration is idempotent. Dylib-image liveness is
+    /// enforced structurally instead (shells stop the play session before
+    /// any swap; the host outlives every world).
+    ///
+    /// # Errors
+    ///
+    /// [`GameModuleError::FingerprintMismatch`] /
+    /// [`GameModuleError::EngineMetadataDrift`] mean the cdylib was built
+    /// against a **different engine** than this running binary — the caller
+    /// must surface "restart required" (Tier 2); swapping would be unsound.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`GameModule::load`]; the fingerprint + TypeId-probe
+    /// gates run inside. The editor building the cdylib itself with the
+    /// fixed invocation (`behavior_reload::run_build`) is what makes the
+    /// same-build contract hold in practice.
+    pub unsafe fn load_behavior(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<SchemaVerdict, GameModuleError> {
+        let (module, temp_path) = unsafe { GameModule::load_fresh_copy(path.as_ref()) }?;
+        let verdict = self.schema_verdict(module.plugin());
+        self.drop_behavior();
+        log::info!(
+            "behavior module loaded (generation {:?}, schemas {})",
+            self.generation,
+            match &verdict {
+                SchemaVerdict::Matching => "matching".to_owned(),
+                SchemaVerdict::Diverged(names) => format!("DIVERGED: {names:?}"),
+            }
+        );
+        self.behavior = Some(BehaviorModule {
+            module,
+            temp_path: Some(temp_path),
+        });
+        Ok(verdict)
+    }
+
+    /// [`load_behavior`](Self::load_behavior) for a statically linked
+    /// replacement plugin — the test seam for the Tier-1 flow.
+    #[cfg_attr(not(test), allow(dead_code))] // test seam
+    pub fn set_behavior_static(
+        &mut self,
+        plugin: Box<dyn redlilium_runtime::Plugin>,
+    ) -> SchemaVerdict {
+        let module = GameModule::from_static(plugin);
+        let verdict = self.schema_verdict(module.plugin());
+        self.drop_behavior();
+        self.behavior = Some(BehaviorModule {
+            module,
+            temp_path: None,
+        });
+        verdict
+    }
+
+    /// Whether play worlds currently boot from a behavior override.
+    pub fn has_behavior(&self) -> bool {
+        self.behavior.is_some()
+    }
+
+    /// Whether the **authoring** module came from a cdylib (`REDLILIUM_GAME`
+    /// hosting) rather than a static link — decides which reload flow
+    /// `reload_game` runs (warm restart vs Tier-1 rebuild, ADR-037).
+    pub fn is_dylib(&self) -> bool {
+        self.source_path.is_some()
+    }
+
+    /// Compare the authoring module's component schemas with `behavior`'s,
+    /// by name (serializer schema hashes — the cross-image comparison; see
+    /// [`SchemaVerdict`]). Each side's `register_types` runs in a throwaway
+    /// scratch world, dropped before this returns (nothing outlives either
+    /// image).
+    fn schema_verdict(&self, behavior: &dyn redlilium_runtime::Plugin) -> SchemaVerdict {
+        let authoring = self
+            .module
+            .as_ref()
+            .expect("module present outside swap")
+            .plugin();
+        let a = plugin_schemas(authoring);
+        let b = plugin_schemas(behavior);
+        let mut diverged: Vec<String> = a
+            .iter()
+            .filter(|(name, hash)| b.get(*name) != Some(hash))
+            .map(|(name, _)| name.clone())
+            .chain(b.keys().filter(|name| !a.contains_key(*name)).cloned())
+            .collect();
+        diverged.sort();
+        diverged.dedup();
+        if diverged.is_empty() {
+            SchemaVerdict::Matching
+        } else {
+            SchemaVerdict::Diverged(diverged)
+        }
+    }
+
+    fn drop_behavior(&mut self) {
+        if let Some(behavior) = self.behavior.take() {
+            let temp = behavior.temp_path.clone();
+            // The module (and everything pointing into its image) drops
+            // before its backing file is unlinked.
+            drop(behavior);
+            if let Some(temp) = temp {
+                let _ = std::fs::remove_file(&temp);
+            }
+        }
+    }
+
+    /// Boot a play world from the hosted module: the standalone composition
+    /// ([`redlilium_runtime::App::boot`]), with the game's registrations
+    /// scoped to this host's generation — the same one the editing world
+    /// knows the types under.
+    ///
+    /// The returned world's systems point into the module's mapped image:
+    /// the host must outlive every world built from it (a reload requires
+    /// the play session stopped first).
+    pub fn boot_play_world(
+        &self,
+        engine: &EngineContext,
+        aspect: f32,
+        start_scene: Option<&str>,
+    ) -> redlilium_runtime::App {
+        // Tier-1 override first (ADR-037): behavior dylib when loaded, the
+        // authoring module otherwise — both under the authoring generation
+        // (identical `TypeId`s across the two images; see `load_behavior`).
+        let plugin = match &self.behavior {
+            Some(behavior) => behavior.module.plugin(),
+            None => self
+                .module
+                .as_ref()
+                .expect("module present outside swap")
+                .plugin(),
+        };
+        redlilium_runtime::App::boot_scoped(engine, plugin, aspect, start_scene, self.generation)
+    }
+
+    /// Run `Plugin::register_types` against `ew`'s world, scoped to this
+    /// host's generation. This is the editing world's *entire* exposure to
+    /// the game module: type registrations for inspection and serialization.
+    /// `Plugin::build`/`spawn_scene` run only in game worlds (`App::boot`).
+    pub fn register_into(&self, ew: &mut EditorWorld) {
         let module = self.module.as_ref().expect("module present outside swap");
         let mut world = std::mem::take(&mut ew.world);
-        let mut schedules = std::mem::take(&mut ew.schedules);
-        let window_input = ew.window_input.clone();
         world.with_registration_source(self.generation, |scoped| {
-            let mut app = App::from_parts(
-                std::mem::take(scoped),
-                std::mem::take(&mut schedules),
-                window_input.clone(),
-                aspect,
-            );
-            module.plugin().build(&mut app);
-            if spawn_scene {
-                module.plugin().spawn_scene(&mut app);
-            }
-            let (w, s) = app.into_parts();
-            *scoped = w;
-            schedules = s;
+            module.plugin().register_types(scoped);
         });
         ew.world = world;
-        ew.schedules = schedules;
     }
 
     /// Swap in a freshly built image: unmap the old module and load a new
@@ -183,6 +345,9 @@ impl GameHost {
 
 impl Drop for GameHost {
     fn drop(&mut self) {
+        // Behavior module (and its temp file) first — its play worlds are
+        // already gone (shell drop order).
+        self.drop_behavior();
         // Drop the mapped module before unlinking its temp file (unlinking a
         // mapped image is fine on unix, refused on Windows — order it anyway).
         self.module = None;
@@ -208,17 +373,20 @@ pub struct ReloadOptions {
 ///
 /// Sequence (the order is load-bearing, see `GameModule`'s lifetime notes):
 ///
-/// 1. refuse outside `Stopped` (play-state restore interplay is out of scope)
-/// 2. snapshot the **whole** world — editor and game entities alike
-/// 3. build the replacement world (resources + schedules, zero entities) and
+/// Callers stop the play session before reloading (both shells do) — there
+/// is no play-state check here, since Play now runs in a wholly separate
+/// world (`editor/src/play.rs`) that the caller has already dropped.
+///
+/// 1. snapshot the **whole** world — editor and game entities alike
+/// 2. build the replacement world (resources + schedules, zero entities) and
 ///    adopt shell-owned resources from the old world
-/// 4. drop the old world/history — the old image is still mapped, so game
+/// 3. drop the old world/history — the old image is still mapped, so game
 ///    storage drop glue and system destructors are sound
-/// 5. quiesce the compute pool (abort on timeout: keep the old module)
-/// 6. swap the module image (fresh temp copy, fresh generation)
-/// 7. re-run `Plugin::build` into the replacement (scene comes from the
-///    snapshot — `spawn_scene` is deliberately skipped)
-/// 8. restore the snapshot (schema-validated) and re-resolve the editor camera
+/// 4. quiesce the compute pool (abort on timeout: keep the old module)
+/// 5. swap the module image (fresh temp copy, fresh generation)
+/// 6. re-run `Plugin::register_types` into the replacement (the scene comes
+///    from the snapshot; game systems never live in the editing world)
+/// 7. restore the snapshot (schema-validated) and re-resolve the editor camera
 ///
 /// On reload the undo history and selection reset by design.
 pub fn reload_game(
@@ -230,20 +398,16 @@ pub fn reload_game(
     opts: &ReloadOptions,
     swap: impl FnOnce(&mut GameHost, &EngineContext) -> Result<(), String>,
 ) -> (EditorWorld, Result<(), String>) {
-    // 1. Only from Stopped.
-    if old.world.resource::<PlayControl>().state() != PlayState::Stopped {
-        return (old, Err("reload_game requires PlayState::Stopped".into()));
-    }
     let mut old = old;
 
-    // 2. Whole-world snapshot: editor entities (camera pose included), game
+    // 1. Whole-world snapshot: editor entities (camera pose included), game
     // entities, and opted-in snapshot resources.
     let snapshot = match old.world.serialize_world() {
         Ok(s) => s,
         Err(e) => return (old, Err(format!("snapshot capture failed: {e}"))),
     };
 
-    // 3. Replacement world. Built while the old world is still alive so
+    // 2. Replacement world. Built while the old world is still alive so
     // shell-owned resources can be adopted (same Arcs); the base world binds
     // no remote transport of its own (`remote: false` semantics come from
     // adoption), so there is no port collision.
@@ -270,16 +434,16 @@ pub fn reload_game(
         .world
         .adopt_resource_from::<redlilium_graphics::egui::EguiController>(&mut old.world);
 
-    // 4. Tear the old world down while the old image is mapped.
+    // 3. Tear the old world down while the old image is mapped.
     drop(old);
 
-    // 5. Game tasks must finish before the image unmaps (their futures'
+    // 4. Game tasks must finish before the image unmaps (their futures'
     // code lives inside it).
     let elapsed = runner.compute().quiesce(QUIESCE_TIMEOUT);
     if elapsed >= QUIESCE_TIMEOUT {
         // Fail closed: keep the old module mapped (bounded leak, no UB) and
         // rebuild the world against it so the editor stays usable.
-        host.build_into(&mut fresh, opts.aspect, false);
+        host.register_into(&mut fresh);
         let restore = restore_into(&mut fresh, &snapshot, opts.aspect);
         let msg = format!(
             "task quiescence timeout after {QUIESCE_TIMEOUT:?} — reload aborted, \
@@ -293,21 +457,21 @@ pub fn reload_game(
         return (fresh, Err(msg));
     }
 
-    // 6. Swap the image (dylib: unmap + fresh temp copy + new generation).
+    // 5. Swap the image (dylib: unmap + fresh temp copy + new generation).
     if let Err(e) = swap(host, engine) {
         // Old module still mapped (swap fails before unmapping only for
         // static hosts / IO errors after which `module` was reloaded or
         // kept). Rebuild against whatever module the host still holds.
-        host.build_into(&mut fresh, opts.aspect, false);
+        host.register_into(&mut fresh);
         let _ = restore_into(&mut fresh, &snapshot, opts.aspect);
         return (fresh, Err(format!("module swap failed: {e}")));
     }
 
-    // 7. Fresh build under the new generation; the scene comes from the
-    // snapshot, so `spawn_scene` is skipped (same contract as `App::reload`).
-    host.build_into(&mut fresh, opts.aspect, false);
+    // 6. Fresh registrations under the new generation; the scene comes from
+    // the snapshot.
+    host.register_into(&mut fresh);
 
-    // 8. Snapshot restore + camera re-resolution.
+    // 7. Snapshot restore + camera re-resolution.
     let restore = restore_into(&mut fresh, &snapshot, opts.aspect);
     (fresh, restore)
 }
@@ -332,6 +496,23 @@ fn restore_into(
     Ok(())
 }
 
+/// A plugin's component schemas by name: `register_types` into a throwaway
+/// world, then the serializer's name → schema-hash map (the only identity
+/// that survives an image boundary; `TypeId`s do not).
+fn plugin_schemas(
+    plugin: &dyn redlilium_runtime::Plugin,
+) -> std::collections::HashMap<String, redlilium_ecs::serialize::SchemaHash> {
+    let mut scratch = World::new();
+    plugin.register_types(&mut scratch);
+    match scratch.serialize_world() {
+        Ok(snapshot) => snapshot.metadata.component_schemas,
+        Err(e) => {
+            log::warn!("schema enumeration failed ({e}); treating as empty");
+            Default::default()
+        }
+    }
+}
+
 /// The restored editor camera: the EDITOR-flagged entity carrying a `Camera`.
 fn find_editor_camera(world: &World) -> Option<Entity> {
     world.iter_entities().find(|&e| {
@@ -344,70 +525,46 @@ mod tests {
     use super::*;
     use crate::core::{EditorWorldParams, create_editor_world};
     use crate::scene_view::SceneViewState;
-    use redlilium_ecs::{Component, GameActiveCondition, Update};
+    use redlilium_ecs::Component;
     use redlilium_graphics::{GraphicsInstance, TextureFormat};
     use redlilium_runtime::Plugin;
     use redlilium_vfs::Vfs;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// The hosted game's component: registered by `build`, spawned by
-    /// `spawn_scene`, serialized by its derive like any std component.
+    /// The hosted game's component: registered by `register_types`, authored
+    /// into the editing world by the editor, serialized by its derive like
+    /// any std component.
     #[derive(Clone, Component)]
     struct GameBlip {
         tag: u32,
     }
 
-    /// Game system gated on `GameActiveCondition` — counts its runs so the
-    /// test can assert the Play/Pause/Stop gating end-to-end.
-    struct GameTick(Arc<AtomicU32>);
-    impl redlilium_ecs::System for GameTick {
-        type Result = ();
-        fn run<'a>(
-            &'a self,
-            _ctx: &'a redlilium_ecs::SystemContext<'a>,
-        ) -> Result<(), redlilium_ecs::SystemError> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    /// v1 of the game module.
-    struct GameV1(Arc<AtomicU32>);
+    /// A game module under the v2 contract: `register_types` declares the
+    /// component; `build`/`spawn_scene` belong to game worlds and must never
+    /// run in the editing world.
+    struct GameV1;
     impl Plugin for GameV1 {
-        fn build(&self, app: &mut App) {
-            app.register_component::<GameBlip>();
-            let counter = self.0.clone();
-            let update = app.schedule_mut::<Update>();
-            update.add_condition(GameActiveCondition);
-            update.add(GameTick(counter));
-            update
-                .add_edge::<GameActiveCondition, GameTick>()
-                .expect("no cycle");
+        fn register_types(&self, world: &mut World) {
+            world.register_inspector::<GameBlip>();
         }
-        fn spawn_scene(&self, app: &mut App) {
-            let world = app.world_mut();
-            let e = world.spawn();
-            world.insert(e, GameBlip { tag: 7 }).unwrap();
+        fn build(&self, _app: &mut redlilium_runtime::App) {
+            panic!("build must not run in the editing world (registrations only)");
+        }
+        fn spawn_scene(&self, _app: &mut redlilium_runtime::App) {
+            panic!("spawn_scene must not run in the editing world");
         }
     }
 
-    /// v2 — "the rebuilt module": same types, same registration, no
-    /// spawn_scene on reload (the snapshot is the scene).
-    struct GameV2(Arc<AtomicU32>);
+    /// v2 — "the rebuilt module": same types, same contract.
+    struct GameV2;
     impl Plugin for GameV2 {
-        fn build(&self, app: &mut App) {
-            app.register_component::<GameBlip>();
-            let counter = self.0.clone();
-            let update = app.schedule_mut::<Update>();
-            update.add_condition(GameActiveCondition);
-            update.add(GameTick(counter));
-            update
-                .add_edge::<GameActiveCondition, GameTick>()
-                .expect("no cycle");
+        fn register_types(&self, world: &mut World) {
+            world.register_inspector::<GameBlip>();
         }
-        fn spawn_scene(&self, _app: &mut App) {
-            panic!("spawn_scene must not run on reload — the snapshot is the scene");
+        fn build(&self, _app: &mut redlilium_runtime::App) {
+            panic!("build must not run in the editing world (registrations only)");
+        }
+        fn spawn_scene(&self, _app: &mut redlilium_runtime::App) {
+            panic!("spawn_scene must not run in the editing world");
         }
     }
 
@@ -416,13 +573,116 @@ mod tests {
         blips.iter().map(|(_, b)| b.tag).collect()
     }
 
-    /// #58/#59/#62 end-to-end (static-module seam; the dylib load/temp-copy
-    /// path is exercised by `demos/src/bin/reload_harness.rs`): host a game
-    /// in the editor world, drive the full Play→Pause→Resume→Stop transition
-    /// cycle, then warm-reload the module and assert the scene (game AND
-    /// editor entities) survived into the new generation.
+    mod reshaped {
+        use redlilium_ecs::Component;
+
+        /// Same component name as `super::GameBlip`, different field layout —
+        /// models "the rebuilt game changed a component's schema".
+        #[derive(Clone, Component)]
+        pub struct GameBlip {
+            #[allow(dead_code)]
+            pub tag: u32,
+            #[allow(dead_code)]
+            pub heading: f32,
+        }
+    }
+
+    /// "The rebuilt module" with an unchanged data model.
+    struct SameSchemaGame;
+    impl Plugin for SameSchemaGame {
+        fn register_types(&self, world: &mut World) {
+            world.register_inspector::<GameBlip>();
+        }
+        fn build(&self, _app: &mut redlilium_runtime::App) {}
+    }
+
+    /// "The rebuilt module" whose `GameBlip` grew a field.
+    struct ReshapedGame;
+    impl Plugin for ReshapedGame {
+        fn register_types(&self, world: &mut World) {
+            world.register_inspector::<reshaped::GameBlip>();
+        }
+        fn build(&self, _app: &mut redlilium_runtime::App) {}
+    }
+
+    /// Marker resource for proving which plugin composed a play world.
+    struct ProbeTag(u32);
+
+    /// A game whose `build` stamps the play world with `tag`.
+    struct ProbeGame(u32);
+    impl Plugin for ProbeGame {
+        fn register_types(&self, world: &mut World) {
+            world.register_inspector::<GameBlip>();
+        }
+        fn build(&self, app: &mut redlilium_runtime::App) {
+            let tag = ProbeTag(self.0);
+            app.world_mut().insert_resource(tag);
+        }
+    }
+
+    /// Tier-1 (ADR-037): the schema diff distinguishes an unchanged data
+    /// model from a reshaped one, and play worlds boot from the behavior
+    /// override while the editing world never sees it.
     #[test]
-    fn editor_hosts_game_through_transitions_and_reload() {
+    fn behavior_override_boots_play_and_diffs_schemas() {
+        let instance = GraphicsInstance::new().expect("graphics instance");
+        let device = instance.create_device().expect("graphics device");
+        let engine = EngineContext::with_vfs(device.clone(), Vfs::new());
+        let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+        let params = EditorWorldParams {
+            remote: false,
+            egui: false,
+        };
+        let mut ew = create_editor_world(&params, &engine, &mut scene_view, 1.0);
+        let editor_entities = ew.world.iter_entities().count();
+
+        let mut host = GameHost::from_static(Box::new(ProbeGame(1)), &engine, &mut ew);
+        assert!(!host.has_behavior());
+
+        // Play boots from the authoring module before any override.
+        let app = host.boot_play_world(&engine, 1.0, None);
+        let (world, _schedules) = app.into_parts();
+        assert_eq!(world.resource::<ProbeTag>().0, 1, "authoring composition");
+        drop(world);
+
+        // Same data model → Matching; play now composes from the override.
+        let verdict = host.set_behavior_static(Box::new(ProbeGame(2)));
+        assert_eq!(verdict, SchemaVerdict::Matching, "unchanged schemas");
+        assert!(host.has_behavior());
+        let app = host.boot_play_world(&engine, 1.0, None);
+        let (world, _schedules) = app.into_parts();
+        assert_eq!(world.resource::<ProbeTag>().0, 2, "behavior composition");
+        drop(world);
+
+        // Reshaped component → Diverged, naming the component.
+        let verdict = host.set_behavior_static(Box::new(ReshapedGame));
+        match verdict {
+            SchemaVerdict::Diverged(names) => {
+                assert!(
+                    names.iter().any(|n| n.contains("GameBlip")),
+                    "diverged set names the reshaped component: {names:?}"
+                );
+            }
+            SchemaVerdict::Matching => panic!("reshaped schema must diverge"),
+        }
+        // An identical registration set again → Matching (stateless diff).
+        let verdict = host.set_behavior_static(Box::new(SameSchemaGame));
+        assert_eq!(verdict, SchemaVerdict::Matching);
+
+        // The editing world was never touched by any of it.
+        assert_eq!(
+            ew.world.iter_entities().count(),
+            editor_entities,
+            "editing world untouched by behavior swaps"
+        );
+    }
+
+    /// #58/#59 end-to-end (static-module seam; the dylib load/temp-copy path
+    /// is exercised by `demos/src/bin/reload_harness.rs`): hosting a module
+    /// gives the editing world the game's *types and nothing else*; authored
+    /// game components survive a warm reload into the new generation.
+    #[test]
+    fn editor_hosts_registrations_only_and_reloads() {
         let instance = GraphicsInstance::new().expect("graphics instance");
         let device = instance.create_device().expect("graphics device");
         let engine = EngineContext::with_vfs(device.clone(), Vfs::new());
@@ -437,64 +697,31 @@ mod tests {
         let editor_entities = ew.world.iter_entities().count();
         assert!(editor_entities > 0, "demo scene spawned");
 
-        // --- Host the game module (build + spawn_scene). ---
-        let v1_ticks = Arc::new(AtomicU32::new(0));
-        let mut host =
-            GameHost::from_static(Box::new(GameV1(v1_ticks.clone())), &engine, &mut ew, 1.0);
+        // --- Host the game module: registrations only. The plugin's
+        // build/spawn_scene panic if called, so from_static completing at all
+        // proves the editing world never runs them. ---
+        let mut host = GameHost::from_static(Box::new(GameV1), &engine, &mut ew);
         let gen1 = host.generation();
         assert_ne!(gen1, SourceId::HOST, "game types under a real generation");
-        assert_eq!(blip_tags(&ew.world), vec![7], "game scene spawned");
         assert_eq!(
             ew.world.iter_entities().count(),
-            editor_entities + 1,
-            "game added exactly its own entity"
+            editor_entities,
+            "hosting adds no entities to the editing world"
         );
 
-        let dt = 1.0 / 60.0;
-
-        // --- Full transition cycle (#62): the gated game system runs only
-        // while the game is active. ---
-        ew.schedules.run_frame(&mut ew.world, &runner, dt); // stopped
-        assert_eq!(v1_ticks.load(Ordering::SeqCst), 0, "inactive while stopped");
-
-        ew.world.resource_mut::<PlayControl>().play();
-        ew.schedules.run_frame(&mut ew.world, &runner, dt); // playing
-        assert_eq!(v1_ticks.load(Ordering::SeqCst), 1, "runs while playing");
-
-        ew.world.resource_mut::<PlayControl>().pause();
-        ew.schedules.run_frame(&mut ew.world, &runner, dt); // paused
-        assert_eq!(
-            v1_ticks.load(Ordering::SeqCst),
-            2,
-            "game systems keep running while paused (freeze is zero game-time)"
-        );
-
-        ew.world.resource_mut::<PlayControl>().resume();
-        ew.schedules.run_frame(&mut ew.world, &runner, dt); // playing again
-        assert_eq!(v1_ticks.load(Ordering::SeqCst), 3, "runs after resume");
-
-        ew.world.resource_mut::<PlayControl>().stop();
-        ew.schedules.run_frame(&mut ew.world, &runner, dt); // stopped
-        let ticks_at_stop = v1_ticks.load(Ordering::SeqCst);
-        ew.schedules.run_frame(&mut ew.world, &runner, dt);
-        assert_eq!(
-            v1_ticks.load(Ordering::SeqCst),
-            ticks_at_stop,
-            "gated off after stop"
-        );
-        assert_eq!(
-            blip_tags(&ew.world),
-            vec![7],
-            "scene intact after the cycle"
-        );
+        // The type is genuinely known: the editor can author a game component
+        // and a frame ticks without any game system existing.
+        let e = ew.world.spawn();
+        ew.world.insert(e, GameBlip { tag: 7 }).unwrap();
+        ew.schedules.run_frame(&mut ew.world, &runner, 1.0 / 60.0);
+        assert_eq!(blip_tags(&ew.world), vec![7], "authored game component");
 
         // --- Warm reload: swap in "the rebuilt module" (v2). ---
-        let v2_ticks = Arc::new(AtomicU32::new(0));
         let opts = ReloadOptions {
             params,
             aspect: 1.0,
         };
-        let (mut ew, result) = reload_game(
+        let (ew, result) = reload_game(
             &mut host,
             ew,
             &engine,
@@ -502,7 +729,7 @@ mod tests {
             &runner,
             &opts,
             |host, engine| {
-                host.swap_static(Box::new(GameV2(v2_ticks.clone())), engine);
+                host.swap_static(Box::new(GameV2), engine);
                 Ok(())
             },
         );
@@ -513,7 +740,7 @@ mod tests {
         assert_eq!(
             blip_tags(&ew.world),
             vec![7],
-            "game scene restored, not respawned"
+            "authored game component restored, not respawned"
         );
         assert_eq!(
             ew.world.iter_entities().count(),
@@ -533,20 +760,6 @@ mod tests {
                 .entities()
                 .is_empty(),
             "selection reset"
-        );
-
-        // The new module's systems are live: play drives v2's counter.
-        ew.world.resource_mut::<PlayControl>().play();
-        ew.schedules.run_frame(&mut ew.world, &runner, dt);
-        assert_eq!(
-            v2_ticks.load(Ordering::SeqCst),
-            1,
-            "v2 systems run after reload"
-        );
-        assert_eq!(
-            v1_ticks.load(Ordering::SeqCst),
-            ticks_at_stop,
-            "v1 systems are gone"
         );
     }
 }

@@ -1,0 +1,21 @@
+(
+    version: 1,
+    entries: [
+        (
+            guid: ("548da5e1-2292-5a93-a2fd-4630b1b9535d"),
+            path: "scenes/level1.scene",
+            kind: "scene",
+            source_hash: 1478657045609987651,
+            settings: None,
+            references: {},
+        ),
+        (
+            guid: ("188cc368-f448-59f6-8094-ef0c0f20f593"),
+            path: "scenes/menu.scene",
+            kind: "scene",
+            source_hash: 4135910281776564719,
+            settings: None,
+            references: {},
+        ),
+    ],
+)

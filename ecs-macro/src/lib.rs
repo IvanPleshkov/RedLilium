@@ -1,6 +1,17 @@
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{ToTokens, quote};
 use syn::{Data, DeriveInput, Fields, Meta, parse_macro_input};
+
+/// FNV-1a 64-bit — a small, dependency-free, deterministic content hash for
+/// the generated `schema_hash` (same construction as the engine build id).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
 
 /// Derive the `Component` trait with automatic inspector UI, entity collection,
 /// entity remapping, and serialization.
@@ -58,6 +69,58 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
             schema_version = val;
         }
     }
+
+    // Deterministic schema hash over the serialized shape: schema version +
+    // visible field names and type tokens, in declaration order. Two images
+    // compiled from the same source produce the same hash; a reshaped
+    // component (field added/removed/retyped/reordered) shifts it. This is
+    // the name-keyed, cross-image schema identity (`TypeId`s are useless
+    // across images) — the editor's Tier-1 behavior diff reads it (ADR-037).
+    // `#[skip_serialization]` components keep the trait's empty default
+    // (nothing serialized → no schema to compare).
+    let schema_hash_body = if skip_serialization {
+        quote! {}
+    } else {
+        let descriptor = match &input.data {
+            Data::Struct(data) => {
+                let fields_desc = match &data.fields {
+                    Fields::Named(fields) => fields
+                        .named
+                        .iter()
+                        .filter(|f| {
+                            !f.ident
+                                .as_ref()
+                                .is_some_and(|id| id.to_string().starts_with('_'))
+                        })
+                        .map(|f| {
+                            format!(
+                                "{}:{}",
+                                f.ident.as_ref().expect("named field"),
+                                f.ty.to_token_stream()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                    Fields::Unnamed(fields) => fields
+                        .unnamed
+                        .iter()
+                        .map(|f| f.ty.to_token_stream().to_string())
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                    Fields::Unit => "unit".to_owned(),
+                };
+                format!("v{schema_version}|{fields_desc}")
+            }
+            // Non-structs error out below; the value is never emitted.
+            _ => String::new(),
+        };
+        let hash_hex = format!("{:016x}", fnv1a(descriptor.as_bytes()));
+        quote! {
+            fn schema_hash() -> String {
+                #hash_hex.to_string()
+            }
+        }
+    };
 
     // Collect required component types from #[require(Type1, Type2, ...)]
     let mut required_types = Vec::new();
@@ -460,6 +523,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
             }
 
             #register_required_body
+            #schema_hash_body
             #serialize_body
             #deserialize_body
         }

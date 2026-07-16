@@ -1,22 +1,22 @@
-//! Dual-clock time management: RealTime (always advancing) and GameTime (pauseable).
+//! Dual-clock time management: RealTime (host clock) and GameTime (game clock).
 //!
-//! **RealTime** advances every frame, unaffected by Play/Pause. Use it for
-//! UI animations, profiling, and editor-side logic.
+//! **RealTime** advances every ticked frame. Use it for UI animations,
+//! profiling, and editor-side logic.
 //!
-//! **GameTime** is pauseable and supports slow-motion via
-//! [`set_scale`](GameTime::set_scale). It is zeroed when Play starts and
-//! consumed by game logic.
+//! **GameTime** supports slow-motion / fast-forward via
+//! [`set_scale`](GameTime::set_scale) and is consumed by game logic.
 //!
-//! Both clocks are advanced by `Schedules::run_frame` each frame: `RealTime`
-//! unconditionally, `GameTime` only while the game simulates (`GameActive`
-//! and not `Paused`). Neither clock touches the world's change-detection
-//! tick — they are plain time resources.
+//! Both clocks are advanced by `Schedules::run_frame` every time it is
+//! called, each with its own scale (`RealTime` implicitly 1.0, `GameTime` via
+//! [`GameTime::scale`]). There is no scheduler-level pause: a paused play
+//! session is simply a host that stops calling `run_frame` on that world's
+//! `Schedules`. Neither clock touches the world's change-detection tick —
+//! they are plain time resources.
 
-/// Real (wall-clock) time that always advances, regardless of Play/Pause.
+/// Real (wall-clock) time that advances every ticked frame.
 ///
-/// Use this for editor UI, profiling, and background work that should not be
-/// affected by gameplay pauses. Every frame, call [`advance`](RealTime::advance)
-/// before running game systems.
+/// Use this for editor UI, profiling, and background work. Every frame, call
+/// [`advance`](RealTime::advance) before running game systems.
 #[derive(Debug, Clone, Copy)]
 pub struct RealTime {
     elapsed: f64,
@@ -55,12 +55,13 @@ impl Default for RealTime {
     }
 }
 
-/// Game time that can be paused and slowed.
+/// Game time that supports slow-motion / fast-forward.
 ///
-/// GameTime starts at 0 when Play begins. `Schedules::run_frame` advances it
-/// every frame the game simulates, using the clock's own
-/// [`scale`](GameTime::scale) (set 0.5 for half-speed slow-mo, etc.); Pause
-/// freezes it by ticking with an effective scale of 0.
+/// `Schedules::run_frame` advances GameTime every time it runs, using the
+/// clock's own [`scale`](GameTime::scale) (set 0.5 for half-speed slow-mo,
+/// 0.0 to freeze while still ticking, etc.). Freezing gameplay time entirely
+/// is the host's call: either set the scale to 0, or — for an editor play
+/// session — simply stop calling `run_frame` on that world.
 #[derive(Debug, Clone, Copy)]
 pub struct GameTime {
     elapsed: f64,
@@ -90,8 +91,7 @@ impl GameTime {
     /// `dt` is the frame delta (e.g., 1/60 for a 60fps frame).
     /// `scale` is the effective multiplier for this tick (0.0 = frozen,
     /// 1.0 = normal, 0.5 = half-speed). `Schedules::run_frame` passes
-    /// [`self.scale`](GameTime::scale) while the game simulates and 0 while
-    /// paused.
+    /// [`self.scale`](GameTime::scale) on every call.
     ///
     /// Uses Kahan compensated summation so tiny scaled deltas added to a
     /// large `elapsed` do not lose precision over long sessions.
@@ -127,13 +127,15 @@ impl GameTime {
     }
 
     /// Set the time multiplier for slow-mo / fast-forward (1.0 = normal).
-    /// Applied by `run_frame` on every simulated frame; Pause overrides it
-    /// to 0 without touching this value.
+    /// Applied by `run_frame` on every call.
     pub fn set_scale(&mut self, scale: f64) {
         self.scale = scale;
     }
 
-    /// Reset to 0 when Play starts. Keeps the configured scale.
+    /// Reset elapsed/delta to 0. Keeps the configured scale. Useful for a
+    /// host that wants to zero the clock at the start of a new session
+    /// (e.g. the editor's play world, which gets a fresh `GameTime` anyway
+    /// via `App::boot`, but game code may want an explicit re-zero point).
     pub fn reset(&mut self) {
         self.elapsed = 0.0;
         self.delta = 0.0;

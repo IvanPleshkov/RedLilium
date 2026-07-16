@@ -676,13 +676,24 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        // Decrement registration counts in the shared registry for each generation
-        // this world registered types under. This marks generations as dead when
-        // the last world referencing them is dropped (Phase 6 blocker fix).
-        let generations_to_decrement: Vec<u32> = self.worlds_generations.keys().copied().collect();
+        // Decrement registration counts in the shared registry for each type
+        // this world registered, per generation — the unit must match
+        // `record_type_source`, which increments once per type. (Decrementing
+        // once per *generation* under-counted and kept a dead generation
+        // "active" forever once a world registered two or more types under it,
+        // blocking supersession on the next reload.) This marks generations as
+        // dead when the last world referencing them is dropped (Phase 6
+        // blocker fix).
+        let generations_to_decrement: Vec<(u32, usize)> = self
+            .worlds_generations
+            .iter()
+            .map(|(generation, count)| (*generation, *count))
+            .collect();
         let _ = self.with_generation_registry_mut(|reg| {
-            for generation_id in generations_to_decrement {
-                reg.decrement_registration_count(generation_id);
+            for (generation_id, count) in generations_to_decrement {
+                for _ in 0..count {
+                    reg.decrement_registration_count(generation_id);
+                }
             }
         });
     }

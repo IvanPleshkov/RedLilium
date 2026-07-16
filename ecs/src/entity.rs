@@ -47,22 +47,17 @@ impl Entity {
     pub const EDITOR: u32 = 1 << 4;
     /// Entity is an editor entity because a parent was marked as editor (propagated).
     pub const INHERITED_EDITOR: u32 = 1 << 5;
-    /// Entity is hidden during play mode (e.g., editor-only entities at Play transition).
-    pub const HIDDEN_IN_PLAY: u32 = 1 << 6;
-    /// Entity is hidden in play mode because a parent was marked hidden-in-play (propagated).
-    pub const INHERITED_HIDDEN_IN_PLAY: u32 = 1 << 7;
 
-    /// Default exclusion mask for game systems: excludes disabled, static, editor, and hidden-in-play entities.
+    /// Default exclusion mask for game systems: excludes disabled, static, and editor entities.
     ///
     /// Used by default `Read<T>` and `Write<T>` queries to filter entities.
-    pub const DEFAULT_GAME_QUERY_EXCLUDE_MASK: u32 =
-        Self::DISABLED | Self::STATIC | Self::EDITOR | Self::HIDDEN_IN_PLAY;
+    pub const DEFAULT_GAME_QUERY_EXCLUDE_MASK: u32 = Self::DISABLED | Self::STATIC | Self::EDITOR;
 
-    /// Exclusion mask for infrastructure systems: excludes disabled and hidden-in-play entities.
+    /// Exclusion mask for infrastructure systems: excludes disabled entities.
     ///
     /// Used by `ReadAll<T>` and `WriteAll<T>` queries (asset systems, transforms, rendering).
     /// Allows static and editor entities to remain visible to infrastructure.
-    pub const INFRASTRUCTURE_QUERY_EXCLUDE_MASK: u32 = Self::DISABLED | Self::HIDDEN_IN_PLAY;
+    pub const INFRASTRUCTURE_QUERY_EXCLUDE_MASK: u32 = Self::DISABLED;
 
     const ID_BITS: u32 = 24;
     const ID_MASK: u64 = (1u64 << Self::ID_BITS) - 1; // 0x00FF_FFFF

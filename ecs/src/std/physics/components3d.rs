@@ -8,7 +8,7 @@
 use redlilium_core::math::Vec3;
 
 /// 3D collider shape.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ColliderShape3D {
     /// Sphere defined by radius.
     Ball { radius: f32 },
@@ -21,7 +21,7 @@ pub enum ColliderShape3D {
 }
 
 /// Rigid body type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RigidBodyType {
     /// Affected by forces and gravity.
     #[default]
@@ -39,8 +39,10 @@ pub enum RigidBodyType {
 /// Attach this component to an entity along with [`Collider3D`] and
 /// [`Transform`](crate::Transform), then call [`build_physics_world_3d`]
 /// to create the corresponding rapier physics objects.
+// Serialized: scenes/prefabs must carry physics authoring data (#101/#106).
+// The rapier handle components stay unserialized — SyncPhysicsBodies3D
+// rebuilds live bodies from these descriptors after a restore.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
-#[skip_serialization]
 pub struct RigidBody3D {
     /// Body type.
     pub body_type: RigidBodyType,
@@ -109,8 +111,8 @@ impl Default for RigidBody3D {
 }
 
 /// Describes a 3D collider's shape and material properties.
+// Serialized: authoring data for scenes/prefabs, like RigidBody3D above.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
-#[skip_serialization]
 pub struct Collider3D {
     /// Collider shape.
     pub shape: ColliderShape3D,

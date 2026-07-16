@@ -966,7 +966,11 @@ Contract for shader authors:
 ## ADR-020: Game Code Authoring — Rust Plugins over a Shared Engine Dylib
 
 **Date**: 2026-07-05
-**Status**: Accepted
+**Status**: Accepted; hosting model inverted by ADR-037 (2026-07-16) — the
+game project owns the editor binary (this ADR's Alternative 3, re-evaluated
+under the ADR-036 two-world model), and the cdylib narrows to play-world
+behavior reload. The plugin contract, `redlilium-runtime`, and the ABI
+fingerprint machinery stand.
 
 ### Context
 
@@ -1249,7 +1253,10 @@ slot after the slot's fence.
 ## ADR-025: Editor/Game Schedule Separation via Run Conditions
 
 **Date**: 2026-07-10
-**Status**: Accepted
+**Status**: Superseded by ADR-036 (2026-07-16) — the one-world gating model
+(`game_active`, `GameActiveCondition`/`NotGameActiveCondition`) is deleted;
+editor Play runs the game in a separate world built by the standalone
+composition.
 **Resolves**: #67, prerequisite for #45
 
 ### Context
@@ -1302,7 +1309,11 @@ Implement single-flag activation model with run conditions to gate systems:
 ## ADR-026: Default Query Masks and Entity Visibility
 
 **Date**: 2026-07-10
-**Status**: Accepted
+**Status**: Accepted; amended by ADR-036 (2026-07-16) — the
+`HIDDEN_IN_PLAY`/`INHERITED_HIDDEN_IN_PLAY` flags and every play-state
+visibility rule below are deleted (editor Play no longer shares a world with
+the game). The masks are now `DISABLED | STATIC | EDITOR` (game queries) and
+`DISABLED` (infrastructure queries); the rest of this ADR stands.
 
 ### Context
 
@@ -1370,7 +1381,11 @@ Note: At Play transition, editor entities receive HIDDEN_IN_PLAY flag (set); at 
 ## ADR-024: Resource Lifecycle Management — Hybrid Hook + Event Model
 
 **Date**: 2026-07-12
-**Status**: Accepted
+**Status**: Superseded by ADR-036 (2026-07-16) — `PlayModeAware`, the
+registry, `PlayModeTransition` events, and `ManagePlayModeTransitions` are
+deleted; a play session's lifecycle is now the play *world's* lifecycle
+(created on Play, dropped on Stop), so there are no in-world transitions for
+resources to coordinate around. `SnapshotResource` survives (warm reload).
 **Relates to**: #65, #45
 
 ### Context
@@ -2310,3 +2325,185 @@ remains #6 variant-axis territory.
 - #130: forward-shadows vertical slice (blocked by #125, #129)
 - #131: follow-ups (cascades, spot/point, shared shadow cache)
 - #6, #47, #74, #125: neighboring axes referenced above
+
+---
+
+## ADR-036: Editor Play Runs a Separate Game World Built by the One Composition
+
+**Date**: 2026-07-16
+**Status**: Accepted
+**Supersedes**: ADR-025; ADR-024 (play-mode role); amends ADR-026
+**Relates to**: #67, #65, #58, #45
+
+### Context
+
+Play in the editor showed nothing while the standalone build worked. Root
+cause: one world and one set of schedules served two regimes with opposite
+invariants, reconciled by a spread of flags and guards (`read_only`
+containers, `GameActive` conditions, `is_read_only()` branches inside game
+code, whole-world snapshots and entity hiding on transitions). The question
+"which systems run in Play, in what order" had no answer that could not
+drift from the build.
+
+### Decision
+
+Two worlds, one composition:
+
+- **The game-world composition is a single function** — `App::new` (+ the
+  `App::boot` bootstrap). The standalone build and the editor's Play both
+  build the game through it. Parity with the build is by construction, not
+  by discipline.
+- **Play** boots a play world from the hosted module (`PlaySession`,
+  `App::boot_scoped` under the module's type generation), seeded with the
+  scene open for editing. **Pause** = the world is not ticked. **Stop** =
+  the world is dropped whole. The editing world is never touched: nothing
+  to snapshot, restore, or hide.
+- **Host parameters are the only prod/editor differences**: start scene,
+  render destination (window vs. offscreen camera target shown in the scene
+  view), input source (window vs. scene view).
+- **Plugin contract v2**: `register_types` (every hosting world — the
+  editing world must inspect/serialize game components) is split from
+  `build`/`spawn_scene` (game worlds only). The editing world hosts
+  registrations and nothing else.
+
+Deleted with the old model: `PlayControl`/`PlaySnapshot`/`PlayStartTick`/
+`ManagePlayModeTransitions`, `GameActive` + both run conditions +
+`Schedules::set_game_active`, `PlayModeAware` + registry + transition
+events, `HIDDEN_IN_PLAY` entity flags, `Plugin::on_stop`, and every
+host-sniffing branch in game code.
+
+### Consequences
+
+- ✅ Play in the editor shows exactly what the build shows (verified
+  end-to-end over the remote channel: `play`/`pause`/`resume`/`stop`)
+- ✅ Game code composes unconditionally; no host-policy branches
+- ✅ Editing world stays clean during Play — undo history, selection, and
+  scene state survive by construction
+- ✅ Engine-wide managers (`EngineContext`) are shared `Arc`s, so a play
+  world starting/dying does not reload GPU assets
+- ⚠️ Two worlds are resident during Play (entities + component storages;
+  GPU caches shared)
+- ⚠️ Pause-edit-restore (editing the running game's state with restore on
+  Stop) is gone by design; play-world inspection is a future remote-channel
+  concern
+- ⚠️ Game egui (menus) does not yet render inside the editor's play view
+  (the play world gets no `GameUi`); gameplay HUD/menu flows need the
+  standalone build until that lands
+
+## ADR-037: The Game Owns the Editor Binary; the Dylib Narrows to Play Behavior
+
+**Date**: 2026-07-16
+**Status**: Accepted
+**Supersedes**: ADR-020 hosting model (point 3) — reverses its rejection of
+Alternative 3 under the ADR-036 two-world model
+**Relates to**: ADR-036, #45
+
+### Context
+
+The generic-editor-hosts-a-dylib model accumulated friction that is
+structural, not incidental:
+
+- **The build recipe lives in the operator's head.** Host and cdylib must
+  come from one cargo invocation (feature unification changes `-C metadata`
+  → every engine `TypeId`). The fingerprint + TypeId probe *gate* the
+  mismatch; nothing *prevents* it. In practice every editor-side commit
+  invalidated the running game module.
+- **Open soundness debt.** Two engine images mean duplicated statics;
+  `runtime/src/abi.rs` documents hazards that "must be resolved before"
+  game code runs under the multi-threaded runner alongside host code.
+- **No typed extension surface.** Game-specific editor tools (inspectors,
+  gizmos, panels) across a dylib boundary would need an ABI-stable editor
+  plugin interface. Rust has no stable ABI, so a shipped editor binary
+  loading arbitrary user games is not a sound long-term product shape
+  anyway — the user compiles either way.
+
+ADR-020 rejected "editor as a library in the game project" because *every*
+game change would restart the editor process. ADR-036 changed the calculus:
+the editing world consumes only `register_types` (game *data* definitions,
+which change rarely); game *behavior* runs only in play worlds, which are
+cold-booted on every Play by construction. What must be hot is behavior,
+and behavior is exactly what the dylib can carry without touching the
+editing world.
+
+### Decision
+
+1. **Editor becomes a library.** `redlilium-editor` exposes
+   `run(plugin, …)` (windowed + headless). The game project owns a small
+   editor binary (`car-game-editor`) that statically links the game plugin
+   and the editor. Editing-world registrations come from the static image:
+   authoring (inspector, scene save/load, undo) never depends on a dylib
+   and cannot be invalidated by one. Game code injects its own editor
+   tools through the same typed API — "editor plugins" are ordinary cargo
+   dependencies. The engine repo keeps a plain `redlilium-editor` binary
+   for engine development (no game, or `REDLILIUM_GAME` override).
+
+2. **Warm reload is tiered by what changed.**
+   - **Tier 1 — behavior (the hot loop).** Play worlds boot from a cdylib
+     of the same game crate. The editor *owns the rebuild*: it invokes
+     cargo itself with a fixed invocation that includes its own package
+     (unification therefore matches the running binary by construction);
+     the fingerprint + probe gates remain as the backstop. After loading,
+     the editor diffs component schemas (dylib `register_types` into a
+     scratch world vs. the static image): equal → reload valid, play uses
+     new code with the editing world untouched; different → soft
+     degradation — play still runs the new code, authoring of the new
+     fields needs a Tier-2 restart.
+   - **Tier 2 — data / editor tools / engine.** Exec-restart with session
+     carry: the editor persists session state (open scene, camera pose,
+     selection, optionally a play-world snapshot), rebuilds, and execs the
+     new binary. Undo history dies per restart — accepted. Remote agents
+     reconnect via `.redlilium/editor.port`.
+   - **Horizon (non-binding):** play world in a child game process
+     (crash isolation; our protocols are already data-keyed), and
+     function-level patching as a sub-second tier. Nothing in this design
+     may preclude the child-process shape.
+
+3. **Source watching marks, never acts.** A file watcher sets a "game
+   module stale" indicator (UI badge + remote `state` field). Rebuild and
+   restart are explicit commands; module swap happens only on a green
+   build (a red build leaves the old module running, compile errors go to
+   the log/remote channel). Auto-rebuild is per-session opt-in, never
+   project-wide config — a code-editing agent must not be able to yank a
+   parallel editor session it does not own. Agents editing game code work
+   in git worktrees.
+
+4. **`project.toml` stays project config** (mounts, start scene). It does
+   not name a game: the game is known statically. `REDLILIUM_GAME` remains
+   a dev override for hosting a foreign dylib in the engine-repo editor.
+
+### Alternatives Considered
+
+- **Editor keeps owning the build of a configured game** (project.toml
+  names the crate): codifies the invocation but keeps authoring hostage to
+  the dylib and offers no typed tool surface. Rejected — the inversion
+  subsumes it (the editor still owns the *cdylib* rebuild in Tier 1).
+- **Static-only with exec-restart as the only reload**: simplest, deletes
+  all ABI machinery, but puts a full editor relink + process boot in the
+  hottest loop (behavior tuning). Rejected while iteration speed is the
+  point of the editor; it survives as Tier 2.
+- **Shared engine dylib** (ADR-020 point 4): still the only fix for
+  duplicated statics if cross-image execution ever widens; deferred, the
+  hazards stay scoped to play sessions.
+
+### Consequences
+
+- ✅ Authoring is never blocked or invalidated by module drift; worst case
+  is a stale inspector with a clear "restart to author new fields" state
+- ✅ Behavior iteration keeps the seconds-scale dylib loop; the editing
+  world is not even warm-restarted (registrations are static)
+- ✅ Typed, in-process API for game-specific editor tooling
+- ✅ The invocation-discipline failure class disappears from the user's
+  hands (the editor is the only party that builds the cdylib)
+- ⚠️ Static and dylib copies of the game coexist — with **identical**
+  `TypeId`s: the cdylib and the rlib linked into the editor come from one
+  rustc invocation of the game crate, so both images agree on every game
+  `TypeId` (empirically confirmed; a fresh-generation attempt aborts on the
+  registry's cross-generation conflict check). Behavior modules therefore
+  register under the authoring generation (idempotent), and dylib-image
+  liveness is enforced structurally (the play session stops before any
+  swap), not by the generation registry. Editing world = static, play
+  worlds = dylib; name-keyed serialization bridges the schema-diverged case
+- ⚠️ Cross-image hazards (duplicated statics, in-image panic shields)
+  remain for play sessions — unchanged from today, now explicitly scoped
+- ⚠️ Editor-tool and engine changes cost a process restart (Tier 2);
+  undo history does not survive it

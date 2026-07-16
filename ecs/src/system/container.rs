@@ -202,6 +202,16 @@ impl SystemsContainer {
         self.read_only
     }
 
+    /// Whether a system of type `S` is already registered.
+    ///
+    /// Game plugins run their `build` against whatever world hosts them; the
+    /// editor's schedules already carry the engine's std systems, so a plugin
+    /// must check before [`add`](Self::add)ing an engine system type it wants
+    /// in the standalone runtime (where the host installs fewer defaults).
+    pub fn contains<S: 'static>(&self) -> bool {
+        self.id_to_idx.contains_key(&TypeId::of::<S>())
+    }
+
     /// Registers a system, wrapping it in `Arc<RwLock<S>>`.
     ///
     /// Returns the typed `Arc` handle so the caller can keep a clone

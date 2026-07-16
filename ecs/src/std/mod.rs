@@ -15,7 +15,11 @@ pub mod hierarchy;
     feature = "physics-2d-f32"
 ))]
 pub mod physics;
-pub mod play_mode;
+pub mod play_tasks;
+// Scene assets (#101): needs the asset system (`rendering` pulls
+// redlilium-assets) and RON.
+#[cfg(all(feature = "rendering", feature = "serialize-ron"))]
+pub mod scene;
 // Native-only: TCP-based remote-control transport (tokio); no wasm equivalent.
 #[cfg(all(feature = "rendering", not(target_arch = "wasm32")))]
 pub mod remote;
@@ -29,10 +33,7 @@ pub use components::*;
 pub use hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
 };
-pub use play_mode::{
-    ManagePlayModeTransitions, PanicInfo, PlayControl, PlayModeAwareRegistry, PlayModeTransition,
-    PlayStartTick, PlayState, PlayTasks,
-};
+pub use play_tasks::PlayTasks;
 pub use spawn::spawn_scene;
 #[cfg(feature = "rendering")]
 pub use systems::DrawGrid;

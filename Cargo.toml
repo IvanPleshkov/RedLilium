@@ -9,6 +9,8 @@ members = [
     "runtime",
     "demos",
     "editor",
+    "game",
+    "game-editor",
     "debug_drawer",
     "gizmo",
     "vfs",

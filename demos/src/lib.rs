@@ -16,7 +16,6 @@
 #![recursion_limit = "256"]
 
 pub mod resources;
-pub mod systems;
 
 use std::f32::consts::{FRAC_PI_4, TAU};
 
@@ -85,12 +84,15 @@ impl System for PanicOnce {
 pub struct SpinDemo;
 
 impl Plugin for SpinDemo {
+    fn register_types(&self, world: &mut redlilium_ecs::World) {
+        world.register_inspector::<Spin>();
+    }
+
     fn build(&self, app: &mut App) {
         // Routed through the host's logger via the load-time handoff (#56);
         // without it this line would vanish into the cdylib's own
         // never-initialized `log` static. The reload harness asserts it.
         log::info!("SpinDemo::build (game log via host logger handoff)");
-        app.register_component::<Spin>();
         app.add_system::<Update, _>(SpinSystem);
         // #57 verification hook: an env-gated system that panics (once)
         // *inside this cdylib's image*, so the reload harness can prove the
@@ -99,10 +101,12 @@ impl Plugin for SpinDemo {
             app.add_system::<Update, _>(PanicOnce::default());
         }
         // Viewport navigation: the std free-fly camera, ordered before the
-        // transform propagation the runtime installed.
-        app.add_system::<PostUpdate, _>(UpdateFreeFlyCamera);
-        app.schedule_mut::<PostUpdate>()
-            .add_edge::<UpdateFreeFlyCamera, UpdateGlobalTransforms>()
+        // transform propagation the runtime installed. `build` runs only in
+        // game worlds (the editor hosts registrations, not systems), so the
+        // system cannot already be present.
+        let post = app.schedule_mut::<PostUpdate>();
+        post.add(UpdateFreeFlyCamera);
+        post.add_edge::<UpdateFreeFlyCamera, UpdateGlobalTransforms>()
             .expect("no cycle");
     }
 

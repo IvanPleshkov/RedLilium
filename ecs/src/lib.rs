@@ -103,7 +103,7 @@ pub use redlilium_core::compute::{
     ComputeWriteGuard, IoHandle, IoRunner, Priority, YieldNow, reset_yield_timer,
     set_yield_interval, yield_now,
 };
-pub use resource::{PlayModeAware, Resource, ResourceRef, ResourceRefMut, SnapshotResource};
+pub use resource::{Resource, ResourceRef, ResourceRefMut, SnapshotResource};
 pub use sparse_set::{Mut, Ref, RefMut, SparseSetInner};
 pub use type_identity::{QualifiedTypeId, SourceId};
 pub use world::{ComponentNotRegistered, InspectResult, World, WorldError, set_component_actions};
@@ -122,7 +122,6 @@ pub use query::{
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
 pub use system::ParConfig;
 pub use system::SystemContext;
-pub use system::condition::{GameActiveCondition, NotGameActiveCondition};
 pub use system::{
     AccessConflict, AmbiguityInfo, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
 };
@@ -136,8 +135,8 @@ pub use system::{
     run_read_only_exclusive_system_blocking, run_system_blocking, run_system_once,
 };
 pub use system::{
-    FixedUpdate, GameActive, PostUpdate, PreUpdate, Render, ScheduleId, ScheduleLabel, Schedules,
-    Startup, Time, Update,
+    FixedUpdate, PostUpdate, PreUpdate, Render, ScheduleId, ScheduleLabel, Schedules, Startup,
+    Time, Update,
 };
 pub use system::{
     ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
@@ -154,10 +153,7 @@ pub use self::std::hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, mark_editor, mark_static, remove_parent,
     set_parent, unmark_editor, unmark_static,
 };
-pub use self::std::play_mode::{
-    ManagePlayModeTransitions, PanicInfo, PlayControl, PlayModeAwareRegistry, PlayModeTransition,
-    PlayStartTick, PlayState, PlayTasks,
-};
+pub use self::std::play_tasks::PlayTasks;
 pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;
 #[cfg(feature = "rendering")]
@@ -181,6 +177,14 @@ pub use self::std::remote::{RemoteLine, RemoteServe, RemoteTransport};
 pub use rendering::{
     MeshGenerator, MeshLoader, MeshSource, TextureLoader, TextureSettings, TextureSource,
     VertexLayoutLoader, VertexLayoutManager, VertexLayoutSource,
+};
+// Scene assets (#101): the loader, the resident data, and the by-name
+// request/instantiate helpers.
+#[cfg(all(feature = "rendering", feature = "serialize-ron"))]
+pub use self::std::scene::{
+    ApplySceneTransitions, ReplaceSceneAction, SceneData, SceneLoader, SceneManager, SceneMember,
+    SceneSource, empty_scene_ron, instantiate_scene, request_scene, rescan_asset_managers,
+    scene_from_world, serialize_scene_ron,
 };
 
 // Rendering components, resources, and systems (feature-gated)

@@ -25,7 +25,6 @@ use std::sync::Arc;
 use redlilium_assets::{AssetDb, AssetHandle, AssetProcessor, ResidentCache};
 use redlilium_graphics::{GraphicsDevice, Sampler, Texture};
 
-use crate::PlayModeAware;
 use crate::std::rendering::loaders::{TextureLoader, TextureSettings, TextureSource};
 
 /// A fully resolved texture: the resident GPU texture plus the sampler its
@@ -203,24 +202,10 @@ impl TextureManager {
         Ok(sampler)
     }
 
-    /// Force MeshLoad to re-scan all asset refs by bumping generation.
-    /// Called on snapshot restore to ensure unresolved refs get re-requested.
-    pub(crate) fn force_rescan(&mut self) {
-        // Invalidate all RESIDENT texture sources (the actual loaded textures)
-        // so the generation bumps. This forces MeshLoad to re-scan all asset refs
-        // even in steady state (when nothing is demanded/pending). On re-scan,
-        // unresolved refs get re-requested and re-resolved.
-        // We collect keys first because invalidate mutates the cache.
-        let sources: Vec<_> = self.cache.iter().map(|(k, _)| k.clone()).collect();
-        for source in sources {
-            self.cache.invalidate(&source);
-        }
-    }
-}
-
-impl PlayModeAware for TextureManager {
-    fn on_stop(&mut self) {
-        self.force_rescan();
+    /// Force MeshLoad to re-scan all asset refs without reloading anything.
+    /// See `MeshManager::request_rescan` — rescan without reloading.
+    pub(crate) fn request_rescan(&mut self) {
+        self.cache.bump_generation();
     }
 }
 

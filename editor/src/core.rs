@@ -18,12 +18,11 @@ use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Camera, CameraRender, DebugRender, DrawGrid, DrawSelectionAabb,
     EguiRender, Entity, FlushUploads, FrameRing, FreeFlyCamera, GameTime, GlobalTransform,
-    GridConfig, HotReload, ManagePlayModeTransitions, MaterialInstanceLoad,
-    MaterialInstanceManager, MaterialInstanceSource, MeshGenerator, MeshLoad, MeshManager,
-    MeshRenderer, MeshSource, Name, PipelineRegistry, PlayControl, PlayModeAwareRegistry,
-    PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass,
-    Schedules, TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
+    GridConfig, HotReload, MaterialInstanceLoad, MaterialInstanceSource, MeshGenerator, MeshLoad,
+    MeshRenderer, MeshSource, Name, PipelineRegistry, PostUpdate, Primitive, RealTime, Render,
+    RenderSchedule, ScenePass, Schedules, Transform, Update, UpdateCameraMatrices,
+    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
+    register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -75,6 +74,13 @@ impl EditorWorld {
         }
     }
 }
+
+/// The scene asset the editor's world content came from / was last saved to
+/// (#2), as a VFS path `"mount/path"` (e.g. `"game/scenes/level1.scene"`).
+/// A world resource: File > Save writes here without asking, and remote
+/// `save_scene` defaults here; `None` until the first save/load picks a path.
+#[derive(Default)]
+pub struct CurrentScene(pub Option<String>);
 
 /// What to build into a new editor world — the windowed shell wants the egui
 /// overlay system, the headless shell wants the remote channel unconditionally.
@@ -138,6 +144,46 @@ pub fn create_editor_world(
     ew
 }
 
+/// [`create_editor_world`] minus the demo scene: editor camera only, for a
+/// world whose content arrives later via [`instantiate_scene`]. The split
+/// exists so the shells can host the game module (registering its component
+/// types) **between** world creation and scene instantiation — instantiating
+/// a scene that uses game components before `register_types` silently drops
+/// them (restore skips unknown types by design).
+pub fn create_editor_world_empty(
+    params: &EditorWorldParams,
+    engine: &EngineContext,
+    scene_view: &mut SceneViewState,
+    aspect: f32,
+) -> EditorWorld {
+    let mut ew = create_editor_world_base(params, engine, scene_view);
+    ew.editor_camera = spawn_editor_camera(&mut ew.world, aspect);
+    ew
+}
+
+/// Instantiate a `.scene` asset (#2) into `ew` and record `path` as the
+/// world's [`CurrentScene`]. Call only after every plugin's `register_types`
+/// ran against this world (see [`create_editor_world_empty`]). On
+/// instantiation failure the world stays empty (not demo content — a broken
+/// scene should look broken, not silently morph into the demo), with the
+/// error logged.
+pub fn instantiate_scene(
+    ew: &mut EditorWorld,
+    path: &str,
+    scene: &redlilium_ecs::serialize::SerializedWorld,
+) {
+    match ew.world.deserialize_world_into(scene) {
+        Ok(spawned) => {
+            log::info!("opened scene '{path}' ({} entities)", spawned.len());
+            // Fresh reference holders, steady-state managers — same reason
+            // as scene transitions (#106).
+            redlilium_ecs::rescan_asset_managers(&mut ew.world);
+        }
+        Err(e) => log::error!("failed to instantiate scene '{path}': {e}"),
+    }
+    ew.world.resource_mut::<CurrentScene>().0 = Some(path.to_string());
+}
+
 /// [`create_editor_world`] minus the editor camera and the demo scene: all
 /// resources and schedules, **zero entities**. The game-reload path builds a
 /// replacement world with this and then restores every entity (editor camera
@@ -160,6 +206,9 @@ pub fn create_editor_world_base(
     // Mounts with un-persisted asset-DB edits (written by the undoable
     // asset-edit actions); drained + persisted once per frame.
     world.insert_resource(redlilium_ecs::DirtyMounts::new());
+    // The scene asset this world's content belongs to (#2); set by the
+    // startup scene load / save / remote load_scene.
+    world.insert_resource(CurrentScene::default());
     // Remote-control channel (docs/REMOTE.md): served by RemoteServe on
     // the IO runtime; the editor pumps commands each frame. Opt-in.
     if params.remote {
@@ -187,26 +236,11 @@ pub fn create_editor_world_base(
     // Insert WindowInput resource
     let window_input_handle = world.insert_resource(WindowInput::default());
 
-    // Dual-clock time management for Play/Pause support.
+    // Dual-clock time resources. The editing world's own game systems (if
+    // any) tick RealTime/GameTime like any other world; Play runs a
+    // completely separate game world (editor/src/play.rs) with its own clocks.
     world.insert_resource(RealTime::default());
     world.insert_resource(GameTime::default());
-
-    // Play/Pause/Resume/Stop state machine for game code.
-    world.insert_resource(PlayControl::default());
-    let mut registry = PlayModeAwareRegistry::default();
-    // Register asset managers as PlayModeAware so they bump generation on Stop
-    // to force re-scan of unresolved refs after snapshot restore.
-    if world.has_resource::<MeshManager>() {
-        registry.register::<MeshManager>();
-    }
-    if world.has_resource::<MaterialInstanceManager>() {
-        registry.register::<MaterialInstanceManager>();
-    }
-    if world.has_resource::<TextureManager>() {
-        registry.register::<TextureManager>();
-    }
-    world.insert_resource(registry);
-    world.insert_resource(PlayStartTick(0));
 
     // Insert debug drawing resources
     let debug_drawer_handle = world.insert_resource(DebugDrawer::new());
@@ -399,35 +433,16 @@ fn spawn_demo_scene(world: &mut World, engine: &EngineContext) {
 /// against it.
 pub fn build_editor_schedules(egui: bool) -> Schedules {
     let mut schedules = Schedules::new();
-    // The editor opens in editor mode (PlayState::Stopped): game schedules are
-    // inactive, so editor-only systems (grid, gizmos) run. Play/Stop transitions
-    // flip this via the GameActive resource (#67).
-    schedules.set_game_active(false);
-
-    // PreUpdate: manage Play/Pause/Resume/Stop state transitions.
-    schedules
-        .get_mut::<PreUpdate>()
-        .add_exclusive(ManagePlayModeTransitions);
 
     // Update: read-only editor systems (debug grid, future interaction systems).
     // Systems here cannot mutate the world directly — they must push actions
-    // through the ActionQueue resource.
-    // Condition: these only run when the game is NOT active.
-    schedules
-        .get_mut::<Update>()
-        .add_condition(redlilium_ecs::NotGameActiveCondition);
+    // through the ActionQueue resource. Nothing gates game systems anymore
+    // (#67 is moot): Play boots a wholly separate game world (editor/src/play.rs),
+    // so these editor-only systems always run against the editing world.
     schedules.get_mut::<Update>().add(DrawGrid);
     schedules
         .get_mut::<Update>()
-        .add_edge::<redlilium_ecs::NotGameActiveCondition, DrawGrid>()
-        .expect("No cycle");
-    schedules
-        .get_mut::<Update>()
         .add(DrawSelectionAabb::default());
-    schedules
-        .get_mut::<Update>()
-        .add_edge::<redlilium_ecs::NotGameActiveCondition, DrawSelectionAabb>()
-        .expect("No cycle");
     schedules.get_mut::<Update>().set_read_only(true);
 
     // Render schedule: flush uploads -> render the forward scene -> overlay
@@ -491,16 +506,10 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
 
     // PostUpdate: camera input -> transform propagation -> camera matrices.
     // Camera movement is viewport navigation, not a scene mutation, so it
-    // lives in the non-read-only PostUpdate schedule.
-    // UpdateFreeFlyCamera is editor-only: condition gates it out during Play.
-    schedules
-        .get_mut::<PostUpdate>()
-        .add_condition(redlilium_ecs::NotGameActiveCondition);
+    // lives in the non-read-only PostUpdate schedule. UpdateFreeFlyCamera is
+    // editor-only, but there is nothing to gate it against anymore — Play
+    // never runs in this world.
     schedules.get_mut::<PostUpdate>().add(UpdateFreeFlyCamera);
-    schedules
-        .get_mut::<PostUpdate>()
-        .add_edge::<redlilium_ecs::NotGameActiveCondition, UpdateFreeFlyCamera>()
-        .expect("No cycle");
     schedules
         .get_mut::<PostUpdate>()
         .add(UpdateGlobalTransforms);
@@ -538,10 +547,6 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
     schedules
         .get_mut::<PostUpdate>()
         .add(crate::gizmo_system::GizmoInteract);
-    schedules
-        .get_mut::<PostUpdate>()
-        .add_edge::<redlilium_ecs::NotGameActiveCondition, crate::gizmo_system::GizmoInteract>()
-        .expect("No cycle");
     schedules
         .get_mut::<PostUpdate>()
         .add_edge::<UpdateCameraMatrices, crate::gizmo_system::GizmoInteract>()
@@ -625,7 +630,7 @@ pub fn unique_asset_path(world: &World, source: &str, dir: &str, ext: &str) -> S
 mod tests {
     use super::*;
     use crate::scene_view::SceneViewState;
-    use redlilium_ecs::{EcsRunner, RunDiagnostics};
+    use redlilium_ecs::{EcsRunner, PreUpdate, RunDiagnostics};
     use redlilium_graphics::{GraphicsInstance, TextureFormat};
     use redlilium_vfs::Vfs;
 

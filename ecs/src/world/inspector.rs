@@ -677,6 +677,11 @@ impl World {
     /// resource types are skipped silently, so a snapshot can be restored into
     /// a world missing a plugin that was present at capture.
     ///
+    /// Schema drift (a component whose stored schema hash differs from this
+    /// world's) is tolerated by design and logged as a warning: field-name-
+    /// keyed restore defaults added fields and drops removed ones (ADR-037 —
+    /// cross-image scene seeding depends on this).
+    ///
     /// Returns the newly spawned entities in snapshot order. On error, every
     /// entity spawned by this call is despawned — a failed restore leaves the
     /// pre-existing world contents untouched (resources already restored before
@@ -685,15 +690,20 @@ impl World {
         &mut self,
         snapshot: &crate::serialize::SerializedWorld,
     ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
-        // 0. Phase 6: Validate component schema hashes (detect field reordering)
-        // before deserializing any components. Build a map of component name → schema_hash.
+        // 0. Schema-drift check (Phase 6, re-scoped by ADR-037): hashes are
+        // **advisory**, not a gate. Name-keyed field deserialization is
+        // deliberately tolerant of schema evolution (added fields default,
+        // removed fields drop), and cross-image flows — a scene authored in
+        // the editing world seeding a play world whose game types were
+        // rebuilt (Tier-1 behavior override), or an old scene file loading
+        // into an evolved game — depend on that tolerance. A mismatch
+        // therefore warns loudly (once per component) instead of rejecting
+        // the snapshot.
         let schema_hashes: HashMap<&str, &str> = self
             .iter_meta()
             .map(|m| (m.name, m.schema_hash.as_str()))
             .collect();
-
-        // Check each component in the snapshot against the current schema hash.
-        // If a hash is stored and doesn't match, reject the snapshot (prevent silent corruption).
+        let mut drift_warned: std::collections::HashSet<&str> = Default::default();
         for entity_record in &snapshot.entities {
             for component_data in &entity_record.components {
                 let component_name = component_data.type_name.as_str();
@@ -701,12 +711,13 @@ impl World {
                     && let Some(stored_hash) =
                         snapshot.metadata.component_schemas.get(component_name)
                     && current_hash != stored_hash.as_str()
+                    && drift_warned.insert(component_name)
                 {
-                    return Err(crate::serialize::DeserializeError::SchemaMismatch {
-                        component: component_name.to_string(),
-                        expected: current_hash.to_string(),
-                        found: stored_hash.clone(),
-                    });
+                    log::warn!(
+                        "schema drift on '{component_name}' (snapshot {stored_hash}, world \
+                         {current_hash}): restoring by field name — added fields default, \
+                         removed fields drop"
+                    );
                 }
             }
         }

@@ -56,40 +56,6 @@ pub trait SnapshotResource: Resource + serde::Serialize + serde::de::Deserialize
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Trait for resources that respond to Play/Pause/Resume/Stop lifecycle events.
-///
-/// Resources like physics engines, audio systems, or GPU managers need to
-/// react to gameplay state changes. Implement this trait to hook into the
-/// Play/Pause/Resume/Stop cycle (e.g. pause physics, mute audio, stall GPU
-/// uploads during pauses).
-///
-/// The default implementation (empty methods) is provided for resources that
-/// don't need any lifecycle hooks.
-///
-/// **Design note:** This trait is separate from [`SnapshotResource`]. A
-/// `PlayModeAware` resource can also be a `SnapshotResource`, but they're
-/// independent concerns. Snapshot determines whether a resource is captured
-/// and restored; PlayModeAware determines how it responds to state changes.
-pub trait PlayModeAware: Resource {
-    /// Called when Play mode starts. Use this to initialize playback state
-    /// (e.g., zero out physics accumulators, reset audio positions).
-    fn on_play_start(&mut self) {}
-
-    /// Called when Play mode pauses. Use this to save state or halt activity
-    /// that should not accumulate during the pause (e.g., pause physics
-    /// simulation, stop audio, freeze GPU uploads).
-    fn on_pause(&mut self) {}
-
-    /// Called when Play mode resumes from a pause. Use this to resume activity
-    /// (e.g., un-pause physics simulation, resume audio playback).
-    fn on_resume(&mut self) {}
-
-    /// Called when Play mode stops. Use this to clean up anything that should
-    /// not persist after Play ends (e.g., clear transient GPU buffers,
-    /// reset audio state, despawn dynamic entities spawned during play).
-    fn on_stop(&mut self) {}
-}
-
 /// A single type-erased resource entry.
 pub(crate) struct ResourceEntry {
     /// The resource value, stored as `Arc<RwLock<dyn Resource>>`.

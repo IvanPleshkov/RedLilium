@@ -100,6 +100,9 @@ pub const ABI_FINGERPRINT_SYMBOL: &[u8] = b"redlilium_abi_fingerprint";
 /// The exported symbol name for the logger initializer.
 pub const LOGGER_INIT_SYMBOL: &[u8] = b"redlilium_logger_init";
 
+/// The exported symbol name for the engine-metadata probe.
+pub const TYPEID_PROBE_SYMBOL: &[u8] = b"redlilium_typeid_probe";
+
 /// Signature of the game entry symbol. Rust-ABI: only call after the
 /// fingerprint gate passes.
 pub type GameModuleFn = unsafe extern "Rust" fn() -> Box<dyn Plugin>;
@@ -111,6 +114,36 @@ pub type AbiFingerprintFn = unsafe extern "C" fn() -> *const c_char;
 /// instance and max level, installs them in the game module's logger static.
 /// Called once after `redlilium_game_module` succeeds.
 pub type LoggerInitFn = unsafe extern "Rust" fn(&'static dyn log::Log, log::LevelFilter);
+
+/// Signature of the engine-metadata probe symbol. Rust-ABI: called right
+/// after the fingerprint gate passes (same rustc is then guaranteed, so the
+/// `TypeId` layout agrees) and **before** any plugin method.
+pub type TypeIdProbeFn = unsafe extern "Rust" fn() -> [std::any::TypeId; 2];
+
+/// Canonical engine `TypeId`s, computed in the calling image.
+///
+/// The fingerprint gate proves the two sides were built from the same engine
+/// *sources* with the same toolchain — but not from the same **cargo
+/// invocation**. Different invocations (`--workspace` vs `--bin foo`) can
+/// unify features differently, changing `-C metadata` and with it every
+/// `TypeId` in the engine crates, while the fingerprint still matches. Cargo
+/// caches both variants, so a later `cargo build --bin …` can silently
+/// relink one artifact to the other variant with no recompilation output.
+///
+/// A `TypeId` mismatch across the images turns the first cross-image system
+/// edge or component registration into a panic that cannot unwind across
+/// the boundary — a process abort. This probe catches it at load time
+/// instead: the host compares the module's values (via
+/// [`redlilium_game_module!`]'s exported `redlilium_typeid_probe`) against
+/// its own and refuses the load with an actionable error. One system type
+/// and one component type from `redlilium-ecs` cover the crate whose ids
+/// actually cross the boundary.
+pub fn engine_typeid_probe() -> [std::any::TypeId; 2] {
+    [
+        std::any::TypeId::of::<redlilium_ecs::ApplySceneTransitions>(),
+        std::any::TypeId::of::<redlilium_ecs::Transform>(),
+    ]
+}
 
 /// This build's fingerprint as a Rust string, for comparison and display.
 ///
@@ -140,6 +173,12 @@ pub enum GameModuleError {
     },
     /// The fingerprint symbol returned a null or non-UTF-8 C string.
     InvalidFingerprint,
+    /// Fingerprints matched but the engine `TypeId`s diverge: the cdylib and
+    /// this host come from **different cargo invocations** with different
+    /// feature unification (see [`engine_typeid_probe`]). Loading is refused
+    /// — the first cross-image system edge or registration would abort the
+    /// process with an uncatchable cross-image panic.
+    EngineMetadataDrift,
     /// The game entry symbol panicked while constructing the plugin. The host
     /// stays alive; the panic payload was dropped before the library unmapped.
     EntryPanicked,
@@ -162,6 +201,14 @@ impl std::fmt::Display for GameModuleError {
             GameModuleError::InvalidFingerprint => {
                 write!(f, "game cdylib returned an invalid ABI fingerprint")
             }
+            GameModuleError::EngineMetadataDrift => write!(
+                f,
+                "game cdylib and this host were built in different cargo invocations \
+                 (engine TypeIds diverge despite matching fingerprints — feature \
+                 unification differs, e.g. `--workspace` vs `--bin`/`-p`).\n\
+                 Rebuild both in ONE command and run those artifacts, e.g.:\n  \
+                 cargo build -p redlilium-editor -p <game-crate>"
+            ),
             GameModuleError::EntryPanicked => {
                 write!(f, "game cdylib panicked while constructing its plugin")
             }
@@ -280,9 +327,8 @@ impl GameModule {
     ///   host a plain `Err(SystemError::Panicked)` value. The reload harness
     ///   verifies containment against a real cdylib (`--panic-child` must
     ///   exit cleanly). Caveat: only *systems* are shielded; other
-    ///   game-planted callbacks (observers, deserialize fns, PlayModeAware
-    ///   hooks, command closures) still abort on panic — keep them
-    ///   panic-free.
+    ///   game-planted callbacks (observers, deserialize fns, command
+    ///   closures) still abort on panic — keep them panic-free.
     #[cfg(not(target_arch = "wasm32"))]
     pub unsafe fn load(path: impl AsRef<std::ffi::OsStr>) -> Result<Self, GameModuleError> {
         unsafe {
@@ -306,8 +352,19 @@ impl GameModule {
                 });
             }
 
-            // Gate passed: the Rust-ABI entry handoff is now sound under the
-            // same-toolchain contract.
+            // Fingerprint gate passed (same sources, same rustc) — the Rust
+            // ABI is trustworthy. Second gate: same *cargo invocation*. The
+            // fingerprint cannot see feature-unification / `-C metadata`
+            // drift between invocations, but engine `TypeId`s can (see
+            // `engine_typeid_probe`); a mismatch would abort the process at
+            // the first cross-image system edge, so refuse the load instead.
+            let probe_fn: libloading::Symbol<'_, TypeIdProbeFn> = library
+                .get(TYPEID_PROBE_SYMBOL)
+                .map_err(GameModuleError::Load)?;
+            if probe_fn() != engine_typeid_probe() {
+                return Err(GameModuleError::EngineMetadataDrift);
+            }
+
             let entry_fn: libloading::Symbol<'_, GameModuleFn> = library
                 .get(GAME_MODULE_SYMBOL)
                 .map_err(GameModuleError::Load)?;
@@ -435,6 +492,16 @@ macro_rules! redlilium_game_module {
             FINGERPRINT.as_ptr() as *const ::std::ffi::c_char
         }
 
+        /// Engine-metadata probe — canonical engine `TypeId`s as computed in
+        /// THIS cdylib's image. The host compares them with its own after the
+        /// fingerprint gate: a mismatch means the two sides came from
+        /// different cargo invocations (feature-unification drift) and the
+        /// load is refused before any cross-image `TypeId` use can abort.
+        #[unsafe(no_mangle)]
+        pub extern "Rust" fn redlilium_typeid_probe() -> [::std::any::TypeId; 2] {
+            $crate::engine_typeid_probe()
+        }
+
         /// Logger initializer — installs the host's logger in this cdylib's
         /// global logger static. Rust ABI: the host calls this once after
         /// `redlilium_game_module` succeeds (fingerprint gate passed).
@@ -463,6 +530,17 @@ mod tests {
         assert!(fp.contains("rustc "), "carries rustc version");
         assert!(!fp.contains("unknown"), "rustc version was captured: {fp}");
         assert!(fp.contains("build "), "carries the engine source revision");
+    }
+
+    /// The probe is deterministic within one image and its two ids are
+    /// distinct (a system type and a component type — collapsing them would
+    /// weaken the drift check to one crate-metadata sample).
+    #[test]
+    fn typeid_probe_is_stable_and_distinct() {
+        let a = engine_typeid_probe();
+        let b = engine_typeid_probe();
+        assert_eq!(a, b, "probe must be deterministic within an image");
+        assert_ne!(a[0], a[1], "probe samples two distinct engine types");
     }
 
     #[test]

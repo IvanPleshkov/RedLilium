@@ -52,9 +52,27 @@ pub struct Editor {
     // (see `on_resume`); `None` until then. The engine is single-world by
     // design — one scene is resident at a time.
     world: Option<EditorWorld>,
-    /// Hosted game module (#58). Declared after `world` so it drops after it:
-    /// the mapped game image must outlive every world its plugin touched.
+    /// Live play session (EDITOR_REBUILD.md §4.3): a full game world booted
+    /// from the hosted module on Play, dropped on Stop. Declared before
+    /// `game_host` so it drops first — its systems live in the mapped image.
+    play: Option<crate::play::PlaySession>,
+    /// Hosted game module (#58). Declared after the worlds so it drops after
+    /// them: the mapped game image must outlive every world its plugin touched.
     game_host: Option<crate::game_host::GameHost>,
+    /// A statically linked game handed in by the owning binary (ADR-037),
+    /// held until `on_init` hosts it (the editing world doesn't exist yet).
+    static_game: Option<Box<dyn redlilium_runtime::Plugin>>,
+    /// Tier-1 behavior-reload config (ADR-037), held until `on_init`.
+    behavior_spec: Option<crate::behavior_reload::BehaviorReloadSpec>,
+    /// Tier-1 behavior-reload driver: source watcher + background rebuild.
+    behavior: Option<crate::behavior_reload::BehaviorReload>,
+    /// A Tier-2 exec-restart is pending: on loop exit the session carry is
+    /// written and `crate::launch` execs the fresh binary. Cleared if the
+    /// unsaved-changes dialog is cancelled.
+    restart_pending: bool,
+    /// Camera pose carried from the predecessor process (ADR-037 Tier 2),
+    /// applied in `on_init` once the editor camera exists.
+    carried_camera: Option<crate::session::CameraPose>,
     runner: EcsRunner,
     /// Persistent engine state (GPU managers, asset DB/processor) — outlives
     /// any world (ADR-020). Created with the graphics device in `on_init`.
@@ -69,6 +87,9 @@ pub struct Editor {
     local_mounts: Vec<(&'static str, &'static str)>,
     /// Remote-control protocol state (`REDLILIUM_REMOTE=1`, docs/REMOTE.md).
     remote: Option<crate::remote_commands::RemoteCommands>,
+    /// Scene to open on startup (#2): `[project] scene` from `project.toml`,
+    /// a VFS path `"mount/path"`. `None` → demo scene.
+    startup_scene: Option<String>,
     console: ConsolePanel,
 
     // UI (the egui controller is an ECS resource — see on_init)
@@ -134,17 +155,31 @@ struct PendingPrefabImport {
 }
 
 impl Editor {
+    /// The windowed shell, optionally owning a statically linked game and
+    /// its Tier-1 behavior-reload config (ADR-037) — hosted in `on_init`
+    /// once the editing world exists.
+    pub fn with_game(
+        game: Option<Box<dyn redlilium_runtime::Plugin>>,
+        behavior_spec: Option<crate::behavior_reload::BehaviorReloadSpec>,
+    ) -> Self {
+        let mut editor = Self::new();
+        editor.static_game = game;
+        editor.behavior_spec = behavior_spec;
+        editor
+    }
+
     pub fn new() -> Self {
         let project_path = std::path::Path::new("project.toml");
         let (config, mut vfs) = crate::project::load_or_default(project_path);
-        // Local asset-pack mounts: the engine's built-ins plus the project
+        // Local asset-pack mounts: the engine's built-ins, the project
         // sandbox (user-authored / experimental assets, gitignored — so playing
-        // with materials never dirties the committed std pack). Each carries
-        // its own assets.db, is watched for external edits, and is scanned on
-        // startup.
-        let local_mounts = [("std", "std-assets"), ("project", "project-assets")];
+        // with materials never dirties the committed std pack), plus any
+        // project.toml filesystem mount opted in with `scan = true` (#105 —
+        // e.g. a game's own asset pack). Each carries its own assets.db, is
+        // watched for external edits, and is scanned on startup.
+        let local_mounts = crate::project::local_mounts(Some(&config));
         let mut asset_browser = AssetBrowser::new(&config);
-        for (name, dir) in local_mounts {
+        for &(name, dir) in &local_mounts {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 log::error!("failed to create mount dir '{dir}': {e}");
             }
@@ -154,9 +189,24 @@ impl Editor {
         }
         let console = ConsolePanel::new(crate::log_capture::log_buffer());
 
+        // Tier-2 session carry (ADR-037): a predecessor process that
+        // exec-restarted left its open scene + camera pose; it overrides the
+        // project.toml startup scene for this one launch.
+        let carry = crate::session::take();
+        let startup_scene = carry
+            .as_ref()
+            .map(|c| c.scene.clone())
+            .unwrap_or_else(|| config.project.scene.clone());
+        let carried_camera = carry.and_then(|c| c.camera);
+
         Self {
             world: None,
+            play: None,
             game_host: None,
+            static_game: None,
+            behavior_spec: None,
+            behavior: None,
+            restart_pending: false,
             // Multi-threaded runner, enabled after Track 2 MT-hardening
             // (#52-#55: barriers, explicit edges, raw-access-aware detector).
             runner: EcsRunner::multi_thread(
@@ -167,10 +217,12 @@ impl Editor {
             engine: None,
             vfs,
             asset_browser,
-            local_mounts: local_mounts.to_vec(),
+            local_mounts,
             remote: std::env::var("REDLILIUM_REMOTE")
                 .is_ok_and(|v| v == "1")
                 .then(crate::remote_commands::RemoteCommands::default),
+            startup_scene,
+            carried_camera,
             console,
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
@@ -330,13 +382,40 @@ impl Editor {
                         .set_settings(&guid, spec.settings);
                     let vfs_path = format!("{source}/{path}");
                     self.asset_browser
-                        .dispatch_write(&self.vfs, &vfs_path, Vec::new());
+                        .dispatch_write(&self.vfs, &vfs_path, spec.content);
                     self.asset_browser.mark_db_dirty(&source);
                     self.asset_browser
                         .notify_asset_created(&source, &dir, &path);
                     log::info!("Created asset: {vfs_path}");
                 }
                 None => log::warn!("Cannot create asset of kind '{kind}' (missing parent?)"),
+            }
+        }
+
+        // Open a double-clicked scene asset (#112): the browser twin of the
+        // remote `load_scene` — an undoable replace of the world's scene
+        // content, through the ActionQueue like every other edit.
+        if let Some((source, path)) = self.asset_browser.take_pending_open_scene() {
+            let vfs_path = format!("{source}/{path}");
+            let scene = pollster::block_on(self.vfs.read(&vfs_path))
+                .map_err(|e| e.to_string())
+                .and_then(|data| {
+                    redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedWorld>(
+                        &data,
+                        redlilium_ecs::serialize::Format::Ron,
+                    )
+                    .map_err(|e| e.to_string())
+                });
+            match scene {
+                Ok(scene) => {
+                    let ew = self.world.as_mut().unwrap();
+                    let action = redlilium_ecs::ReplaceSceneAction::new(scene, &vfs_path);
+                    ew.world
+                        .resource::<redlilium_core::abstract_editor::ActionQueue<redlilium_ecs::World>>()
+                        .push(Box::new(action));
+                    ew.world.resource_mut::<crate::core::CurrentScene>().0 = Some(vfs_path);
+                }
+                Err(e) => log::error!("failed to open scene {vfs_path}: {e}"),
             }
         }
 
@@ -491,32 +570,135 @@ impl Editor {
             .is_some_and(|ew| ew.history.has_unsaved_changes())
     }
 
-    /// Apply a play action (Play/Pause/Resume/Stop) to the game.
-    ///
-    /// Note: the actual state transition happens in ManagePlayModeTransitions system,
-    /// which runs at the start of the next game update. Do NOT sync_play_state here
-    /// as the transition hasn't been applied yet; it will sync naturally in on_update.
-    fn apply_play_action(&mut self, action: crate::toolbar::PlayAction) {
-        if let Some(ew) = self.world.as_mut() {
-            let mut play_control = ew.world.resource_mut::<redlilium_ecs::PlayControl>();
-            match action {
-                crate::toolbar::PlayAction::Play => play_control.play(),
-                crate::toolbar::PlayAction::Pause => play_control.pause(),
-                crate::toolbar::PlayAction::Resume => play_control.resume(),
-                crate::toolbar::PlayAction::Stop => play_control.stop(),
+    /// Apply a play action (Play/Pause/Resume/Stop): manage the play-session
+    /// lifecycle (EDITOR_REBUILD.md §4.3). Play boots a full game world from
+    /// the hosted module; Stop drops it. The editing world is not involved.
+    /// Begin a Tier-2 exec-restart (ADR-037): routed through the
+    /// unsaved-changes dialog so nothing is lost silently; on close the
+    /// session carry is written and `crate::launch` execs the fresh binary.
+    fn request_restart(&mut self) {
+        self.restart_pending = true;
+        if self.has_unsaved_changes() {
+            self.show_close_dialog = true;
+        } else {
+            self.should_close = true;
+        }
+    }
+
+    /// Warm-restart the editing world against a freshly rebuilt game cdylib
+    /// (legacy `REDLILIUM_GAME` hosting, #58). Caller has stopped the play
+    /// session already.
+    fn reload_from_disk(&mut self) {
+        match (&mut self.game_host, self.world.take()) {
+            (Some(host), Some(old)) => {
+                let engine = self.engine.as_ref().expect("engine outlives worlds");
+                let scene_view = self.scene_view.as_mut().expect("scene view present");
+                let opts = crate::game_host::ReloadOptions {
+                    params: EditorWorldParams {
+                        remote: self.remote.is_some(),
+                        egui: true,
+                    },
+                    aspect: scene_view.aspect_ratio(),
+                };
+                let (fresh, result) = crate::game_host::reload_game(
+                    host,
+                    old,
+                    engine,
+                    scene_view,
+                    &self.runner,
+                    &opts,
+                    crate::game_host::swap_from_disk,
+                );
+                self.world = Some(fresh);
+                self.last_selection = Vec::new();
+                match result {
+                    Ok(()) => log::info!("game module reloaded (scene restored)"),
+                    Err(e) => log::error!("game reload failed: {e}"),
+                }
+            }
+            (host, old) => {
+                self.world = old;
+                if host.is_none() {
+                    log::error!(
+                        "reload_game: no game module hosted \
+                         (launch with REDLILIUM_GAME=<cdylib>)"
+                    );
+                }
             }
         }
     }
 
-    /// Sync toolbar's play_state to match PlayControl's current state.
+    fn apply_play_action(&mut self, action: crate::toolbar::PlayAction) {
+        match action {
+            crate::toolbar::PlayAction::Play => self.start_play(),
+            crate::toolbar::PlayAction::Pause => {
+                if let (Some(play), Some(ew)) = (self.play.as_mut(), self.world.as_ref()) {
+                    play.pause(&ew.world);
+                }
+            }
+            crate::toolbar::PlayAction::Resume => {
+                if let Some(play) = self.play.as_mut() {
+                    play.resume();
+                }
+            }
+            crate::toolbar::PlayAction::Stop => {
+                self.play = None;
+            }
+        }
+        self.sync_play_state();
+    }
+
+    /// Boot the play world: the standalone game composition, seeded with the
+    /// scene open for editing. `SceneManager` addresses scenes mount-relative,
+    /// while `CurrentScene` is a VFS `"mount/rel"` path — strip the mount.
+    fn start_play(&mut self) {
+        if self.play.is_some() {
+            return;
+        }
+        let Some(host) = self.game_host.as_ref() else {
+            log::error!("Play: no game module hosted (launch with REDLILIUM_GAME=<cdylib>)");
+            return;
+        };
+        let (Some(engine), Some(ew)) = (self.engine.as_ref(), self.world.as_ref()) else {
+            return;
+        };
+        let start_scene = ew
+            .world
+            .resource::<crate::core::CurrentScene>()
+            .0
+            .as_deref()
+            .and_then(|p| p.split_once('/'))
+            .map(|(_, rel)| rel.to_string());
+        let aspect = self
+            .scene_view
+            .as_ref()
+            .map(|sv| sv.aspect_ratio())
+            .unwrap_or(16.0 / 9.0);
+        self.play = Some(crate::play::PlaySession::start(
+            host,
+            engine,
+            &self.runner,
+            aspect,
+            start_scene.as_deref(),
+        ));
+    }
+
+    /// Sync the toolbar's play state from the play session.
     fn sync_play_state(&mut self) {
-        if let Some(ew) = self.world.as_ref() {
-            let pc_state = ew.world.resource::<redlilium_ecs::PlayControl>().state();
-            self.play_state = match pc_state {
-                redlilium_ecs::PlayState::Stopped => crate::toolbar::PlayState::Editing,
-                redlilium_ecs::PlayState::Playing => crate::toolbar::PlayState::Playing,
-                redlilium_ecs::PlayState::Paused => crate::toolbar::PlayState::Paused,
-            };
+        self.play_state = match self.play.as_ref() {
+            None => crate::toolbar::PlayState::Editing,
+            Some(play) if play.is_paused() => crate::toolbar::PlayState::Paused,
+            Some(_) => crate::toolbar::PlayState::Playing,
+        };
+    }
+
+    /// The sink for scene-view/game input: the play world for the whole
+    /// session — the game while it runs, the pause overlay's flyover camera
+    /// while paused. The editing world only when no session exists.
+    fn input_sink(&self) -> Arc<redlilium_ecs::sync::RwLock<redlilium_ecs::WindowInput>> {
+        match self.play.as_ref() {
+            Some(play) => play.window_input(),
+            None => self.active_world().window_input.clone(),
         }
     }
 
@@ -639,6 +821,36 @@ impl Editor {
         self.asset_browser.notify_asset_deleted(source, path);
         log::info!("Deleted asset {vfs_path}");
     }
+
+    /// File > Save (#2): serialize the world's scene content to the
+    /// [`CurrentScene`](crate::core::CurrentScene) asset — or to a fresh
+    /// `scenes/new[.N].scene` in the `project` mount on the first save — and
+    /// mark the history clean. The file lands through the async VFS writer;
+    /// a *new* file is registered in the asset DB by the watcher when the
+    /// write hits disk (the same route as prefab export).
+    fn save_current_scene(&mut self) {
+        let Some(ew) = self.world.as_mut() else {
+            return;
+        };
+        let ron = match redlilium_ecs::serialize_scene_ron(&ew.world) {
+            Ok(ron) => ron,
+            Err(e) => {
+                log::error!("scene save failed to serialize: {e}");
+                return;
+            }
+        };
+        let current = ew.world.resource::<crate::core::CurrentScene>().0.clone();
+        let vfs_path = current.unwrap_or_else(|| {
+            let path = crate::core::unique_asset_path(&ew.world, "project", "scenes", "scene");
+            let vfs_path = format!("project/{path}");
+            ew.world.resource_mut::<crate::core::CurrentScene>().0 = Some(vfs_path.clone());
+            vfs_path
+        });
+        self.asset_browser
+            .dispatch_write(&self.vfs, &vfs_path, ron.into_bytes());
+        ew.history.mark_saved();
+        log::info!("saved scene {vfs_path}");
+    }
 }
 
 impl AppHandler for Editor {
@@ -665,17 +877,39 @@ impl AppHandler for Editor {
             redlilium_runtime::EngineContext::with_vfs(ctx.device().clone(), self.vfs.clone());
         crate::core::scan_local_mounts(&engine, &self.local_mounts);
 
-        // Create the editor world with a demo scene
+        // Create the editor world: the project's startup scene (#2) when
+        // configured and readable, the demo scene otherwise.
         let aspect = ctx.aspect_ratio();
-        let editor_world = create_editor_world(
-            &EditorWorldParams {
-                remote: self.remote.is_some(),
-                egui: true,
-            },
-            &engine,
-            &mut scene_view,
-            aspect,
-        );
+        let params = EditorWorldParams {
+            remote: self.remote.is_some(),
+            egui: true,
+        };
+        let startup_scene = self.startup_scene.take().and_then(|path| {
+            match pollster::block_on(self.vfs.read(&path))
+                .map_err(|e| e.to_string())
+                .and_then(|data| {
+                    redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedWorld>(
+                        &data,
+                        redlilium_ecs::serialize::Format::Ron,
+                    )
+                    .map_err(|e| e.to_string())
+                }) {
+                Ok(scene) => Some((path, scene)),
+                Err(e) => {
+                    log::error!("startup scene '{path}' failed to load: {e}");
+                    None
+                }
+            }
+        });
+        // A startup scene may use game components — instantiate it AFTER the
+        // game module is hosted below (register_types first, scene second),
+        // else its game components are silently dropped.
+        let editor_world = match &startup_scene {
+            Some(_) => {
+                crate::core::create_editor_world_empty(&params, &engine, &mut scene_view, aspect)
+            }
+            None => create_editor_world(&params, &engine, &mut scene_view, aspect),
+        };
         self.engine = Some(engine);
         self.world = Some(editor_world);
 
@@ -707,16 +941,47 @@ impl AppHandler for Editor {
         let ew = self.world.as_mut().unwrap();
         ew.schedules.run_startup(&mut ew.world, runner);
 
-        // Host a game module if requested (#58).
-        if let Ok(path) = std::env::var("REDLILIUM_GAME") {
+        // Host the game: statically linked by the owning binary (ADR-037),
+        // or a cdylib via the engine-repo override (#58).
+        if let Some(plugin) = self.static_game.take() {
+            if std::env::var("REDLILIUM_GAME").is_ok() {
+                log::warn!(
+                    "REDLILIUM_GAME ignored: this editor binary statically hosts its game (ADR-037)"
+                );
+            }
+            let engine = self.engine.as_ref().expect("engine created above");
+            self.game_host = Some(crate::game_host::GameHost::from_static(plugin, engine, ew));
+            log::info!("game statically hosted (ADR-037)");
+        } else if let Ok(path) = std::env::var("REDLILIUM_GAME") {
             let engine = self.engine.as_ref().expect("engine created above");
             // SAFETY: the operator points this at a game cdylib built in the
             // same `cargo build` as this editor (fingerprint-gated; see
             // GameModule::load).
-            match unsafe { crate::game_host::GameHost::load(&path, engine, ew, aspect) } {
+            match unsafe { crate::game_host::GameHost::load(&path, engine, ew) } {
                 Ok(host) => self.game_host = Some(host),
                 Err(e) => log::error!("failed to load game module '{path}': {e}"),
             }
+        }
+        // Tier-1 behavior reload (ADR-037): only meaningful over a hosted game.
+        if self.game_host.is_some()
+            && let Some(spec) = self.behavior_spec.take()
+        {
+            self.behavior = Some(crate::behavior_reload::BehaviorReload::new(spec));
+        }
+        // Startup scene (project.toml or session carry), instantiated now
+        // that the hosted game's types are registered — before hosting, its
+        // game components would be silently dropped.
+        if let Some((path, scene)) = &startup_scene
+            && let Some(ew) = self.world.as_mut()
+        {
+            crate::core::instantiate_scene(ew, path, scene);
+        }
+        // Tier-2 carried camera pose (ADR-037): the predecessor process's
+        // editor camera, applied now that the fresh camera exists.
+        if let Some(pose) = self.carried_camera.take()
+            && let Some(ew) = self.world.as_mut()
+        {
+            crate::session::apply_camera_pose(ew, pose);
         }
 
         // Create native menu after the event loop / NSApplication is initialized
@@ -750,6 +1015,15 @@ impl AppHandler for Editor {
 
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
         if self.should_close {
+            // Tier-2 exec-restart (ADR-037): the loop is winding down — write
+            // the carry; `crate::launch` execs the fresh binary after
+            // teardown. A plain close skips this.
+            if self.restart_pending {
+                if let Some(ew) = self.world.as_ref() {
+                    crate::session::write(&crate::session::capture(ew));
+                }
+                crate::session::request_restart();
+            }
             return false;
         }
 
@@ -796,8 +1070,7 @@ impl AppHandler for Editor {
             let ew = self.world.as_mut().unwrap();
             match action {
                 MenuAction::Save => {
-                    ew.history.mark_saved();
-                    log::info!("Saved");
+                    self.save_current_scene();
                 }
                 MenuAction::Undo => {
                     if let Err(e) = ew.history.undo(&mut ew.world) {
@@ -868,6 +1141,34 @@ impl AppHandler for Editor {
         // that Changed<T> filters can detect the mutations this frame).
         self.world.as_mut().unwrap().drain_actions();
 
+        // Tier-1 behavior reload (ADR-037): drain watcher/build events; a
+        // finished green build swaps the behavior module between frames (the
+        // play world from the old image dies first).
+        if let Some(result) = self.behavior.as_mut().and_then(|b| b.poll()) {
+            crate::behavior_reload::apply_behavior_build(
+                result,
+                self.behavior.as_mut().expect("polled above"),
+                self.game_host.as_mut().expect("behavior implies host"),
+                &mut self.play,
+            );
+            self.sync_play_state();
+        }
+        // Refresh the hosted-game status the remote `state` command reports.
+        if let Some(rc) = &mut self.remote {
+            rc.game_status = Some(crate::remote_commands::GameStatus {
+                hosted: match &self.game_host {
+                    None => "none",
+                    Some(host) if host.is_dylib() => "dylib",
+                    Some(_) => "static",
+                },
+                behavior_override: self.game_host.as_ref().is_some_and(|h| h.has_behavior()),
+                stale: self.behavior.as_ref().is_some_and(|b| b.stale()),
+                rebuilding: self.behavior.as_ref().is_some_and(|b| b.rebuilding()),
+                restart_required: self.behavior.as_ref().is_some_and(|b| b.restart_required()),
+                schema_diverged: self.behavior.as_ref().is_some_and(|b| b.schema_diverged()),
+            });
+        }
+
         // Remote protocol pump: completes last frame's parked responses (their
         // actions just drained), then executes newly arrived commands.
         if let Some(rc) = &mut self.remote
@@ -912,47 +1213,49 @@ impl AppHandler for Editor {
             }
         }
 
+        // Remote play-session lifecycle — same semantics as the toolbar.
+        if let Some(request) = self.remote.as_mut().and_then(|rc| rc.take_play_request()) {
+            use crate::remote_commands::PlayRequest;
+            self.apply_play_action(match request {
+                PlayRequest::Play => crate::toolbar::PlayAction::Play,
+                PlayRequest::Pause => crate::toolbar::PlayAction::Pause,
+                PlayRequest::Resume => crate::toolbar::PlayAction::Resume,
+                PlayRequest::Stop => crate::toolbar::PlayAction::Stop,
+            });
+        }
+
+        // Tier-2 exec-restart (ADR-037), remote-requested.
+        if self.remote.as_mut().is_some_and(|rc| rc.take_restart()) {
+            self.request_restart();
+        }
+
         // Execute a queued game-module reload between frames (#58): it
         // replaces the whole EditorWorld, so it cannot run inside dispatch.
         if let Some(rc) = &mut self.remote
             && rc.take_reload()
         {
-            match (&mut self.game_host, self.world.take()) {
-                (Some(host), Some(old)) => {
-                    let engine = self.engine.as_ref().expect("engine outlives worlds");
-                    let scene_view = self.scene_view.as_mut().expect("scene view present");
-                    let opts = crate::game_host::ReloadOptions {
-                        params: EditorWorldParams {
-                            remote: self.remote.is_some(),
-                            egui: true,
-                        },
-                        aspect: scene_view.aspect_ratio(),
-                    };
-                    let (fresh, result) = crate::game_host::reload_game(
-                        host,
-                        old,
-                        engine,
-                        scene_view,
-                        &self.runner,
-                        &opts,
-                        crate::game_host::swap_from_disk,
-                    );
-                    self.world = Some(fresh);
-                    self.last_selection = Vec::new();
-                    match result {
-                        Ok(()) => log::info!("game module reloaded (scene restored)"),
-                        Err(e) => log::error!("game reload failed: {e}"),
-                    }
+            if let Some(b) = self.behavior.as_mut() {
+                // Tier-1 (ADR-037): background rebuild; the swap lands via
+                // `apply_behavior_build` when it finishes green.
+                if b.request_rebuild() {
+                    log::info!("reload_game: Tier-1 rebuild started");
+                } else {
+                    log::info!("reload_game: rebuild already running");
                 }
-                (host, old) => {
-                    self.world = old;
-                    if host.is_none() {
-                        log::error!(
-                            "reload_game: no game module hosted \
-                             (launch with REDLILIUM_GAME=<cdylib>)"
-                        );
-                    }
+            } else if self.game_host.as_ref().is_some_and(|host| !host.is_dylib()) {
+                log::error!(
+                    "reload_game: statically hosted game without behavior_reload — \
+                     restart the editor binary instead (Tier 2, ADR-037)"
+                );
+            } else {
+                // Legacy dylib hosting: warm-restart the editing world. The
+                // reload swaps the mapped image every world's game systems
+                // point into — the play world must die first.
+                if self.play.take().is_some() {
+                    log::info!("reload_game: play session stopped");
+                    self.sync_play_state();
                 }
+                self.reload_from_disk();
             }
         }
 
@@ -978,7 +1281,19 @@ impl AppHandler for Editor {
                 .run_frame(&mut ew.world, runner, ctx.delta_time() as f64);
         }
 
-        // Sync play state after systems have run (ManagePlayModeTransitions applies state changes)
+        // Tick the play world in the same shell frame, after the editing
+        // world (EDITOR_REBUILD.md §4.3).
+        if let Some(play) = self.play.as_mut() {
+            let view = self
+                .scene_view_rect_phys
+                .map(|[_, _, w, h]| (w, h))
+                .unwrap_or((1280.0, 720.0));
+            play.tick(&self.runner, ctx.delta_time() as f64, view);
+            if play.exit_requested() {
+                log::info!("play: game requested exit — stopping session");
+                self.play = None;
+            }
+        }
         self.sync_play_state();
 
         // Asset-browser deferred operations (export/import, file ops).
@@ -1023,10 +1338,16 @@ impl AppHandler for Editor {
                 .scene_view_rect_phys
                 .map_or((256, 256), |[_, _, w, h]| (w as u32, h as u32));
             scene_view.sync_camera_output(&mut ew.world, ew.editor_camera, w, h);
-            let color = ew
-                .world
-                .get::<redlilium_ecs::CameraTarget>(ew.editor_camera)
-                .map(|t| t.color.clone());
+            // While a play session runs, the scene view shows the play
+            // world's camera; the editing world's target resumes on Stop
+            // (same egui texture id, swapped underneath).
+            let color = match self.play.as_ref() {
+                Some(play) => play.scene_color(),
+                None => ew
+                    .world
+                    .get::<redlilium_ecs::CameraTarget>(ew.editor_camera)
+                    .map(|t| t.color.clone()),
+            };
             if let Some(color) = color {
                 let mut egui = ew.world.resource_mut::<EguiController>();
                 match self.scene_texture_id {
@@ -1092,30 +1413,49 @@ impl AppHandler for Editor {
                             let available = ui.available_width();
                             ui.add_space((available / 2.0 - 40.0).max(0.0));
 
-                            let (paused_due_to_panic, gizmo_mode) = {
+                            let gizmo_mode = {
                                 let ew = self.world.as_ref().unwrap();
-                                (
-                                    ew.world
-                                        .resource::<redlilium_ecs::PlayControl>()
-                                        .panic_info()
-                                        .is_some(),
-                                    ew.world
-                                        .resource::<redlilium_gizmo::TransformGizmo>()
-                                        .mode(),
-                                )
+                                ew.world
+                                    .resource::<redlilium_gizmo::TransformGizmo>()
+                                    .mode()
                             };
 
-                            if let Some(play_action) = crate::toolbar::draw_play_controls(
-                                ui,
-                                self.play_state,
-                                paused_due_to_panic,
-                            ) {
+                            if let Some(play_action) =
+                                crate::toolbar::draw_play_controls(ui, self.play_state)
+                            {
                                 self.apply_play_action(play_action);
                             }
 
                             // Phase 6: Play mode indicator badge
                             ui.add_space(8.0);
                             crate::toolbar::draw_play_mode_indicator(ui, self.play_state);
+
+                            // Tier-1/Tier-2 build indicator (ADR-037).
+                            if let Some(b) = &self.behavior {
+                                ui.add_space(8.0);
+                                let status = crate::toolbar::GameBuildStatus {
+                                    stale: b.stale(),
+                                    rebuilding: b.rebuilding(),
+                                    restart_required: b.restart_required(),
+                                    schema_diverged: b.schema_diverged(),
+                                };
+                                match crate::toolbar::draw_game_build_indicator(ui, status) {
+                                    Some(crate::toolbar::GameBuildAction::Rebuild) => {
+                                        if self
+                                            .behavior
+                                            .as_mut()
+                                            .expect("checked above")
+                                            .request_rebuild()
+                                        {
+                                            log::info!("toolbar: Tier-1 rebuild started");
+                                        }
+                                    }
+                                    Some(crate::toolbar::GameBuildAction::Restart) => {
+                                        self.request_restart();
+                                    }
+                                    None => {}
+                                }
+                            }
 
                             // Gizmo mode switch (#85 v2); mirrors W/E/R.
                             ui.add_space(16.0);
@@ -1159,17 +1499,11 @@ impl AppHandler for Editor {
             // Menu bar with play controls (egui fallback for non-macOS platforms)
             #[cfg(not(target_os = "macos"))]
             {
-                let (paused_due_to_panic, gizmo_mode) = {
+                let gizmo_mode = {
                     let ew = self.world.as_ref().unwrap();
-                    (
-                        ew.world
-                            .resource::<redlilium_ecs::PlayControl>()
-                            .panic_info()
-                            .is_some(),
-                        ew.world
-                            .resource::<redlilium_gizmo::TransformGizmo>()
-                            .mode(),
-                    )
+                    ew.world
+                        .resource::<redlilium_gizmo::TransformGizmo>()
+                        .mode()
                 };
 
                 let result = menu::draw_menu_bar(
@@ -1177,7 +1511,6 @@ impl AppHandler for Editor {
                     &window,
                     custom_titlebar,
                     self.play_state,
-                    paused_due_to_panic,
                     self.show_gpu_stats,
                     gizmo_mode,
                 );
@@ -1207,8 +1540,7 @@ impl AppHandler for Editor {
                             let ew = self.world.as_mut().unwrap();
                             match action {
                                 MenuAction::Save => {
-                                    ew.history.mark_saved();
-                                    log::info!("Saved");
+                                    self.save_current_scene();
                                 }
                                 MenuAction::Undo => {
                                     if let Err(e) = ew.history.undo(&mut ew.world) {
@@ -1373,6 +1705,9 @@ impl AppHandler for Editor {
                             }
                             if ui.button("Cancel").clicked() {
                                 self.show_close_dialog = false;
+                                // A cancelled close also cancels a pending
+                                // Tier-2 restart (ADR-037).
+                                self.restart_pending = false;
                             }
                         });
                     });
@@ -1571,13 +1906,45 @@ impl AppHandler for Editor {
             }
         }
 
+        // The play world renders into its own graph, submitted BEFORE the
+        // main graph: cross-submit synchronization on one queue is automatic,
+        // and the egui pass sampling the play texture lives in the main graph.
+        if let Some(play) = self.play.as_mut() {
+            let (w, h) = self
+                .scene_view_rect_phys
+                .map_or((ctx.width(), ctx.height()), |[_, _, w, h]| {
+                    (w as u32, h as u32)
+                });
+            let format = self
+                .scene_view
+                .as_ref()
+                .map(|sv| sv.color_format())
+                .unwrap_or(TextureFormat::Bgra8UnormSrgb);
+            let play_graph = ctx.acquire_graph();
+            let (play_graph, play_transfers) = play.render(&self.runner, play_graph, w, h, format);
+            for transfer in play_transfers {
+                ctx.submit(transfer);
+            }
+            ctx.submit(play_graph);
+        }
+
         // Remote screenshot: copy this frame's scene target through the graph.
+        // While a session is live it captures the session's view camera (the
+        // game camera during Play, the flyover during pause) — exactly what
+        // the scene view shows.
         if let (Some(rc), Some(sv), Some(ew)) = (
             &mut self.remote,
             self.scene_view.as_ref(),
             self.world.as_ref(),
         ) {
-            crate::remote_commands::inject_screenshot_pass(rc, &ew.world, sv.device(), &mut graph);
+            let source = self.play.as_ref().and_then(|p| p.scene_color());
+            crate::remote_commands::inject_screenshot_pass(
+                rc,
+                &ew.world,
+                sv.device(),
+                &mut graph,
+                source,
+            );
         }
 
         if render_active && let Some(ew) = self.world.as_ref() {
@@ -1617,10 +1984,21 @@ impl AppHandler for Editor {
             egui.on_mouse_move(x, y);
         });
         if self.world.is_some() {
-            let ew = self.active_world();
+            // Play world coordinates are scene-view-local (its "window" is
+            // the scene view) — during Play and during the pause flyover
+            // alike; the editing world keeps raw window coordinates
+            // (gizmo/picking expect them).
+            let (mut mx, mut my) = (x, y);
+            if self.play.is_some()
+                && let Some([ox, oy, _, _]) = self.scene_view_rect_phys
             {
-                let mut input = ew.window_input.write();
-                input.on_mouse_move(x, y);
+                mx -= ox as f64;
+                my -= oy as f64;
+            }
+            let sink = self.input_sink();
+            {
+                let mut input = sink.write();
+                input.on_mouse_move(mx, my);
             }
         }
     }
@@ -1630,15 +2008,18 @@ impl AppHandler for Editor {
             egui.on_mouse_button(button, pressed);
         });
 
-        // Phase 6: Block edit operations during Play mode (game input still flows through)
-        let is_playing = self.play_state == PlayState::Playing;
+        // Editing gestures (picking, box-select, undo merge breaks) target
+        // the editing world; while a play session exists the scene view shows
+        // the play world — during Play *and* the pause flyover — so they are
+        // blocked for the whole session, not just while unpaused.
+        let in_session = self.play.is_some();
 
         // Releasing the primary button ends an edit gesture: the next recorded
         // action starts a fresh undo entry (drag-long edits keep coalescing
         // while the button is held).
         if button == MouseButton::Left
             && !pressed
-            && !is_playing
+            && !in_session
             && !self.gizmo_wants_cursor()
             && let Some(ew) = &mut self.world
         {
@@ -1659,16 +2040,17 @@ impl AppHandler for Editor {
                 MouseButton::Middle => 2,
                 _ => return,
             };
-            let ew = self.active_world();
+            let sink = self.input_sink();
             {
-                let mut input = ew.window_input.write();
+                let mut input = sink.write();
                 input.on_mouse_button(idx, pressed);
             }
 
-            // LMB gestures over the scene view (blocked during Play). The
-            // routing decision — egui / gizmo / select — is a pure function
-            // in `gestures.rs`; this block only acts on it.
-            if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !is_playing {
+            // LMB gestures over the scene view (blocked while a play session
+            // exists — the image is the play world's). The routing decision —
+            // egui / gizmo / select — is a pure function in `gestures.rs`;
+            // this block only acts on it.
+            if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !in_session {
                 use crate::gestures::ReleaseAction;
                 if pressed {
                     // Routing arms (or refuses) the gesture; selection is not
@@ -1702,9 +2084,9 @@ impl AppHandler for Editor {
             egui.on_mouse_scroll(MouseScrollDelta::LineDelta(dx, dy));
         });
         if self.world.is_some() && self.cursor_in_scene_view() && !self.egui_wants_pointer {
-            let ew = self.active_world();
+            let sink = self.input_sink();
             {
-                let mut input = ew.window_input.write();
+                let mut input = sink.write();
                 input.on_scroll(dx, dy);
             }
         }
@@ -1741,9 +2123,11 @@ impl AppHandler for Editor {
             && let PhysicalKey::Code(winit_key) = event.physical_key
             && let Some(key) = redlilium_app::input::map_winit_key(winit_key)
         {
-            let ew = self.active_world();
+            // While playing (unpaused) the game is the sink — WASD drives the
+            // car, not the editor camera.
+            let sink = self.input_sink();
             {
-                let mut input = ew.window_input.write();
+                let mut input = sink.write();
                 if event.state.is_pressed() {
                     input.on_key_pressed(key);
                 } else {
