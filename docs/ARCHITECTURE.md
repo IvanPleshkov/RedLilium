@@ -634,6 +634,49 @@ the asset database live in the host-owned `EngineContext` and are shared by
 all worlds as the same `Arc`s, so a play world starting and dying does not
 reload assets.
 
+### The game owns the editor binary (ADR-033)
+
+`redlilium-editor` is a **library**. A game project ships a small editor
+binary that statically links its plugin:
+
+```rust
+// game-editor/src/main.rs — the whole binary
+fn main() {
+    redlilium_editor::hosting(CarGamePlugin)
+        .behavior_reload("car-game")
+        .run();
+}
+```
+
+Authoring (inspector, scene save/load, undo) always runs against the static
+image and can never be invalidated by module drift. Code iteration is tiered
+by what changed:
+
+- **Tier 1 — behavior** (`editor/src/behavior_reload.rs`): the editor
+  watches the game package's sources (stale marker only — marking, never
+  acting), rebuilds the game **cdylib** on request with the fixed invocation
+  `cargo build -p <editor-pkg> -p <game-pkg>` (feature unification matches
+  the running binary by construction), and hot-swaps it for **play worlds
+  only**. The cdylib and the rlib inside the editor binary come from one
+  rustc invocation, so their game `TypeId`s are identical — the behavior
+  module registers under the authoring generation, and dylib liveness is
+  enforced structurally (the play session stops before any swap). Component
+  schemas are diffed by name (derive-generated `schema_hash`); a divergence
+  means play runs the new code while authoring the changed fields needs a
+  restart.
+- **Tier 2 — data / editor tools / engine** (`editor/src/session.rs`): an
+  exec-restart with session carry (open scene + editor camera pose in a
+  one-shot `.redlilium/session.ron`). The trigger is the fingerprint gate:
+  a freshly built cdylib carrying a different engine build id than the
+  running binary is refused, and that refusal is the "restart required"
+  signal. The engine build id is scoped to the engine crates a game module
+  links (plus `Cargo.lock`), so commits to `editor/`/`demos/`/game crates
+  do not invalidate modules.
+
+The engine repo keeps a plain `redlilium-editor` binary (no game;
+`REDLILIUM_GAME=<cdylib>` hosts one dynamically with the warm-restart reload
+of ADR-020) for engine development.
+
 ## Multi-World Architecture
 
 The engine supports multiple ECS worlds with shared rendering backend
