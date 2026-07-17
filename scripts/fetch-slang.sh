@@ -16,14 +16,14 @@
 # and by re-baking, in one reviewed change.
 set -euo pipefail
 
-SLANG_VERSION="2026.3.1"
+SLANG_VERSION="2026.8"
 
 # Optional integrity check. Fill these with the real sha256 of each release
 # archive (the script prints the digest it downloaded) and they will be enforced;
 # left empty, the script proceeds with a loud warning instead of failing.
-SHA256_macos_arm64=""
-SHA256_macos_x64=""
-SHA256_linux_x64=""
+SHA256_macos_arm64="e182d44b403f3e5d78d66e7608cf6db1b81119883426fa9cc30f6af70c7ed554"
+SHA256_macos_x64="b2ae6d712134c7d1c841261f1606f51fa3474895598672887a1a951a58759245"
+SHA256_linux_x64="b23af8f2569e7961ca143c6ecd9abf6d7ac14a9bda739a1c6281694f774fa3eb"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$ROOT/.slang"

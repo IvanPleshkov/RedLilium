@@ -24,3 +24,14 @@ redlilium-graphics = { path = "../graphics", default-features = false, features 
     "dummy",
     "wgpu-backend",
 ] }
+# IBL bake (#137): CPU generation of the BRDF LUT + environment cubemaps into
+# Zstd-supercompressed KTX2 (parsed back by redlilium-core for validation).
+redlilium-core = { path = "../core" }
+rayon = "1.10"
+# Real libzstd bindings: better ratios than ruzstd's young encoder, and the
+# bake is native-only tooling — wasm-cleanliness is a loader concern, not ours.
+zstd = "0.13"
+half = "2.4"
+# The workspace `image` is png/jpeg-only; the bake additionally decodes the
+# Radiance .hdr source.
+image = { workspace = true, features = ["hdr"] }

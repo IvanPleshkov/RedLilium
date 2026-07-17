@@ -23,6 +23,8 @@ demos/web/pkg/
 .slang
 # KTX-Software CLI — provisioned locally by scripts/fetch-ktx.sh (#120/#122)
 .ktx
+# Source HDRI for the IBL bake — provisioned by scripts/fetch-hdri.sh (#137)
+.hdri
 
 # Environment
 .env
