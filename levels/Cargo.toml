@@ -1,0 +1,12 @@
+[package]
+name = "redlilium-levels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Semantic level authoring: road-graph components + editing-view preview (docs/DESIGN_PROCEDURAL_LEVELS.md)"
+
+[dependencies]
+redlilium-core = { path = "../core" }
+redlilium-debug-drawer = { path = "../debug_drawer" }
+redlilium-ecs = { path = "../ecs" }
+redlilium-runtime = { path = "../runtime" }

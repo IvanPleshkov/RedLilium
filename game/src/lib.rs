@@ -35,6 +35,7 @@ use redlilium_runtime::AppControl;
 /// the editor persists scenes, #2).
 pub const MENU_SCENE: &str = "scenes/menu.scene";
 pub const LEVEL_SCENE: &str = "scenes/level1.scene";
+pub const PLAYGROUND_SCENE: &str = "scenes/levels_playground.scene";
 
 /// Build stamp (#135): crate version + git commit, e.g. `0.1.0+1a2b3c4d5`
 /// (`-dirty` marks uncommitted changes, `unknown` a git-less build). Printed
@@ -319,9 +320,17 @@ pub struct CarGamePlugin;
 
 impl Plugin for CarGamePlugin {
     fn register_types(&self, world: &mut World) {
+        // Level-graph components (roads/terrain authoring) come from the
+        // levels crate; forwarding here is what makes every hosting world —
+        // editor included — understand them.
+        redlilium_levels::LevelsPlugin.register_types(world);
         world.register_inspector::<CarController>();
         world.register_inspector::<FollowCamera>();
         world.register_inspector::<CarSpawn>();
+    }
+
+    fn build_editing_view(&self, schedules: &mut redlilium_ecs::Schedules) {
+        redlilium_levels::LevelsPlugin.build_editing_view(schedules);
     }
 
     fn build(&self, app: &mut App) {
@@ -553,6 +562,51 @@ pub fn spawn_menu_backdrop(world: &mut World) {
             Vec3::new(0.8, 0.8, 0.8),
         );
         spawn_box(world, material.clone(), transform);
+    }
+}
+
+/// Road-graph playground (docs/DESIGN_PROCEDURAL_LEVELS.md, prototype): a
+/// short S-curve of [`RoadNode`](redlilium_levels::RoadNode) cross-sections
+/// joined by [`RoadSegment`](redlilium_levels::RoadSegment)s, plus one lone
+/// node. No geometry — the levels editing-view overlay draws the graph; move
+/// and rotate nodes with the gizmo and the patches follow.
+pub fn spawn_levels_playground(world: &mut World) {
+    use redlilium_levels::{RoadNode, RoadSegment};
+
+    let node = |world: &mut World, x: f32, z: f32, yaw: f32| {
+        let entity = world.spawn();
+        let transform = Transform::new(
+            Vec3::new(x, 0.0, z),
+            redlilium_core::math::quat_from_rotation_y(yaw),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(entity, transform).unwrap();
+        world
+            .insert(entity, GlobalTransform(transform.to_matrix()))
+            .unwrap();
+        world.insert(entity, RoadNode::default()).unwrap();
+        entity
+    };
+
+    let n1 = node(world, 0.0, 0.0, 0.0);
+    let n2 = node(world, 2.5, 11.0, 0.4);
+    let n3 = node(world, 9.2, 19.8, 0.9);
+    let n4 = node(world, 19.2, 24.3, 1.4);
+    // A lone cross-section: what a node looks like before it is connected.
+    node(world, -8.0, 6.0, -0.5);
+
+    for (a, b) in [(n1, n2), (n2, n3), (n3, n4)] {
+        let road = world.spawn();
+        world
+            .insert(
+                road,
+                RoadSegment {
+                    a,
+                    b,
+                    ..RoadSegment::default()
+                },
+            )
+            .unwrap();
     }
 }
 

@@ -115,6 +115,20 @@ pub trait Plugin {
         let _ = app;
     }
 
+    /// Add *editing-world* view systems: authoring previews and debug
+    /// overlays for the plugin's own components. Called by editor hosts
+    /// against the editing world's schedules right after
+    /// [`register_types`](Plugin::register_types), and again after every
+    /// reload against freshly built schedules (so generations never stack).
+    /// Unlike [`build`](Plugin::build) this runs in a world the plugin does
+    /// not own: the editing `Update` schedule is read-only — systems may
+    /// observe components and draw (e.g. `DebugDrawer`) or push
+    /// `EditAction`s through the `ActionQueue`, never mutate the world
+    /// directly. Default: no-op.
+    fn build_editing_view(&self, schedules: &mut redlilium_ecs::Schedules) {
+        let _ = schedules;
+    }
+
     /// Reload cleanup: called before World drop during reload.
     ///
     /// Runs after scene serialization but **before** World drop and before dylib
