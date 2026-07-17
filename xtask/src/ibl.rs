@@ -65,10 +65,11 @@ pub fn run() {
     let start = std::time::Instant::now();
     let env = Equirect::load(&hdri_path);
     println!(
-        "bake-ibl: source {} ({}x{}, {:.1}s to decode)",
+        "bake-ibl: source {} ({}x{}, {} pyramid levels, {:.1}s to decode)",
         HDRI_NAME,
-        env.width,
-        env.height,
+        env.levels[0].width,
+        env.levels[0].height,
+        env.levels.len(),
         start.elapsed().as_secs_f32()
     );
 
@@ -125,25 +126,13 @@ fn bake_one(out_dir: &Path, name: &str, bake: impl FnOnce() -> Ktx2Output) {
 // === Source environment ===
 
 /// The decoded equirectangular HDR source, RGB f32.
-struct Equirect {
+struct EquirectLevel {
     data: Vec<f32>,
     width: u32,
     height: u32,
 }
 
-impl Equirect {
-    fn load(path: &Path) -> Self {
-        let img = image::open(path)
-            .unwrap_or_else(|e| panic!("decode {}: {e}", path.display()))
-            .to_rgb32f();
-        let (width, height) = (img.width(), img.height());
-        Self {
-            data: img.into_raw(),
-            width,
-            height,
-        }
-    }
-
+impl EquirectLevel {
     fn texel(&self, x: u32, y: u32) -> Vec3 {
         let idx = ((y * self.width + x) * 3) as usize;
         Vec3::new(self.data[idx], self.data[idx + 1], self.data[idx + 2])
@@ -165,6 +154,83 @@ impl Equirect {
         let top = self.texel(x0, y0) * (1.0 - tx) + self.texel(x1, y0) * tx;
         let bottom = self.texel(x0, y1) * (1.0 - tx) + self.texel(x1, y1) * tx;
         top * (1.0 - ty) + bottom * ty
+    }
+
+    /// 2×2 box-filtered next pyramid level (indices clamp at odd edges).
+    fn downsample(&self) -> Self {
+        let width = (self.width / 2).max(1);
+        let height = (self.height / 2).max(1);
+        let mut data = Vec::with_capacity((width * height * 3) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let (x2, y2) = (x * 2, y * 2);
+                let x2b = (x2 + 1).min(self.width - 1);
+                let y2b = (y2 + 1).min(self.height - 1);
+                let sum = self.texel(x2, y2)
+                    + self.texel(x2b, y2)
+                    + self.texel(x2, y2b)
+                    + self.texel(x2b, y2b);
+                let avg = sum * 0.25;
+                data.extend_from_slice(&[avg.x, avg.y, avg.z]);
+            }
+        }
+        Self {
+            data,
+            width,
+            height,
+        }
+    }
+}
+
+/// The source HDRI with a full box-filtered mip pyramid.
+///
+/// Monte-Carlo convolutions must not sample the finest level directly: an HDR
+/// sun spans a handful of texels with radiance ~10⁴, so sparse importance
+/// samples either miss it (energy loss at high roughness) or hit it rarely
+/// (isolated firefly texels). Filtered importance sampling (Křivánek &
+/// Colbert) fixes both: each sample reads the pyramid level whose texel solid
+/// angle matches the solid angle the sample stands in for.
+struct Equirect {
+    levels: Vec<EquirectLevel>,
+}
+
+impl Equirect {
+    fn load(path: &Path) -> Self {
+        let img = image::open(path)
+            .unwrap_or_else(|e| panic!("decode {}: {e}", path.display()))
+            .to_rgb32f();
+        let (width, height) = (img.width(), img.height());
+        let mut levels = vec![EquirectLevel {
+            data: img.into_raw(),
+            width,
+            height,
+        }];
+        while levels.last().unwrap().width > 1 || levels.last().unwrap().height > 1 {
+            levels.push(levels.last().unwrap().downsample());
+        }
+        Self { levels }
+    }
+
+    /// Trilinear sample at a fractional pyramid `level`.
+    fn sample_level(&self, dir: Vec3, level: f32) -> Vec3 {
+        let level = level.clamp(0.0, (self.levels.len() - 1) as f32);
+        let lo = level.floor() as usize;
+        let hi = (lo + 1).min(self.levels.len() - 1);
+        let t = level.fract();
+        if t == 0.0 || lo == hi {
+            return self.levels[lo].sample(dir);
+        }
+        self.levels[lo].sample(dir) * (1.0 - t) + self.levels[hi].sample(dir) * t
+    }
+
+    /// Average solid angle of one finest-level texel (sr).
+    fn texel_solid_angle(&self) -> f32 {
+        4.0 * std::f32::consts::PI / (self.levels[0].width * self.levels[0].height) as f32
+    }
+
+    /// Pyramid level whose texels cover `sample_solid_angle` steradians.
+    fn level_for_solid_angle(&self, sample_solid_angle: f32) -> f32 {
+        (0.5 * (sample_solid_angle / self.texel_solid_angle()).log2()).max(0.0)
     }
 }
 
@@ -295,11 +361,15 @@ fn bake_cube_level(size: u32, shade: impl Fn(Vec3) -> Vec3 + Sync) -> Vec<u8> {
     rows.concat()
 }
 
-/// Sky cubemap: mip 0 sampled bilinearly from the equirect source, the rest
-/// of the chain 2×2 box-filtered — a plain mip pyramid for the skybox pass
-/// (specular convolution lives in the prefilter map).
+/// Sky cubemap: mip 0 resampled from the equirect pyramid at the level
+/// matching the cube's texel density (the 2k source is ~8× denser than the
+/// 256 cube — sampling the finest level would alias), the rest of the chain
+/// 2×2 box-filtered — a plain mip pyramid for the skybox pass (specular
+/// convolution lives in the prefilter map).
 fn bake_sky_cube(env: &Equirect) -> Vec<Vec<u8>> {
     let mip_count = 32 - SKY_SIZE.leading_zeros();
+    let cube_texel_sa = 4.0 * std::f32::consts::PI / (6 * SKY_SIZE * SKY_SIZE) as f32;
+    let level = env.level_for_solid_angle(cube_texel_sa);
 
     // f32 working pyramid per face, downsampled face-by-face.
     let mut faces: Vec<Vec<Vec3>> = (0..6u32)
@@ -307,7 +377,7 @@ fn bake_sky_cube(env: &Equirect) -> Vec<Vec<u8>> {
             let mut texels = Vec::with_capacity((SKY_SIZE * SKY_SIZE) as usize);
             for y in 0..SKY_SIZE {
                 for x in 0..SKY_SIZE {
-                    texels.push(env.sample(cubemap_dir(face, x, y, SKY_SIZE)));
+                    texels.push(env.sample_level(cubemap_dir(face, x, y, SKY_SIZE), level));
                 }
             }
             texels
@@ -355,7 +425,12 @@ fn bake_sky_cube(env: &Equirect) -> Vec<Vec<u8>> {
 }
 
 /// Diffuse irradiance cubemap — the demo's fixed-step hemisphere integral.
+///
+/// Samples the pyramid level whose texels match the integration grid's cell
+/// solid angle (≈ `delta²`), so the tiny ultra-bright sun contributes its
+/// true energy instead of aliasing against the fixed step grid.
 fn bake_irradiance(env: &Equirect) -> Vec<u8> {
+    let level = env.level_for_solid_angle(IRRADIANCE_SAMPLE_DELTA * IRRADIANCE_SAMPLE_DELTA);
     bake_cube_level(IRRADIANCE_SIZE, |normal| {
         let up = if normal.y.abs() < 0.999 {
             Vec3::new(0.0, 1.0, 0.0)
@@ -377,7 +452,7 @@ fn bake_irradiance(env: &Equirect) -> Vec<u8> {
                     theta.cos(),
                 );
                 let dir = tangent.x * right + tangent.y * up + tangent.z * normal;
-                irradiance += env.sample(dir) * theta.cos() * theta.sin();
+                irradiance += env.sample_level(dir, level) * theta.cos() * theta.sin();
                 samples += 1.0;
                 theta += IRRADIANCE_SAMPLE_DELTA;
             }
@@ -389,12 +464,23 @@ fn bake_irradiance(env: &Equirect) -> Vec<u8> {
 
 /// Pre-filtered specular cubemap: GGX importance sampling with the demo's
 /// `N = V = R` assumption; `roughness = mip / (PREFILTER_MIPS - 1)`.
+///
+/// Each sample reads the equirect pyramid level matched to its GGX pdf
+/// (filtered importance sampling — see [`Equirect`]); `roughness = 0` copies
+/// the finest level exactly.
 fn bake_prefilter(env: &Equirect) -> Vec<Vec<u8>> {
     (0..PREFILTER_MIPS)
         .map(|mip| {
             let size = (PREFILTER_SIZE >> mip).max(1);
             let roughness = mip as f32 / (PREFILTER_MIPS - 1) as f32;
             bake_cube_level(size, |normal| {
+                if roughness == 0.0 {
+                    // Mirror level: no convolution, but resample at the level
+                    // matching this cube's texel density (as bake_sky_cube
+                    // does) so the sub-texel sun isn't grid-aliased.
+                    let texel_sa = 4.0 * std::f32::consts::PI / (6 * size * size) as f32;
+                    return env.sample_level(normal, env.level_for_solid_angle(texel_sa));
+                }
                 let v = normal;
                 let mut prefiltered = Vec3::zeros();
                 let mut total_weight = 0.0f32;
@@ -404,7 +490,12 @@ fn bake_prefilter(env: &Equirect) -> Vec<Vec<u8>> {
                     let l = (2.0 * v.dot(&h) * h - v).normalize();
                     let n_dot_l = normal.dot(&l).max(0.0);
                     if n_dot_l > 0.0 {
-                        prefiltered += env.sample(l) * n_dot_l;
+                        // With N = V the sample pdf is D·NdotH/(4·HdotV) = D/4.
+                        let n_dot_h = normal.dot(&h).max(0.0);
+                        let pdf = ggx_distribution(n_dot_h, roughness) * 0.25 + 1e-4;
+                        let sample_sa = 1.0 / (PREFILTER_SAMPLES as f32 * pdf);
+                        let level = env.level_for_solid_angle(sample_sa);
+                        prefiltered += env.sample_level(l, level) * n_dot_l;
                         total_weight += n_dot_l;
                     }
                 }
@@ -412,6 +503,14 @@ fn bake_prefilter(env: &Equirect) -> Vec<Vec<u8>> {
             })
         })
         .collect()
+}
+
+/// GGX normal distribution `D(h)` with `a = roughness²` (Trowbridge-Reitz).
+fn ggx_distribution(n_dot_h: f32, roughness: f32) -> f32 {
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    a2 / (std::f32::consts::PI * denom * denom)
 }
 
 // === KTX2 writing ===
@@ -636,5 +735,54 @@ mod tests {
             s_smooth > s_rough,
             "scale must fall with roughness: {s_smooth} vs {s_rough}"
         );
+    }
+    /// Firefly / energy guard over the checked-in prefilter chain. Without
+    /// filtered importance sampling the pinned sun (radiance ~3·10⁴) leaves
+    /// isolated firefly texels in the middle mips and loses its energy
+    /// entirely in the wide-roughness tail — both regressions show up here as
+    /// either a runaway max or a collapsing mean. Thresholds are tied to the
+    /// pinned Spruit Sunrise source; re-tune them when swapping the HDRI.
+    #[test]
+    fn prefilter_chain_energy_is_stable() {
+        let path = workspace_root().join("std-assets/textures/ibl/prefilter_cube.ktx2");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("{} absent — skipping", path.display());
+            return;
+        };
+        let cpu = parse_ktx2(&bytes).expect("prefilter parses");
+        let mut offset = 0usize;
+        for mip in 0..cpu.mip_level_count {
+            let size = (cpu.width >> mip).max(1) as usize;
+            let texels = size * size * 6;
+            let mut max_lum = 0.0f32;
+            let mut mean_lum = 0.0f64;
+            for t in 0..texels {
+                let base = offset + t * 8;
+                let r = half::f16::from_le_bytes([cpu.data[base], cpu.data[base + 1]]).to_f32();
+                let g = half::f16::from_le_bytes([cpu.data[base + 2], cpu.data[base + 3]]).to_f32();
+                let b = half::f16::from_le_bytes([cpu.data[base + 4], cpu.data[base + 5]]).to_f32();
+                let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                max_lum = max_lum.max(lum);
+                mean_lum += lum as f64;
+            }
+            mean_lum /= texels as f64;
+            offset += texels * 8;
+
+            // Energy stays put across the chain (convolution preserves the
+            // mean); losing the sun collapses this to ~0.3.
+            assert!(
+                (0.5..3.0).contains(&mean_lum),
+                "mip {mip}: mean luminance {mean_lum:.2} outside the stable band"
+            );
+            // The narrow-roughness mips legitimately keep a bright compact sun
+            // highlight; from mip 3 on the lobe is wide enough that any texel
+            // this hot is a firefly.
+            if mip >= 3 {
+                assert!(
+                    max_lum < 100.0,
+                    "mip {mip}: max luminance {max_lum:.0} — firefly texel"
+                );
+            }
+        }
     }
 }
