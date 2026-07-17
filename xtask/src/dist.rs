@@ -41,9 +41,19 @@
 //! *relative* directories compiled into the binary (`std-assets`,
 //! `game/assets`); the runtime resolves them against the executable's
 //! directory first (#132), so the folder runs from any cwd — double-click
-//! included. Packs are copied verbatim (v1); pruning to
-//! referenced-assets-only is #134. Shaders need no extra files: the default
-//! (Slang-off) build embeds the baked WGSL table in the binary.
+//! included.
+//!
+//! Packs are **pruned to the referenced closure** (#134): the dependency
+//! walk starts from the entry scenes in `game/dist-manifest.ron`, follows
+//! guid references through the merged `assets.db` + asset source text
+//! (`redlilium_assets::AssetDb::dependency_closure`), and ships only
+//! reachable records plus the manifest's `keep` prefixes (assets loaded by
+//! code paths — today the whole std pack). Each pack's `assets.db` is
+//! regenerated to the shipped subset; pruned files are printed so a
+//! missing-asset regression is diagnosable. The wasm embed (`game/build.rs`)
+//! is not pruned — currently the whole game pack is reachable anyway.
+//! Shaders need no extra files: the default (Slang-off) build embeds the
+//! baked WGSL table in the binary.
 //!
 //! Note cargo's `--profile dist` build artifacts also land under
 //! `target/dist/` (the artifact dir is named after the profile); the packaged
@@ -67,11 +77,15 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The asset packs a shipped build needs, as workspace-relative directories.
-/// Source path == destination path: the layout must match the mount dirs in
-/// `game/src/main.rs` (`GameConfig::mounts`), which the runtime resolves
-/// exe-dir-first (#132; on macOS also `Contents/Resources`, #133).
-const PACKS: &[&str] = &["std-assets", "game/assets"];
+/// The asset packs a shipped build needs: `(mount name, workspace-relative
+/// dir)`. Both must match `GameConfig::mounts` in `game/src/main.rs`: the
+/// mount names key the DB walk and the manifest, and the dist artifact
+/// mirrors the dirs because the runtime resolves them exe-dir-first (#132;
+/// on macOS also `Contents/Resources`, #133).
+const MOUNTS: &[(&str, &str)] = &[("std", "std-assets"), ("game", "game/assets")];
+
+/// Prune manifest (#134): closure roots + code-referenced keep prefixes.
+const MANIFEST: &str = "game/dist-manifest.ron";
 
 const GAME_PACKAGE: &str = "car-game";
 const GAME_BIN: &str = "car-game";
@@ -160,18 +174,27 @@ fn dist_desktop() -> Result<(), String> {
     let bin_name = format!("{GAME_BIN}{}", std::env::consts::EXE_SUFFIX);
     let bin_src = root.join("target/dist").join(&bin_name);
 
-    // 4. Platform packaging (#133): the artifact is native to the *host* OS —
+    // 4. Prune the asset packs to the referenced closure (#134).
+    let plans = plan_packs(&root)?;
+
+    // 5. Platform packaging (#133): the artifact is native to the *host* OS —
     //    dist builds for the platform it runs on.
     match std::env::consts::OS {
-        "macos" => package_macos(&root, &dist_root, &dist, &bin_src),
-        other => package_flat(&root, &dist_root, &dist, &bin_src, &bin_name, other),
+        "macos" => package_macos(&root, &dist_root, &dist, &bin_src, &plans),
+        other => package_flat(&root, &dist_root, &dist, &bin_src, &bin_name, other, &plans),
     }
 }
 
 /// macOS (#133): assemble `Car Game.app`, optionally codesign it, wrap the
 /// dist folder in a `.dmg` (the native download format — replaces the zip),
 /// and optionally notarize + staple the dmg.
-fn package_macos(root: &Path, dist_root: &Path, dist: &Path, bin_src: &Path) -> Result<(), String> {
+fn package_macos(
+    root: &Path,
+    dist_root: &Path,
+    dist: &Path,
+    bin_src: &Path,
+    plans: &[PackPlan],
+) -> Result<(), String> {
     let app = dist.join(format!("{GAME_DISPLAY_NAME}.app"));
     let contents = app.join("Contents");
     let macos_dir = contents.join("MacOS");
@@ -184,9 +207,8 @@ fn package_macos(root: &Path, dist_root: &Path, dist: &Path, bin_src: &Path) -> 
 
     // Asset packs go into Resources (data belongs there for codesigning); the
     // runtime finds them via the `../Resources` mount candidate (#132/#133).
-    for pack in PACKS {
-        let files = copy_dir(&root.join(pack), &resources.join(pack))?;
-        println!("dist: {pack} — {files} files");
+    for plan in plans {
+        write_pack(root, plan, &resources)?;
     }
 
     let icns_src = root.join("game/icon/icon.icns");
@@ -297,6 +319,7 @@ fn package_macos(root: &Path, dist_root: &Path, dist: &Path, bin_src: &Path) -> 
 /// Linux/Windows: the flat folder layout from #107 — binary next to the asset
 /// packs — zipped. Linux additionally gets an XDG launcher template + icon;
 /// the Windows binary carries its icon internally (game/build.rs).
+#[allow(clippy::too_many_arguments)]
 fn package_flat(
     root: &Path,
     dist_root: &Path,
@@ -304,13 +327,13 @@ fn package_flat(
     bin_src: &Path,
     bin_name: &str,
     os: &str,
+    plans: &[PackPlan],
 ) -> Result<(), String> {
     let bin_dst = dist.join(bin_name);
     std::fs::copy(bin_src, &bin_dst).map_err(|e| format!("copying {bin_src:?}: {e}"))?;
 
-    for pack in PACKS {
-        let files = copy_dir(&root.join(pack), &dist.join(pack))?;
-        println!("dist: {pack} — {files} files");
+    for plan in plans {
+        write_pack(root, plan, dist)?;
     }
 
     if os == "linux" {
@@ -445,31 +468,185 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Recursively copy `src` into `dst`, skipping dotfiles (`.DS_Store` and
-/// friends are OS noise, not assets). Returns the number of files copied.
-fn copy_dir(src: &Path, dst: &Path) -> Result<usize, String> {
-    std::fs::create_dir_all(dst).map_err(|e| format!("creating {dst:?}: {e}"))?;
-    let mut copied = 0;
-    let entries = std::fs::read_dir(src).map_err(|e| format!("reading {src:?}: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("reading {src:?}: {e}"))?;
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&name);
-        let ty = entry
-            .file_type()
-            .map_err(|e| format!("stat {from:?}: {e}"))?;
-        if ty.is_dir() {
-            copied += copy_dir(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to).map_err(|e| format!("copying {from:?}: {e}"))?;
-            copied += 1;
+/// Parsed `game/dist-manifest.ron` (#134).
+#[derive(serde::Deserialize)]
+struct DistManifest {
+    /// Closure roots, `"mount:path"` — the scenes the game can load.
+    entries: Vec<String>,
+    /// Always-shipped `"mount:path-prefix"` matches — assets that code loads
+    /// by hardcoded path, invisible to the data-driven walk.
+    keep: Vec<String>,
+}
+
+/// What ships for one asset pack after pruning (#134): the selected files
+/// (mount-relative, forward slashes) and the regenerated `assets.db` text.
+struct PackPlan {
+    dir: &'static str,
+    files: Vec<String>,
+    db_ron: String,
+}
+
+/// Compute the shipped subset of every pack (#134): merge the packs'
+/// `assets.db` files, walk the dependency closure from the manifest's entry
+/// scenes, and keep reachable records plus manifest `keep` prefixes. Prints
+/// one report line per pack — a pruned file that should have shipped is
+/// diagnosable from here.
+fn plan_packs(root: &Path) -> Result<Vec<PackPlan>, String> {
+    let mut db = redlilium_assets::AssetDb::new();
+    for &(mount, dir) in MOUNTS {
+        let path = root.join(dir).join("assets.db");
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {path:?}: {e}"))?;
+        let conflicts = db
+            .merge_ron(mount, &text)
+            .map_err(|e| format!("parsing {path:?}: {e}"))?;
+        if !conflicts.is_empty() {
+            return Err(format!("{path:?}: {} guid/path conflicts", conflicts.len()));
         }
     }
-    Ok(copied)
+
+    let manifest_path = root.join(MANIFEST);
+    let manifest: DistManifest = ron::from_str(
+        &std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("reading {manifest_path:?}: {e}"))?,
+    )
+    .map_err(|e| format!("parsing {manifest_path:?}: {e}"))?;
+
+    let dir_of = |mount: &str| {
+        MOUNTS
+            .iter()
+            .find(|&&(m, _)| m == mount)
+            .map(|&(_, dir)| dir)
+    };
+    let split = |s: &str| -> Result<(String, String), String> {
+        match s.split_once(':') {
+            Some((mount, path)) if dir_of(mount).is_some() => {
+                Ok((mount.to_string(), path.to_string()))
+            }
+            _ => Err(format!(
+                "manifest entry {s:?} is not \"mount:path\" with a known mount"
+            )),
+        }
+    };
+
+    // Closure roots must resolve — a typo here would silently ship nothing.
+    let mut roots = Vec::new();
+    for entry in &manifest.entries {
+        let (mount, path) = split(entry)?;
+        let guid = db
+            .guid_of(&redlilium_assets::AssetPath::new(&mount, &path))
+            .ok_or_else(|| format!("manifest entry {entry:?} is not in any assets.db"))?;
+        roots.push(guid);
+    }
+    let keep: Vec<(String, String)> = manifest
+        .keep
+        .iter()
+        .map(|s| split(s))
+        .collect::<Result<_, _>>()?;
+
+    // Walk guid references through the DB and through source text (scene
+    // files store asset references as guid strings; binary sources fail the
+    // UTF-8 read and are skipped — their references live in the DB record).
+    let reached = db.dependency_closure(roots, |record| {
+        let dir = dir_of(&record.path.mount)?;
+        std::fs::read_to_string(root.join(dir).join(&record.path.path)).ok()
+    });
+
+    let mut plans = Vec::new();
+    for &(mount, dir) in MOUNTS {
+        let kept_by_prefix = |path: &str| {
+            keep.iter()
+                .any(|(m, p)| m == mount && path.starts_with(p.as_str()))
+        };
+
+        // The pack's pruned DB: reachable or kept records only.
+        let mut pack_db = redlilium_assets::AssetDb::new();
+        for (guid, record) in db.to_records() {
+            if record.path.mount == mount
+                && (reached.contains(&guid) || kept_by_prefix(&record.path.path))
+            {
+                pack_db.insert(guid, record).map_err(|e| e.to_string())?;
+            }
+        }
+        let db_ron = pack_db
+            .to_ron_for_mount(mount)
+            .map_err(|e| format!("serializing {mount} assets.db: {e}"))?;
+
+        let mut all = Vec::new();
+        collect_files(&root.join(dir), String::new(), &mut all)?;
+        let (mut files, mut pruned) = (Vec::new(), Vec::new());
+        for rel in all {
+            if rel == "assets.db" {
+                continue; // regenerated from the pruned DB
+            }
+            let selected = kept_by_prefix(&rel)
+                || db
+                    .guid_of(&redlilium_assets::AssetPath::new(mount, &rel))
+                    .is_some_and(|g| reached.contains(&g));
+            if selected {
+                files.push(rel);
+            } else {
+                pruned.push(rel);
+            }
+        }
+        if pruned.is_empty() {
+            println!("dist: {dir} — {} files, nothing pruned", files.len() + 1);
+        } else {
+            println!(
+                "dist: {dir} — {} files, pruned {}: {}",
+                files.len() + 1,
+                pruned.len(),
+                pruned.join(", ")
+            );
+        }
+        plans.push(PackPlan { dir, files, db_ron });
+    }
+    Ok(plans)
+}
+
+/// Materialize one pack plan under `dst_root`: the selected files plus the
+/// regenerated (pruned) `assets.db`.
+fn write_pack(root: &Path, plan: &PackPlan, dst_root: &Path) -> Result<(), String> {
+    let dst_dir = dst_root.join(plan.dir);
+    for rel in &plan.files {
+        let from = root.join(plan.dir).join(rel);
+        let to = dst_dir.join(rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("creating {parent:?}: {e}"))?;
+        }
+        std::fs::copy(&from, &to).map_err(|e| format!("copying {from:?}: {e}"))?;
+    }
+    std::fs::create_dir_all(&dst_dir).map_err(|e| format!("creating {dst_dir:?}: {e}"))?;
+    std::fs::write(dst_dir.join("assets.db"), &plan.db_ron)
+        .map_err(|e| format!("writing {} assets.db: {e}", plan.dir))?;
+    Ok(())
+}
+
+/// Collect pack-relative (forward-slash) paths of every non-dotfile under
+/// `dir` (`.DS_Store` and friends are OS noise, not assets).
+fn collect_files(dir: &Path, prefix: String, out: &mut Vec<String>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("reading {dir:?}: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("reading {dir:?}: {e}"))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let rel = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let ty = entry
+            .file_type()
+            .map_err(|e| format!("stat {:?}: {e}", entry.path()))?;
+        if ty.is_dir() {
+            collect_files(&entry.path(), rel, out)?;
+        } else {
+            out.push(rel);
+        }
+    }
+    Ok(())
 }
 
 /// Archive `dir_name` (relative to `cwd`) as `zip_name` using the platform's

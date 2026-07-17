@@ -75,6 +75,54 @@ impl AssetRecord {
     pub fn reference(&self, role: &str) -> Option<Guid> {
         self.references.get(role).copied()
     }
+
+    /// Every asset this record is known to reference: the explicit
+    /// [`references`](Self::references) edges plus guids embedded in the
+    /// serialized [`settings`](Self::settings) (e.g. a material instance's
+    /// parent, a material's texture binding). Deduplicated; may include guids
+    /// the DB doesn't know (#134).
+    pub fn referenced_guids(&self) -> Vec<Guid> {
+        let mut out: Vec<Guid> = self.references.values().copied().collect();
+        if let Some(settings) = &self.settings {
+            for guid in extract_guids(settings) {
+                if !out.contains(&guid) {
+                    out.push(guid);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Scan text for canonical hyphenated UUIDs — the dependency edges hiding in
+/// serialized settings and asset source files (scene files store component
+/// asset references as guid strings). Returns them in order of first
+/// appearance, deduplicated (#134).
+pub fn extract_guids(text: &str) -> Vec<Guid> {
+    fn uuid_at(bytes: &[u8], start: usize) -> bool {
+        (0..36).all(|i| match i {
+            8 | 13 | 18 | 23 => bytes[start + i] == b'-',
+            _ => bytes[start + i].is_ascii_hexdigit(),
+        })
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 36 <= bytes.len() {
+        // A hex prefix would mis-align the match; anchor on non-hex left edge.
+        if (i == 0 || !bytes[i - 1].is_ascii_hexdigit()) && uuid_at(bytes, i) {
+            // All 36 matched bytes are ASCII, so the slice is char-aligned.
+            if let Ok(guid) = text[i..i + 36].parse::<Guid>()
+                && !out.contains(&guid)
+            {
+                out.push(guid);
+            }
+            i += 36;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// A violation (attempt) of the `guid <-> path` bijection.
@@ -345,6 +393,37 @@ impl AssetDb {
         ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
     }
 
+    /// Dependency closure (#134): breadth-first walk from `roots` following
+    /// [`AssetRecord::referenced_guids`] plus guids found in each asset's
+    /// source text (`source_text` reads a record's file; return `None` for
+    /// binary/unreadable sources). Guids the DB doesn't know are skipped —
+    /// the walk is over *registered* assets. Returns the reachable set,
+    /// including the (known) roots themselves.
+    pub fn dependency_closure(
+        &self,
+        roots: impl IntoIterator<Item = Guid>,
+        mut source_text: impl FnMut(&AssetRecord) -> Option<String>,
+    ) -> std::collections::HashSet<Guid> {
+        let mut reached: std::collections::HashSet<Guid> = roots
+            .into_iter()
+            .filter(|g| self.by_guid.contains_key(g))
+            .collect();
+        let mut queue: Vec<Guid> = reached.iter().copied().collect();
+        while let Some(guid) = queue.pop() {
+            let record = &self.by_guid[&guid];
+            let mut deps = record.referenced_guids();
+            if let Some(text) = source_text(record) {
+                deps.extend(extract_guids(&text));
+            }
+            for dep in deps {
+                if self.by_guid.contains_key(&dep) && reached.insert(dep) {
+                    queue.push(dep);
+                }
+            }
+        }
+        reached
+    }
+
     /// Merge a mount's RON DB file into this (global) registry, stamping `mount`
     /// onto every path. The bijection guard reports cross-pack guid/path
     /// conflicts (returned, skipped) rather than overwriting. Re-merging the same
@@ -507,6 +586,51 @@ mod tests {
         let conflicts = global.merge_ron("packA", &text).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert!(matches!(conflicts[0], DbError::GuidConflict { .. }));
+    }
+
+    #[test]
+    fn extract_guids_finds_hyphenated_uuids() {
+        let a = Guid::stable("a");
+        let b = Guid::stable("b");
+        let text = format!("(parent:(\"{a}\"),tex:File((\"{b}\")),again:\"{a}\")");
+        assert_eq!(extract_guids(&text), vec![a, b]); // deduplicated, in order
+        assert!(extract_guids("no guids here 1234-5678").is_empty());
+        // A hex prefix must not shift the match window off the real guid.
+        assert_eq!(extract_guids(&format!("beef{a}")), vec![]);
+    }
+
+    #[test]
+    fn referenced_guids_unions_edges_and_settings() {
+        let layout = Guid::stable("layout");
+        let parent = Guid::stable("parent");
+        let mut r = rec("assets", "a.matinst");
+        r.references.insert("layout".into(), layout);
+        r.settings = Some(format!("(parent:(\"{parent}\"),also:(\"{layout}\"))"));
+        assert_eq!(r.referenced_guids(), vec![layout, parent]);
+    }
+
+    #[test]
+    fn dependency_closure_walks_refs_settings_and_source_text() {
+        let mut db = AssetDb::new();
+        let scene = db.register_path(AssetPath::new("game", "s.scene"), "scene", 0);
+        let matinst = db.register_path(AssetPath::new("std", "m.matinst"), "material_instance", 0);
+        let material = db.register_path(AssetPath::new("std", "m.material"), "material", 0);
+        let texture = db.register_path(AssetPath::new("std", "t.png"), "texture", 0);
+        let unused = db.register_path(AssetPath::new("std", "u.rmesh"), "mesh", 0);
+
+        // scene file text -> matinst; matinst settings -> material;
+        // material references edge -> texture; `unused` reachable from nothing.
+        db.set_settings(&matinst, Some(format!("(parent:(\"{material}\"))")));
+        db.set_reference(&material, "base_texture", Some(texture));
+
+        let reached = db.dependency_closure([scene, Guid::stable("missing-root")], |r| {
+            (r.kind == "scene").then(|| format!("material guid: \"{matinst}\""))
+        });
+        assert_eq!(reached.len(), 4);
+        for g in [scene, matinst, material, texture] {
+            assert!(reached.contains(&g));
+        }
+        assert!(!reached.contains(&unused));
     }
 
     #[test]

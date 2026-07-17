@@ -36,7 +36,7 @@ mod source;
 mod stage;
 
 pub use asset_ref::{AssetRef, AssetRefSource};
-pub use db::{AssetDb, AssetPath, AssetRecord, DbError};
+pub use db::{AssetDb, AssetPath, AssetRecord, DbError, extract_guids};
 pub use error::AssetError;
 pub use handle::AssetHandle;
 pub use loader::AssetLoader;

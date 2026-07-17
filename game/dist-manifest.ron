@@ -1,0 +1,20 @@
+// Dist prune manifest (#134): what `cargo xtask dist` starts the asset
+// dependency walk from, and what ships regardless of the walk. Mount names
+// match `GameConfig::mounts` in `game/src/main.rs`.
+(
+    // Closure roots — every scene the shipped game can load. A scene listed
+    // here pulls in its full asset dependency closure (materials, meshes,
+    // textures, ...) through `assets.db` + guid references.
+    entries: [
+        "game:scenes/menu.scene",
+        "game:scenes/level1.scene",
+    ],
+    // Kept verbatim ("mount:path-prefix" match): assets that engine or game
+    // *code* loads by hardcoded path — invisible to the data-driven walk.
+    // Today that is the entire std pack (shaders looked up by path+hash,
+    // default materials, primitive meshes, the checker texture); narrow this
+    // if std ever grows authored content that scenes reference explicitly.
+    keep: [
+        "std:",
+    ],
+)
