@@ -42,7 +42,15 @@
 //! It is still **necessary, not sufficient**. What it does NOT catch:
 //!
 //! - **Feature unification / profile differences.** These change layout and
-//!   `-C metadata` without changing the source content the id hashes.
+//!   `-C metadata` without changing the source content the id hashes. The
+//!   fingerprint *cannot* encode this (#109): it is baked by this crate's
+//!   `build.rs`, which cannot observe the finally-resolved feature set of
+//!   every engine crate in the graph — that is a property of the whole cargo
+//!   invocation, decided per dependent. The **second gate** closes the gap
+//!   with ground truth instead: [`engine_typeid_probe`] compares one
+//!   `TypeId` per engine crate across the images at load time (`TypeId`
+//!   *is* a function of `-C metadata`, so drift is directly observable),
+//!   refusing the module with [`GameModuleError::EngineMetadataDrift`].
 //! - **Duplicated statics.** Two engine copies means two of every `static`,
 //!   thread-local, and global registry (allocator, `log` logger, panic
 //!   bookkeeping). Fingerprint parity says nothing about this; see
@@ -115,10 +123,19 @@ pub type AbiFingerprintFn = unsafe extern "C" fn() -> *const c_char;
 /// Called once after `redlilium_game_module` succeeds.
 pub type LoggerInitFn = unsafe extern "Rust" fn(&'static dyn log::Log, log::LevelFilter);
 
+/// The engine-metadata probe payload: one `TypeId` per engine crate whose
+/// type ids cross the image boundary (see [`engine_typeid_probe`]).
+///
+/// Changing this shape is safe across engine revisions: the C-ABI
+/// fingerprint gate (which encodes the engine source revision) runs first,
+/// so a module built against a different probe shape is rejected before the
+/// probe symbol is ever called.
+pub type EngineTypeIdProbe = [std::any::TypeId; 7];
+
 /// Signature of the engine-metadata probe symbol. Rust-ABI: called right
 /// after the fingerprint gate passes (same rustc is then guaranteed, so the
 /// `TypeId` layout agrees) and **before** any plugin method.
-pub type TypeIdProbeFn = unsafe extern "Rust" fn() -> [std::any::TypeId; 2];
+pub type TypeIdProbeFn = unsafe extern "Rust" fn() -> EngineTypeIdProbe;
 
 /// Canonical engine `TypeId`s, computed in the calling image.
 ///
@@ -135,13 +152,26 @@ pub type TypeIdProbeFn = unsafe extern "Rust" fn() -> [std::any::TypeId; 2];
 /// the boundary — a process abort. This probe catches it at load time
 /// instead: the host compares the module's values (via
 /// [`redlilium_game_module!`]'s exported `redlilium_typeid_probe`) against
-/// its own and refuses the load with an actionable error. One system type
-/// and one component type from `redlilium-ecs` cover the crate whose ids
-/// actually cross the boundary.
-pub fn engine_typeid_probe() -> [std::any::TypeId; 2] {
+/// its own and refuses the load with an actionable error.
+///
+/// **Coverage (#109): one sample per engine crate** whose `TypeId`-keyed
+/// values cross the boundary — components/systems (`ecs`), shared resources
+/// a game system can `lock` (`AssetDb`, `GameUi`), and the types they carry
+/// (`core`, `vfs`, `graphics`). Each crate's `-C metadata` can drift
+/// independently (feature unification is resolved per crate), so sampling
+/// only `ecs` would miss, say, a `graphics`-only feature drift; sampling
+/// each crate directly avoids relying on cargo's metadata hash cascading
+/// through the dependency graph. `ecs` contributes a system *and* a
+/// component so both registration paths are represented.
+pub fn engine_typeid_probe() -> EngineTypeIdProbe {
     [
+        std::any::TypeId::of::<redlilium_core::input::KeyCode>(),
+        std::any::TypeId::of::<redlilium_vfs::Vfs>(),
+        std::any::TypeId::of::<redlilium_graphics::GraphicsDevice>(),
+        std::any::TypeId::of::<redlilium_assets::AssetDb>(),
         std::any::TypeId::of::<redlilium_ecs::ApplySceneTransitions>(),
         std::any::TypeId::of::<redlilium_ecs::Transform>(),
+        std::any::TypeId::of::<crate::GameUi>(),
     ]
 }
 
@@ -492,13 +522,14 @@ macro_rules! redlilium_game_module {
             FINGERPRINT.as_ptr() as *const ::std::ffi::c_char
         }
 
-        /// Engine-metadata probe — canonical engine `TypeId`s as computed in
-        /// THIS cdylib's image. The host compares them with its own after the
-        /// fingerprint gate: a mismatch means the two sides came from
-        /// different cargo invocations (feature-unification drift) and the
-        /// load is refused before any cross-image `TypeId` use can abort.
+        /// Engine-metadata probe — canonical engine `TypeId`s (one per engine
+        /// crate, #109) as computed in THIS cdylib's image. The host compares
+        /// them with its own after the fingerprint gate: a mismatch means the
+        /// two sides came from different cargo invocations
+        /// (feature-unification drift) and the load is refused before any
+        /// cross-image `TypeId` use can abort.
         #[unsafe(no_mangle)]
-        pub extern "Rust" fn redlilium_typeid_probe() -> [::std::any::TypeId; 2] {
+        pub extern "Rust" fn redlilium_typeid_probe() -> $crate::EngineTypeIdProbe {
             $crate::engine_typeid_probe()
         }
 
@@ -532,15 +563,19 @@ mod tests {
         assert!(fp.contains("build "), "carries the engine source revision");
     }
 
-    /// The probe is deterministic within one image and its two ids are
-    /// distinct (a system type and a component type — collapsing them would
-    /// weaken the drift check to one crate-metadata sample).
+    /// The probe is deterministic within one image and every sample is
+    /// distinct — collapsing any two would silently weaken the per-crate
+    /// drift coverage (#109).
     #[test]
     fn typeid_probe_is_stable_and_distinct() {
         let a = engine_typeid_probe();
         let b = engine_typeid_probe();
         assert_eq!(a, b, "probe must be deterministic within an image");
-        assert_ne!(a[0], a[1], "probe samples two distinct engine types");
+        for i in 0..a.len() {
+            for j in (i + 1)..a.len() {
+                assert_ne!(a[i], a[j], "probe samples {i} and {j} must differ");
+            }
+        }
     }
 
     #[test]
