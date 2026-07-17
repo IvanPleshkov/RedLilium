@@ -1,16 +1,43 @@
-//! Desktop distribution (#107): package `car-game` into a runnable folder.
+//! Desktop distribution (#107, #133): package `car-game` into a native,
+//! per-host-platform artifact.
 //!
-//! `cargo xtask dist --target desktop` produces
+//! `cargo xtask dist --target desktop` builds with `--profile dist` (fat LTO,
+//! codegen-units=1, stripped) and then packages for the *host* OS:
+//!
+//! **macOS** — a `.app` bundle plus a `.dmg` (#133):
 //!
 //! ```text
 //! target/dist/car-game-desktop/
-//!   car-game            shipping binary (`--profile dist`: thin LTO, stripped)
+//!   Car Game.app/Contents/
+//!     Info.plist
+//!     MacOS/car-game                 shipping binary
+//!     Resources/icon.icns            from game/icon (scripts/gen-game-icon.py)
+//!     Resources/std-assets/          engine asset pack
+//!     Resources/game/assets/         game asset pack
+//! target/dist/car-game-desktop.dmg
+//! ```
+//!
+//! Asset packs live in `Contents/Resources` (data belongs there for
+//! codesigning); the runtime's mount resolution tries the exe dir first and
+//! `../Resources` second (#132/#133), so the bundle is self-contained.
+//! Optional signing is gated on env vars: `REDLILIUM_SIGN_IDENTITY` runs
+//! `codesign` on the bundle, `REDLILIUM_NOTARY_PROFILE` submits the dmg via
+//! `xcrun notarytool` (requires a signed bundle) and staples the ticket.
+//!
+//! **Linux / Windows** — the flat folder from #107, zipped:
+//!
+//! ```text
+//! target/dist/car-game-desktop/
+//!   car-game            shipping binary (Windows: icon + version resource
+//!                       embedded by game/build.rs via winresource)
 //!   std-assets/         engine asset pack (assets.db + sources)
 //!   game/assets/        game asset pack (assets.db + scenes)
+//!   car-game.desktop    Linux only: XDG launcher template (+ car-game.png);
+//!                       Exec/Icon assume the binary lands on PATH
 //! target/dist/car-game-desktop.zip
 //! ```
 //!
-//! The folder layout mirrors the workspace because `GameConfig::mounts` holds
+//! The flat layout mirrors the workspace because `GameConfig::mounts` holds
 //! *relative* directories compiled into the binary (`std-assets`,
 //! `game/assets`); the runtime resolves them against the executable's
 //! directory first (#132), so the folder runs from any cwd — double-click
@@ -43,12 +70,14 @@ use std::process::Command;
 /// The asset packs a shipped build needs, as workspace-relative directories.
 /// Source path == destination path: the layout must match the mount dirs in
 /// `game/src/main.rs` (`GameConfig::mounts`), which the runtime resolves
-/// against the working directory.
+/// exe-dir-first (#132; on macOS also `Contents/Resources`, #133).
 const PACKS: &[&str] = &["std-assets", "game/assets"];
 
 const GAME_PACKAGE: &str = "car-game";
 const GAME_BIN: &str = "car-game";
+const GAME_DISPLAY_NAME: &str = "Car Game";
 const DIST_NAME: &str = "car-game-desktop";
+const BUNDLE_ID: &str = "com.redlilium.car-game";
 
 pub fn run() {
     let target = parse_target();
@@ -90,7 +119,7 @@ fn parse_target() -> String {
 fn dist_desktop() -> Result<(), String> {
     let root = workspace_root();
 
-    // 1. Shipping build of the game binary (`[profile.dist]`: thin LTO,
+    // 1. Shipping build of the game binary (`[profile.dist]`: fat LTO,
     //    codegen-units=1, stripped). One plain cargo invocation — the dist
     //    build must not inherit xtask's feature set.
     println!("dist: building {GAME_PACKAGE} (--profile dist)...");
@@ -123,25 +152,183 @@ fn dist_desktop() -> Result<(), String> {
     // 3. The binary (cargo names the artifact dir after the profile).
     let bin_name = format!("{GAME_BIN}{}", std::env::consts::EXE_SUFFIX);
     let bin_src = root.join("target/dist").join(&bin_name);
-    let bin_dst = dist.join(&bin_name);
-    std::fs::copy(&bin_src, &bin_dst).map_err(|e| format!("copying {bin_src:?}: {e}"))?;
 
-    // 4. Asset packs, verbatim, mirroring the workspace-relative mount dirs.
+    // 4. Platform packaging (#133): the artifact is native to the *host* OS —
+    //    dist builds for the platform it runs on.
+    match std::env::consts::OS {
+        "macos" => package_macos(&root, &dist_root, &dist, &bin_src),
+        other => package_flat(&root, &dist_root, &dist, &bin_src, &bin_name, other),
+    }
+}
+
+/// macOS (#133): assemble `Car Game.app`, optionally codesign it, wrap the
+/// dist folder in a `.dmg` (the native download format — replaces the zip),
+/// and optionally notarize + staple the dmg.
+fn package_macos(root: &Path, dist_root: &Path, dist: &Path, bin_src: &Path) -> Result<(), String> {
+    let app = dist.join(format!("{GAME_DISPLAY_NAME}.app"));
+    let contents = app.join("Contents");
+    let macos_dir = contents.join("MacOS");
+    let resources = contents.join("Resources");
+    std::fs::create_dir_all(&macos_dir).map_err(|e| format!("creating {macos_dir:?}: {e}"))?;
+    std::fs::create_dir_all(&resources).map_err(|e| format!("creating {resources:?}: {e}"))?;
+
+    let bin_dst = macos_dir.join(GAME_BIN);
+    std::fs::copy(bin_src, &bin_dst).map_err(|e| format!("copying {bin_src:?}: {e}"))?;
+
+    // Asset packs go into Resources (data belongs there for codesigning); the
+    // runtime finds them via the `../Resources` mount candidate (#132/#133).
     for pack in PACKS {
-        let src = root.join(pack);
-        let dst = dist.join(pack);
-        let files = copy_dir(&src, &dst)?;
+        let files = copy_dir(&root.join(pack), &resources.join(pack))?;
         println!("dist: {pack} — {files} files");
     }
 
-    // 5. Zip the folder (best effort: the folder itself is the deliverable;
-    //    a missing archiver downgrades to a warning, not a failure).
+    let icns_src = root.join("game/icon/icon.icns");
+    std::fs::copy(&icns_src, resources.join("icon.icns"))
+        .map_err(|e| format!("copying {icns_src:?} (regenerate: scripts/gen-game-icon.py): {e}"))?;
+
+    let version = env!("CARGO_PKG_VERSION"); // workspace version == game version
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>{GAME_DISPLAY_NAME}</string>
+    <key>CFBundleDisplayName</key><string>{GAME_DISPLAY_NAME}</string>
+    <key>CFBundleIdentifier</key><string>{BUNDLE_ID}</string>
+    <key>CFBundleVersion</key><string>{version}</string>
+    <key>CFBundleShortVersionString</key><string>{version}</string>
+    <key>CFBundleExecutable</key><string>{GAME_BIN}</string>
+    <key>CFBundleIconFile</key><string>icon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+"#
+    );
+    std::fs::write(contents.join("Info.plist"), plist)
+        .map_err(|e| format!("writing Info.plist: {e}"))?;
+
+    // Optional signing, gated on an identity in the environment. Unsigned
+    // bundles still run locally (Gatekeeper only quarantines downloads).
+    if let Ok(identity) = std::env::var("REDLILIUM_SIGN_IDENTITY") {
+        println!("dist: codesigning ({identity})...");
+        run_tool(
+            Command::new("codesign")
+                .args([
+                    "--force",
+                    "--options",
+                    "runtime",
+                    "--timestamp",
+                    "--sign",
+                    &identity,
+                ])
+                .arg(&app),
+            "codesign",
+        )?;
+    }
+
+    // The dmg wraps the dist folder, so the volume shows just the .app.
+    let dmg_name = format!("{DIST_NAME}.dmg");
+    let dmg_path = dist_root.join(&dmg_name);
+    if dmg_path.exists() {
+        std::fs::remove_file(&dmg_path).map_err(|e| format!("removing old {dmg_name}: {e}"))?;
+    }
+    let dmg = Command::new("hdiutil")
+        .args([
+            "create",
+            "-volname",
+            GAME_DISPLAY_NAME,
+            "-format",
+            "UDZO",
+            "-srcfolder",
+        ])
+        .arg(dist)
+        .arg(&dmg_path)
+        .status();
+    match dmg {
+        Ok(s) if s.success() => {
+            println!("dist: wrote {}", dmg_path.display());
+            // Notarization needs a signed bundle and a stored notarytool
+            // keychain profile (`xcrun notarytool store-credentials`).
+            if let Ok(profile) = std::env::var("REDLILIUM_NOTARY_PROFILE") {
+                println!("dist: notarizing ({profile})...");
+                run_tool(
+                    Command::new("xcrun")
+                        .args([
+                            "notarytool",
+                            "submit",
+                            "--wait",
+                            "--keychain-profile",
+                            &profile,
+                        ])
+                        .arg(&dmg_path),
+                    "notarytool",
+                )?;
+                run_tool(
+                    Command::new("xcrun")
+                        .args(["stapler", "staple"])
+                        .arg(&dmg_path),
+                    "stapler",
+                )?;
+            }
+        }
+        Ok(s) => {
+            eprintln!("dist: dmg skipped (hdiutil exited with {s}); the .app is still complete")
+        }
+        Err(e) => {
+            eprintln!("dist: dmg skipped (hdiutil not runnable: {e}); the .app is still complete")
+        }
+    }
+
+    println!(
+        "dist: done — self-contained bundle (assets in Contents/Resources), run from anywhere:\n  open \"{}\"",
+        app.display()
+    );
+    Ok(())
+}
+
+/// Linux/Windows: the flat folder layout from #107 — binary next to the asset
+/// packs — zipped. Linux additionally gets an XDG launcher template + icon;
+/// the Windows binary carries its icon internally (game/build.rs).
+fn package_flat(
+    root: &Path,
+    dist_root: &Path,
+    dist: &Path,
+    bin_src: &Path,
+    bin_name: &str,
+    os: &str,
+) -> Result<(), String> {
+    let bin_dst = dist.join(bin_name);
+    std::fs::copy(bin_src, &bin_dst).map_err(|e| format!("copying {bin_src:?}: {e}"))?;
+
+    for pack in PACKS {
+        let files = copy_dir(&root.join(pack), &dist.join(pack))?;
+        println!("dist: {pack} — {files} files");
+    }
+
+    if os == "linux" {
+        // A template, not an installed entry: Exec/Icon are bare names that
+        // resolve once the binary/icon are placed on PATH / hicolor.
+        let desktop = format!(
+            "[Desktop Entry]\nType=Application\nName={GAME_DISPLAY_NAME}\n\
+             Comment=Arcade car built on the RedLilium engine\n\
+             Exec={GAME_BIN}\nIcon={GAME_BIN}\nTerminal=false\nCategories=Game;\n"
+        );
+        std::fs::write(dist.join(format!("{GAME_BIN}.desktop")), desktop)
+            .map_err(|e| format!("writing .desktop: {e}"))?;
+        let icon_src = root.join("game/icon/icon.png");
+        std::fs::copy(&icon_src, dist.join(format!("{GAME_BIN}.png")))
+            .map_err(|e| format!("copying {icon_src:?}: {e}"))?;
+    }
+
+    // Zip the folder (best effort: the folder itself is the deliverable;
+    // a missing archiver downgrades to a warning, not a failure).
     let zip_name = format!("{DIST_NAME}.zip");
     let zip_path = dist_root.join(&zip_name);
     if zip_path.exists() {
         std::fs::remove_file(&zip_path).map_err(|e| format!("removing old {zip_name}: {e}"))?;
     }
-    match zip_dir(&dist_root, DIST_NAME, &zip_name) {
+    match zip_dir(dist_root, DIST_NAME, &zip_name) {
         Ok(()) => println!("dist: wrote {}", zip_path.display()),
         Err(e) => eprintln!("dist: zip skipped ({e}); the folder is still complete"),
     }
@@ -152,6 +339,18 @@ fn dist_desktop() -> Result<(), String> {
         dist.display()
     );
     Ok(())
+}
+
+/// Run an external packaging tool, turning a non-zero exit into an error.
+fn run_tool(cmd: &mut Command, name: &str) -> Result<(), String> {
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to run {name}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{name} exited with {status}"))
+    }
 }
 
 fn dist_web() -> Result<(), String> {

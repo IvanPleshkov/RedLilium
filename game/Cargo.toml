@@ -36,6 +36,11 @@ redlilium-graphics = { path = "../graphics" }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true
 
+# Windows icon + version resource (#133). Target-specific build-dependencies
+# resolve against the HOST platform, matching build.rs's `#[cfg(windows)]`.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 # `xtask dist --target web` ships wasm-pack's release output; optimize the
 # wasm for size (-Oz) instead of wasm-opt's default -O (#132). Cargo profiles
 # can't be target-specific and wasm-pack is pinned to `release`, so the size

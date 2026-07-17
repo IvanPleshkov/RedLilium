@@ -11,12 +11,21 @@
 //! than baked absolute paths, so the file is machine-independent; dotfiles
 //! (`.DS_Store` and friends) are skipped. Paths are pack-relative with forward
 //! slashes to match the VFS request paths.
+//!
+//! On Windows the script also embeds the game icon + version resource
+//! (`game/icon/icon.ico`, #133) via `winresource`. The dependency and the
+//! code are gated on a *Windows host* — cargo resolves target-specific
+//! build-dependencies against the host platform, and the realistic packaging
+//! path is building on Windows for Windows.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 fn main() {
     println!("cargo::rerun-if-changed=assets");
+
+    #[cfg(windows)]
+    embed_windows_resources();
 
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let pack_root = Path::new(&manifest).join("assets");
@@ -39,6 +48,24 @@ fn main() {
 
     let out_path = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_pack.rs");
     std::fs::write(&out_path, out).expect("write embedded_pack.rs");
+}
+
+/// Embed the game icon and a version resource into the Windows executable
+/// (#133). Skipped for non-Windows *targets* (e.g. a wasm build on a Windows
+/// host) — resources are a PE concept.
+#[cfg(windows)]
+fn embed_windows_resources() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    println!("cargo::rerun-if-changed=icon/icon.ico");
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("icon/icon.ico");
+    res.set("ProductName", "Car Game");
+    res.set("FileDescription", "Car Game (RedLilium engine)");
+    if let Err(e) = res.compile() {
+        println!("cargo::warning=embedding Windows resources failed: {e}");
+    }
 }
 
 /// Collect pack-relative (forward-slash) paths of every non-dotfile under `dir`.

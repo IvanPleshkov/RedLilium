@@ -250,6 +250,16 @@ fn resolve_mount_dir(dir: &str) -> std::path::PathBuf {
         if candidate.is_dir() {
             return candidate;
         }
+        // macOS .app bundle (#133): the executable sits in `Contents/MacOS`,
+        // the asset packs in `Contents/Resources` (data belongs in Resources
+        // for codesigning), so also try the sibling Resources directory.
+        #[cfg(target_os = "macos")]
+        {
+            let candidate = exe_dir.join("../Resources").join(path);
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
     }
     path.to_path_buf()
 }
