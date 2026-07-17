@@ -329,8 +329,8 @@ impl Plugin for CarGamePlugin {
         world.register_inspector::<CarSpawn>();
     }
 
-    fn build_editing_view(&self, schedules: &mut redlilium_ecs::Schedules) {
-        redlilium_levels::LevelsPlugin.build_editing_view(schedules);
+    fn build_editing_view(&self, view: &mut redlilium_runtime::EditingView<'_>) {
+        redlilium_levels::LevelsPlugin.build_editing_view(view);
     }
 
     fn build(&self, app: &mut App) {

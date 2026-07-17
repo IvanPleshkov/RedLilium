@@ -27,6 +27,9 @@ pub enum PressRouting {
     /// A gizmo handle is hovered: the press is a manipulation. The shell
     /// must not clear the selection or arm any select gesture.
     GizmoOwns,
+    /// An active viewport tool owns the press: the release is delivered to
+    /// the tool as a click; selection and gizmo are untouched.
+    ToolOwns,
     /// The press arms a scene select gesture (clear selection now; the
     /// release decides between click-pick and box-select).
     SceneGesture,
@@ -44,6 +47,9 @@ pub enum ReleaseAction {
     /// The gizmo owned this gesture (its own MergeBarrier seals the drag —
     /// the shell must NOT break undo merging here).
     GizmoOwned,
+    /// The active viewport tool owned the press: deliver a click at the
+    /// release cursor (window space, physical pixels).
+    ToolClick { x: f32, y: f32 },
     /// No armed gesture (press was consumed elsewhere or out of view).
     Nothing,
 }
@@ -55,6 +61,11 @@ pub struct SceneGestures {
     cursor_pos: [f32; 2],
     drag_start: Option<[f32; 2]>,
     dragging_box: bool,
+    /// The current primary press was granted to the active viewport tool.
+    tool_armed: bool,
+    /// Secondary-button press position; a clean (no-drag) release opens the
+    /// viewport context menu. A drag is the fly-camera's, not ours.
+    secondary_start: Option<[f32; 2]>,
 }
 
 impl SceneGestures {
@@ -95,12 +106,19 @@ impl SceneGestures {
         in_scene_view: bool,
         egui_wants_pointer: bool,
         gizmo_wants_cursor: bool,
+        tool_active: bool,
     ) -> PressRouting {
         if !in_scene_view {
             return PressRouting::Outside;
         }
         if egui_wants_pointer {
             return PressRouting::EguiOwns;
+        }
+        if tool_active {
+            // The tool outranks the gizmo: while a mode like "connect roads"
+            // is live, every scene click belongs to it.
+            self.tool_armed = true;
+            return PressRouting::ToolOwns;
         }
         if gizmo_wants_cursor {
             // Manipulation: leave the selection alone, arm no gesture.
@@ -111,10 +129,32 @@ impl SceneGestures {
         PressRouting::SceneGesture
     }
 
+    /// Route a secondary-button press: arms the context-menu candidate when
+    /// the press lands in the scene view and egui does not want the pointer.
+    pub fn on_secondary_press(&mut self, in_scene_view: bool, egui_wants_pointer: bool) {
+        self.secondary_start = (in_scene_view && !egui_wants_pointer).then_some(self.cursor_pos);
+    }
+
+    /// Resolve a secondary-button release: `Some(position)` when it was a
+    /// clean click (no drag past the threshold) — open the context menu
+    /// there. A drag was the fly-camera navigating; no menu.
+    pub fn on_secondary_release(&mut self) -> Option<[f32; 2]> {
+        let start = self.secondary_start.take()?;
+        let dx = self.cursor_pos[0] - start[0];
+        let dy = self.cursor_pos[1] - start[1];
+        ((dx * dx + dy * dy).sqrt() <= BOX_DRAG_THRESHOLD_PX).then_some(self.cursor_pos)
+    }
+
     /// Resolve a primary-button release. Always disarms the gesture.
     pub fn on_release(&mut self, gizmo_wants_cursor: bool) -> ReleaseAction {
         let start = self.drag_start.take();
         let was_box = std::mem::take(&mut self.dragging_box);
+        if std::mem::take(&mut self.tool_armed) {
+            return ReleaseAction::ToolClick {
+                x: self.cursor_pos[0],
+                y: self.cursor_pos[1],
+            };
+        }
         if gizmo_wants_cursor {
             // A live gizmo drag ends here; its final delta actions drain
             // AFTER this event, so undo-merge must stay open for them.
@@ -139,7 +179,7 @@ mod tests {
     use super::*;
 
     fn pressed(g: &mut SceneGestures, gizmo: bool) -> PressRouting {
-        g.on_press(true, false, gizmo)
+        g.on_press(true, false, gizmo, false)
     }
 
     #[test]
@@ -188,14 +228,17 @@ mod tests {
     #[test]
     fn egui_popup_swallows_the_press() {
         let mut g = SceneGestures::default();
-        assert_eq!(g.on_press(true, true, false), PressRouting::EguiOwns);
+        assert_eq!(g.on_press(true, true, false, false), PressRouting::EguiOwns);
         assert_eq!(g.on_release(false), ReleaseAction::Nothing);
     }
 
     #[test]
     fn press_outside_scene_view_is_ignored() {
         let mut g = SceneGestures::default();
-        assert_eq!(g.on_press(false, false, false), PressRouting::Outside);
+        assert_eq!(
+            g.on_press(false, false, false, false),
+            PressRouting::Outside
+        );
         assert_eq!(g.on_release(false), ReleaseAction::Nothing);
     }
 
@@ -208,5 +251,52 @@ mod tests {
         pressed(&mut g, false); // armed
         assert_eq!(g.on_release(true), ReleaseAction::GizmoOwned);
         assert_eq!(g.on_release(false), ReleaseAction::Nothing, "disarmed");
+    }
+}
+
+#[cfg(test)]
+mod tool_and_menu_tests {
+    use super::*;
+
+    #[test]
+    fn active_tool_owns_click_over_gizmo() {
+        let mut g = SceneGestures::default();
+        g.on_move(50.0, 60.0);
+        // Even with a hovered gizmo handle, the active tool wins.
+        assert_eq!(g.on_press(true, false, true, true), PressRouting::ToolOwns);
+        assert_eq!(
+            g.on_release(true),
+            ReleaseAction::ToolClick { x: 50.0, y: 60.0 }
+        );
+        // Tool off again: normal gizmo precedence is restored.
+        assert_eq!(
+            g.on_press(true, false, true, false),
+            PressRouting::GizmoOwns
+        );
+    }
+
+    #[test]
+    fn clean_secondary_click_opens_menu() {
+        let mut g = SceneGestures::default();
+        g.on_move(120.0, 80.0);
+        g.on_secondary_press(true, false);
+        g.on_move(122.0, 81.0); // under the drag threshold
+        assert_eq!(g.on_secondary_release(), Some([122.0, 81.0]));
+    }
+
+    #[test]
+    fn secondary_drag_is_fly_camera_not_menu() {
+        let mut g = SceneGestures::default();
+        g.on_move(120.0, 80.0);
+        g.on_secondary_press(true, false);
+        g.on_move(220.0, 160.0); // fly-camera look
+        assert_eq!(g.on_secondary_release(), None);
+    }
+
+    #[test]
+    fn secondary_press_over_egui_never_arms() {
+        let mut g = SceneGestures::default();
+        g.on_secondary_press(true, true);
+        assert_eq!(g.on_secondary_release(), None);
     }
 }

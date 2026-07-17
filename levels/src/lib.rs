@@ -13,10 +13,12 @@
 
 pub mod bezier;
 mod draw;
+mod tool;
 
 pub use draw::DrawLevelGraph;
+pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
-use redlilium_ecs::{Component, Entity, Schedules, Update, World};
+use redlilium_ecs::{Component, Entity, Update, World};
 
 /// A road cross-section ("срез"): a straight segment along the entity's
 /// **local X axis**, centered at the origin, `2 * half_width` long. The
@@ -79,7 +81,15 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
 
-    fn build_editing_view(&self, schedules: &mut Schedules) {
-        schedules.get_mut::<Update>().add(DrawLevelGraph);
+    fn build_editing_view(&self, view: &mut redlilium_runtime::EditingView<'_>) {
+        view.schedules.get_mut::<Update>().add(DrawLevelGraph);
+        view.tools.add(Box::new(ConnectRoadsTool::default()));
+        // "Add road" arms the connect tool: clicks then place/connect nodes
+        // until Escape. The op itself edits nothing.
+        view.ops.add(
+            "Add road",
+            |_ctx| true,
+            |ctx| ctx.request_tool = Some(CONNECT_TOOL.to_owned()),
+        );
     }
 }

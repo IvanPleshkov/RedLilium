@@ -51,6 +51,7 @@ mod scene_view;
 mod session;
 mod status_bar;
 mod theme;
+mod tool_system;
 mod toolbar;
 
 use redlilium_app::{App, AppArgs, DefaultAppArgs};

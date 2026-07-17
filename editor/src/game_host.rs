@@ -305,7 +305,15 @@ impl GameHost {
             module.plugin().register_types(scoped);
         });
         ew.world = world;
-        module.plugin().build_editing_view(&mut ew.schedules);
+        let mut ops = ew.world.resource_mut::<redlilium_ecs::ui::ViewportOps>();
+        let mut tools = ew.world.resource_mut::<redlilium_ecs::ui::ViewportTools>();
+        module
+            .plugin()
+            .build_editing_view(&mut redlilium_runtime::EditingView {
+                schedules: &mut ew.schedules,
+                ops: &mut ops,
+                tools: &mut tools,
+            });
     }
 
     /// Swap in a freshly built image: unmap the old module and load a new

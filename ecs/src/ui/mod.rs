@@ -30,6 +30,7 @@
 mod action_registry;
 mod component_inspector;
 mod gizmo_anchors;
+mod viewport;
 mod world_inspector;
 
 #[cfg(feature = "serialize-ron")]
@@ -38,6 +39,10 @@ pub use component_inspector::{
     AddComponentAction, ImportComponentAction, RemoveComponentAction, show_component_inspector,
 };
 pub use gizmo_anchors::{AnchorCtx, AnchorEdit, GizmoAnchor, GizmoAnchors, GizmoCaps};
+pub use viewport::{
+    ToolFlow, ViewportOp, ViewportOpCtx, ViewportOps, ViewportRay, ViewportTool, ViewportToolCtx,
+    ViewportToolInput, ViewportTools,
+};
 pub use world_inspector::{
     DeleteEntityAction, ReparentAction, SpawnEntityAction, SpawnPrefabAction, SpawnReport,
     show_world_inspector,
