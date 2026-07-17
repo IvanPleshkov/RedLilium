@@ -47,8 +47,13 @@ pub enum AccessKind {
 /// checks. [`AccessKind::Component`] and [`AccessKind::ComponentFilter`] of the
 /// same type map to the same class because they lock the same underlying
 /// component storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum StorageClass {
+///
+/// The held-locks checker keys by `(TypeId, StorageClass)` (#17): a type
+/// registered both as a component and as a resource lives in two independent
+/// storages, and keying by bare `TypeId` would report a false deadlock
+/// between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum StorageClass {
     Component,
     Resource,
     MainThreadResource,
@@ -56,8 +61,21 @@ enum StorageClass {
     RawWorld,
 }
 
+impl StorageClass {
+    /// Human noun for diagnostics ("component `Foo` is already locked...").
+    pub(crate) fn noun(self) -> &'static str {
+        match self {
+            StorageClass::Component => "component",
+            StorageClass::Resource => "resource",
+            StorageClass::MainThreadResource => "main-thread resource",
+            StorageClass::Marker => "filter",
+            StorageClass::RawWorld => "world",
+        }
+    }
+}
+
 impl AccessKind {
-    fn storage_class(self) -> StorageClass {
+    pub(crate) fn storage_class(self) -> StorageClass {
         match self {
             AccessKind::Component | AccessKind::ComponentFilter => StorageClass::Component,
             AccessKind::Resource => StorageClass::Resource,
@@ -72,43 +90,50 @@ impl AccessKind {
 #[derive(Debug, Clone, Copy)]
 pub struct AccessInfo {
     pub type_id: TypeId,
+    /// The accessed type's name, captured at construction — diagnostics for
+    /// storages the `World` cannot name by `TypeId` (resources, #17).
+    pub type_name: &'static str,
     pub is_write: bool,
     pub kind: AccessKind,
 }
 
 impl AccessInfo {
     /// Access to a component storage.
-    pub(crate) fn component(type_id: TypeId, is_write: bool) -> Self {
+    pub(crate) fn component<T: 'static>(is_write: bool) -> Self {
         Self {
-            type_id,
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
             is_write,
             kind: AccessKind::Component,
         }
     }
 
     /// Access to an `Arc<RwLock<T>>` resource.
-    pub(crate) fn resource(type_id: TypeId, is_write: bool) -> Self {
+    pub(crate) fn resource<T: 'static>(is_write: bool) -> Self {
         Self {
-            type_id,
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
             is_write,
             kind: AccessKind::Resource,
         }
     }
 
     /// Access to a main-thread-only resource.
-    pub(crate) fn main_thread(type_id: TypeId, is_write: bool) -> Self {
+    pub(crate) fn main_thread<T: 'static>(is_write: bool) -> Self {
         Self {
-            type_id,
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
             is_write,
             kind: AccessKind::MainThreadResource,
         }
     }
 
     /// A filter that reads a component's storage metadata (locks the component
-    /// for read). `type_id` is the real component `TypeId`.
-    pub(crate) fn component_filter(type_id: TypeId) -> Self {
+    /// for read). `T` is the real component type.
+    pub(crate) fn component_filter<T: 'static>() -> Self {
         Self {
-            type_id,
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
             is_write: false,
             kind: AccessKind::ComponentFilter,
         }
@@ -118,22 +143,24 @@ impl AccessInfo {
     pub(crate) fn raw_world() -> Self {
         Self {
             type_id: TypeId::of::<crate::World>(),
+            type_name: std::any::type_name::<crate::World>(),
             is_write: true,
             kind: AccessKind::RawWorld,
         }
     }
 
     /// A pure filter marker access that borrows no storage.
-    pub(crate) fn filter(type_id: TypeId) -> Self {
+    pub(crate) fn filter<T: 'static>() -> Self {
         Self {
-            type_id,
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
             is_write: false,
             kind: AccessKind::Filter,
         }
     }
 
     /// Sort/dedup key identifying the underlying storage.
-    fn storage_key(&self) -> (TypeId, StorageClass) {
+    pub(crate) fn storage_key(&self) -> (TypeId, StorageClass) {
         (self.type_id, self.kind.storage_class())
     }
 
@@ -506,7 +533,7 @@ impl<T: 'static> AccessElement for Read<T> {
     type Item<'w> = Ref<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component(TypeId::of::<T>(), false)
+        AccessInfo::component::<T>(false)
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -526,7 +553,7 @@ impl<T: 'static> AccessElement for Write<T> {
     type Item<'w> = RefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component(TypeId::of::<T>(), true)
+        AccessInfo::component::<T>(true)
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -546,7 +573,7 @@ impl<T: 'static> AccessElement for ReadAll<T> {
     type Item<'w> = Ref<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component(TypeId::of::<T>(), false)
+        AccessInfo::component::<T>(false)
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -566,7 +593,7 @@ impl<T: 'static> AccessElement for WriteAll<T> {
     type Item<'w> = RefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component(TypeId::of::<T>(), true)
+        AccessInfo::component::<T>(true)
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -586,7 +613,7 @@ impl<T: 'static> AccessElement for OptionalRead<T> {
     type Item<'w> = Option<Ref<'w, T>>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component(TypeId::of::<T>(), false)
+        AccessInfo::component::<T>(false)
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -602,7 +629,7 @@ impl<T: 'static> AccessElement for OptionalWrite<T> {
     type Item<'w> = Option<RefMut<'w, T>>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component(TypeId::of::<T>(), true)
+        AccessInfo::component::<T>(true)
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -618,7 +645,7 @@ impl<T: 'static> AccessElement for Res<T> {
     type Item<'w> = ResourceRef<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::resource(TypeId::of::<T>(), false)
+        AccessInfo::resource::<T>(false)
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -637,7 +664,7 @@ impl<T: 'static> AccessElement for ResMut<T> {
     type Item<'w> = ResourceRefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::resource(TypeId::of::<T>(), true)
+        AccessInfo::resource::<T>(true)
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -655,7 +682,7 @@ impl<T: 'static> AccessElement for MainThreadRes<T> {
     type Item<'w> = &'w T;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::main_thread(TypeId::of::<T>(), false)
+        AccessInfo::main_thread::<T>(false)
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -677,7 +704,7 @@ impl<T: 'static> AccessElement for MainThreadResMut<T> {
     type Item<'w> = &'w mut T;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::main_thread(TypeId::of::<T>(), true)
+        AccessInfo::main_thread::<T>(true)
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -701,7 +728,7 @@ impl<T: 'static> AccessElement for Added<T> {
     fn access_info() -> AccessInfo {
         // Read the real component's storage metadata under a read lock so this
         // filter serializes against any concurrent `Write<T>` system.
-        AccessInfo::component_filter(TypeId::of::<T>())
+        AccessInfo::component_filter::<T>()
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -724,7 +751,7 @@ impl<T: 'static> AccessElement for Removed<T> {
     type Item<'w> = RemovedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component_filter(TypeId::of::<T>())
+        AccessInfo::component_filter::<T>()
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -746,7 +773,7 @@ impl<T: 'static> AccessElement for MaybeAdded<T> {
     type Item<'w> = AddedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component_filter(TypeId::of::<T>())
+        AccessInfo::component_filter::<T>()
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -763,7 +790,7 @@ impl<T: 'static> AccessElement for Changed<T> {
     type Item<'w> = ChangedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component_filter(TypeId::of::<T>())
+        AccessInfo::component_filter::<T>()
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -785,7 +812,7 @@ impl<T: 'static> AccessElement for MaybeChanged<T> {
     type Item<'w> = ChangedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component_filter(TypeId::of::<T>())
+        AccessInfo::component_filter::<T>()
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -802,7 +829,7 @@ impl<T: 'static> AccessElement for MaybeRemoved<T> {
     type Item<'w> = RemovedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component_filter(TypeId::of::<T>())
+        AccessInfo::component_filter::<T>()
     }
 
     fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
@@ -819,7 +846,7 @@ impl<T: 'static> AccessElement for With<T> {
     type Item<'w> = ContainsChecker<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component_filter(TypeId::of::<T>())
+        AccessInfo::component_filter::<T>()
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -836,7 +863,7 @@ impl<T: 'static> AccessElement for Without<T> {
     type Item<'w> = ContainsChecker<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo::component_filter(TypeId::of::<T>())
+        AccessInfo::component_filter::<T>()
     }
 
     fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
@@ -863,7 +890,7 @@ where
     fn access_info() -> AccessInfo {
         // Inert marker; the real metadata comes from `collect_access_infos`,
         // which surfaces the nested filters' storage reads.
-        AccessInfo::filter(TypeId::of::<Or<A, B>>())
+        AccessInfo::filter::<Or<A, B>>()
     }
 
     fn collect_access_infos(out: &mut SmallVec<[AccessInfo; 8]>) {
@@ -896,7 +923,7 @@ macro_rules! impl_any_access_element {
 
             fn access_info() -> AccessInfo {
                 // Inert marker; see `Or::access_info`.
-                AccessInfo::filter(TypeId::of::<Any<($($T,)+)>>())
+                AccessInfo::filter::<Any<($($T,)+)>>()
             }
 
             fn collect_access_infos(out: &mut SmallVec<[AccessInfo; 8]>) {

@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn access_recorder_records_and_returns() {
         let recorder = AccessRecorder::new(2);
-        let info = AccessInfo::component(TypeId::of::<Position>(), true);
+        let info = AccessInfo::component::<Position>(true);
         recorder.record(0, &[info]);
         recorder.record(1, &[info]);
 

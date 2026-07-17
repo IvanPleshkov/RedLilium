@@ -184,24 +184,6 @@ impl World {
         unsafe { self.resources.borrow_mut_unlocked::<T>() }
     }
 
-    /// Read-locks a resource by `TypeId` (blocking), returning the type-erased
-    /// guard. Used by `acquire_sorted` for up-front globally-ordered locking.
-    pub(crate) fn resource_read_guard_dyn(
-        &self,
-        type_id: std::any::TypeId,
-    ) -> Option<crate::sync::RwLockReadGuard<'_, dyn crate::resource::Resource>> {
-        self.resources.read_guard_dyn(type_id)
-    }
-
-    /// Write-locks a resource by `TypeId` (blocking). See
-    /// [`resource_read_guard_dyn`](Self::resource_read_guard_dyn).
-    pub(crate) fn resource_write_guard_dyn(
-        &self,
-        type_id: std::any::TypeId,
-    ) -> Option<crate::sync::RwLockWriteGuard<'_, dyn crate::resource::Resource>> {
-        self.resources.write_guard_dyn(type_id)
-    }
-
     // ---- Main-thread resource management ----
 
     /// Inserts a main-thread resource during world setup.

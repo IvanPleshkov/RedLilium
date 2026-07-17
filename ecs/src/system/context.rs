@@ -13,7 +13,7 @@ use crate::main_thread_dispatcher::MainThreadDispatcher;
 use crate::query::AccessSet;
 use crate::query::LockRequest;
 use crate::query::QueryGuard;
-use crate::query::access::{AccessInfo, FetchTicks, normalize_access_infos};
+use crate::query::access::{AccessInfo, FetchTicks, StorageClass, normalize_access_infos};
 use crate::system::diagnostics::AccessRecorder;
 use crate::system::results_store::SystemResultsStore;
 use crate::system::{ExclusiveSystem, System};
@@ -30,28 +30,34 @@ enum HeldLock {
     Write,
 }
 
+/// Key identifying a tracked storage: the type plus its storage class (#17).
+/// Bare `TypeId` would conflate a type registered both as a component and as
+/// a resource — two independent storages — into one false "deadlock".
+type HeldKey = (TypeId, StorageClass);
+
 /// RAII guard that unregisters held locks from a [`SystemContext`] when dropped.
 ///
 /// Created by [`SystemContext::make_tracking`] and stored inside [`QueryGuard`]
 /// or used as a scope guard in [`LockRequest::execute`].
 pub(crate) struct LockTracking<'a> {
     infos: SmallVec<[AccessInfo; 8]>,
-    held_locks: &'a Mutex<HashMap<TypeId, HeldLock>>,
+    held_locks: &'a Mutex<HashMap<HeldKey, HeldLock>>,
 }
 
 impl Drop for LockTracking<'_> {
     fn drop(&mut self) {
         let mut held = self.held_locks.lock();
         for info in &self.infos {
+            let key = info.storage_key();
             if info.is_write {
-                held.remove(&info.type_id);
+                held.remove(&key);
             } else {
-                match held.get(&info.type_id).copied() {
+                match held.get(&key).copied() {
                     Some(HeldLock::Read(1)) => {
-                        held.remove(&info.type_id);
+                        held.remove(&key);
                     }
                     Some(HeldLock::Read(n)) => {
-                        held.insert(info.type_id, HeldLock::Read(n - 1));
+                        held.insert(key, HeldLock::Read(n - 1));
                     }
                     _ => {}
                 }
@@ -93,9 +99,10 @@ pub struct SystemContext<'a> {
     io: &'a IoRuntime,
     commands: &'a CommandCollector,
     dispatcher: Option<&'a MainThreadDispatcher>,
-    /// Per-system tracking of component locks currently held (via QueryGuard
-    /// or lock().execute()). Used to detect same-system deadlocks.
-    held_locks: Mutex<HashMap<TypeId, HeldLock>>,
+    /// Per-system tracking of storage locks currently held (via QueryGuard
+    /// or lock().execute()) — components AND resources (#17). Used to detect
+    /// same-system deadlocks.
+    held_locks: Mutex<HashMap<HeldKey, HeldLock>>,
     /// Storage for results produced by completed systems.
     system_results: Option<&'a SystemResultsStore>,
     /// Set of system TypeIds whose results this system may read
@@ -239,9 +246,26 @@ impl<'a> SystemContext<'a> {
         self.dispatcher
     }
 
+    /// Whether an access participates in held-lock tracking (#17).
+    ///
+    /// Components and resources both take real locks in `acquire_sorted`
+    /// (resources acquire *blocking* — a nested self-conflict is a silent
+    /// hang, not a panic, so they must be visible here). Main-thread
+    /// resources take no lock but hand out `&`/`&mut` — a nested mutable
+    /// re-borrow would alias, so they are tracked under the same rules.
+    /// Unregistered components take no lock (`acquire_sorted` skips them);
+    /// pure filter markers and the raw-world marker borrow no storage.
+    fn tracks_held_lock(&self, info: &AccessInfo) -> bool {
+        match info.kind.storage_class() {
+            StorageClass::Component => self.world.component_type_name(info.type_id).is_some(),
+            StorageClass::Resource | StorageClass::MainThreadResource => true,
+            StorageClass::Marker | StorageClass::RawWorld => false,
+        }
+    }
+
     /// Checks if the given normalized access infos would conflict with
-    /// component locks currently held by this system. Panics if a deadlock
-    /// would occur.
+    /// storage locks currently held by this system. Panics if a deadlock
+    /// (or, for main-thread resources, aliasing) would occur.
     ///
     /// Conflict rules:
     /// - Write held + any new lock → deadlock
@@ -250,16 +274,14 @@ impl<'a> SystemContext<'a> {
     pub(crate) fn check_held_locks(&self, sorted: &[AccessInfo]) {
         let held = self.held_locks.lock();
         for info in sorted {
-            if let Some(&state) = held.get(&info.type_id) {
+            if let Some(&state) = held.get(&info.storage_key()) {
                 let conflict = match state {
                     HeldLock::Write => true,
                     HeldLock::Read(_) => info.is_write,
                 };
                 if conflict {
-                    let type_name = self
-                        .world
-                        .component_type_name(info.type_id)
-                        .unwrap_or("<resource>");
+                    let noun = info.kind.storage_class().noun();
+                    let type_name = info.type_name;
                     let held_mode = match state {
                         HeldLock::Write => "write",
                         HeldLock::Read(_) => "read",
@@ -267,7 +289,7 @@ impl<'a> SystemContext<'a> {
                     let want_mode = if info.is_write { "write" } else { "read" };
                     drop(held);
                     panic!(
-                        "ECS deadlock detected: component `{type_name}` is already locked \
+                        "ECS deadlock detected: {noun} `{type_name}` is already locked \
                          for {held_mode}, but a new {want_mode} lock was requested. \
                          Drop the existing QueryGuard before acquiring new locks, or \
                          combine all needed accesses into a single query/lock call."
@@ -277,23 +299,23 @@ impl<'a> SystemContext<'a> {
         }
     }
 
-    /// Registers component locks as held. Called after successful lock acquisition.
+    /// Registers storage locks as held. Called after successful lock acquisition.
     pub(crate) fn register_held_locks(&self, sorted: &[AccessInfo]) {
         let mut held = self.held_locks.lock();
         for info in sorted {
-            // Only track component TypeIds (resources self-lock via their own RwLock)
-            if self.world.component_type_name(info.type_id).is_none() {
+            if !self.tracks_held_lock(info) {
                 continue;
             }
+            let key = info.storage_key();
             if info.is_write {
-                held.insert(info.type_id, HeldLock::Write);
+                held.insert(key, HeldLock::Write);
             } else {
-                match held.get(&info.type_id).copied() {
+                match held.get(&key).copied() {
                     Some(HeldLock::Read(n)) => {
-                        held.insert(info.type_id, HeldLock::Read(n + 1));
+                        held.insert(key, HeldLock::Read(n + 1));
                     }
                     _ => {
-                        held.insert(info.type_id, HeldLock::Read(1));
+                        held.insert(key, HeldLock::Read(1));
                     }
                 }
             }
@@ -301,15 +323,15 @@ impl<'a> SystemContext<'a> {
     }
 
     /// Creates a [`LockTracking`] guard that will unregister the given
-    /// component locks when dropped.
+    /// storage locks when dropped.
     pub(crate) fn make_tracking(&self, sorted: &[AccessInfo]) -> LockTracking<'_> {
-        let component_infos: SmallVec<[AccessInfo; 8]> = sorted
+        let tracked_infos: SmallVec<[AccessInfo; 8]> = sorted
             .iter()
-            .filter(|i| self.world.component_type_name(i.type_id).is_some())
+            .filter(|i| self.tracks_held_lock(i))
             .copied()
             .collect();
         LockTracking {
-            infos: component_infos,
+            infos: tracked_infos,
             held_locks: &self.held_locks,
         }
     }
@@ -871,6 +893,62 @@ mod tests {
         let _q1 = ctx.query::<(Write<Position>,)>();
         // Overlaps on Position (write held + read wanted)
         let _q2 = ctx.query::<(Read<Position>, Read<Velocity>)>(); // should panic
+    }
+
+    // Nested resource locking (#17 B2): resources acquire *blocking* in
+    // acquire_sorted, so before resource tracking a same-system self-conflict
+    // was a silent permanent hang instead of this panic.
+    #[test]
+    #[should_panic(expected = "ECS deadlock detected: resource `u32`")]
+    fn deadlock_resource_write_then_read() {
+        let mut world = World::new();
+        world.insert_resource(7u32);
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        use crate::query::{Res, ResMut};
+        let _q1 = ctx.query::<(ResMut<u32>,)>();
+        let _q2 = ctx.query::<(Res<u32>,)>(); // should panic, not hang
+    }
+
+    #[test]
+    fn no_deadlock_resource_read_then_read() {
+        let mut world = World::new();
+        world.insert_resource(7u32);
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        use crate::query::Res;
+        let q1 = ctx.query::<(Res<u32>,)>();
+        let q2 = ctx.query::<(Res<u32>,)>(); // shared reads coexist — no panic
+        let (_a,) = q1.items();
+        let (_b,) = q2.items();
+    }
+
+    // #17 D: a type registered both as a component and as a resource lives in
+    // two independent storages — keying held locks by bare TypeId used to
+    // report a false deadlock here.
+    #[test]
+    fn no_false_deadlock_component_vs_resource_of_same_type() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
+        world.insert_resource(Position { x: 9.0, y: 9.0 });
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        use crate::query::ResMut;
+        let mut q1 = ctx.query::<(Write<Position>,)>(); // component storage
+        let mut q2 = ctx.query::<(ResMut<Position>,)>(); // resource storage
+        let (components,) = q1.items_mut();
+        let (resource,) = q2.items_mut();
+        resource.x += 1.0;
+        assert_eq!(resource.x, 10.0);
+        assert_eq!(components.iter_mut().count(), 1);
     }
 
     #[test]

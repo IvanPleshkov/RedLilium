@@ -311,25 +311,28 @@ impl Resources {
         }
     }
 
-    /// Acquires the read lock on a resource by `TypeId`, blocking until
-    /// available. Returns the type-erased guard, or `None` if the resource does
-    /// not exist. Used by `World::acquire_sorted` to lock resources up-front in
-    /// a globally-consistent order (deadlock-free, blocking instead of the
-    /// panic-on-contention `try_*` path).
-    pub(crate) fn read_guard_dyn(
-        &self,
-        type_id: TypeId,
-    ) -> Option<RwLockReadGuard<'_, dyn Resource>> {
-        Some(self.entries.get(&type_id)?.handle.read())
+    /// Whether a resource with this `TypeId` is registered (no locking).
+    pub(crate) fn contains_dyn(&self, type_id: TypeId) -> bool {
+        self.entries.contains_key(&type_id)
     }
 
-    /// Acquires the write lock on a resource by `TypeId`, blocking until
-    /// available. See [`read_guard_dyn`](Self::read_guard_dyn).
-    pub(crate) fn write_guard_dyn(
+    /// Non-blocking [`read_guard_dyn`](Self::read_guard_dyn): outer `None` =
+    /// resource not registered, inner `None` = currently locked. Used by the
+    /// acquisition watchdog (#17).
+    pub(crate) fn try_read_guard_dyn(
         &self,
         type_id: TypeId,
-    ) -> Option<RwLockWriteGuard<'_, dyn Resource>> {
-        Some(self.entries.get(&type_id)?.handle.write())
+    ) -> Option<Option<RwLockReadGuard<'_, dyn Resource>>> {
+        Some(self.entries.get(&type_id)?.handle.try_read())
+    }
+
+    /// Non-blocking [`write_guard_dyn`](Self::write_guard_dyn); same contract
+    /// as [`try_read_guard_dyn`](Self::try_read_guard_dyn).
+    pub(crate) fn try_write_guard_dyn(
+        &self,
+        type_id: TypeId,
+    ) -> Option<Option<RwLockWriteGuard<'_, dyn Resource>>> {
+        Some(self.entries.get(&type_id)?.handle.try_write())
     }
 
     // ---- Main-thread resource delegation ----

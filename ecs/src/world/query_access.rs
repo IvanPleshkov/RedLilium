@@ -9,6 +9,46 @@ use crate::sparse_set::{LockGuard, Ref, RefMut};
 
 use super::{World, WorldError};
 
+/// How long a single lock acquisition may block before it is declared a
+/// deadlock and panics (#17). Frame-driven systems hold locks for
+/// microseconds-to-milliseconds; ten seconds of blocking means a
+/// cross-system lock-order (ABBA) deadlock, which would otherwise hang the
+/// process silently. (A debugger pause can trip this — resume-and-rerun.)
+pub(crate) const LOCK_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Try-acquire loop with a watchdog deadline (#17).
+///
+/// The fast path takes no clock reading: `Instant::now` is touched only
+/// after a failed try. On wasm (no std clock, single-threaded) contention
+/// cannot occur, so the slow path is unreachable there.
+fn acquire_watched<G>(
+    info: &AccessInfo,
+    timeout: std::time::Duration,
+    mut try_acquire: impl FnMut() -> Option<G>,
+) -> G {
+    if let Some(guard) = try_acquire() {
+        return guard;
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        if let Some(guard) = try_acquire() {
+            return guard;
+        }
+        if std::time::Instant::now() >= deadline {
+            let mode = if info.is_write { "write" } else { "read" };
+            panic!(
+                "ECS lock acquisition timed out after {timeout:?}: {mode} lock on {} `{}` \
+                 is still held elsewhere — likely a cross-system lock-order (ABBA) deadlock \
+                 from nested ctx.lock calls (#17). Combine the accesses into a single \
+                 lock/query call, or order the conflicting systems explicitly.",
+                info.kind.storage_class().noun(),
+                info.type_name,
+            );
+        }
+    }
+}
+
 impl World {
     // ---- Query access (runtime borrow-checked, take &self) ----
 
@@ -315,14 +355,28 @@ impl World {
         ))
     }
 
-    /// Acquires component locks in TypeId-sorted order.
+    /// Acquires component AND resource locks in storage-sorted order.
     ///
     /// Used by `LockRequest` during system execution. Sorted acquisition
-    /// prevents deadlocks when multiple systems run concurrently.
-    ///
-    /// Resources are NOT included — they lock themselves via their own
-    /// `Arc<RwLock<T>>` when accessed.
+    /// prevents deadlocks *within one call*: because the order is global and
+    /// consistent across all systems, two systems whose accesses are declared
+    /// in a single `lock`/`query` call can never take them in opposite
+    /// orders. Nested `ctx.lock` calls break that guarantee (each call sorts
+    /// only its own set), which is why acquisition runs under a watchdog: a
+    /// lock still unavailable after [`LOCK_ACQUIRE_TIMEOUT`] is treated as a
+    /// cross-system lock-order (ABBA) deadlock and panics with the storage
+    /// name instead of hanging silently (#17).
     pub(crate) fn acquire_sorted(&self, infos: &[AccessInfo]) -> SmallVec<[LockGuard<'_>; 8]> {
+        self.acquire_sorted_with_timeout(infos, LOCK_ACQUIRE_TIMEOUT)
+    }
+
+    /// [`acquire_sorted`](Self::acquire_sorted) with an explicit watchdog
+    /// timeout (tests use a short one).
+    pub(crate) fn acquire_sorted_with_timeout(
+        &self,
+        infos: &[AccessInfo],
+        timeout: std::time::Duration,
+    ) -> SmallVec<[LockGuard<'_>; 8]> {
         // Reject aliasing-unsafe access sets (e.g. `(Write<T>, Write<T>)`)
         // before any data is fetched unlocked, otherwise the per-element
         // fetch would hand out two references to the same storage (UB).
@@ -330,30 +384,32 @@ impl World {
 
         let sorted = crate::query::access::normalize_access_infos(infos);
 
-        // Acquire every lock up-front in the normalized (TypeId-then-kind) order.
-        // Because the order is global and consistent across all systems, two
-        // systems that touch the same set of components/resources can never take
-        // them in opposite orders, so there is no lock-ordering deadlock — and
-        // resources block here instead of panicking on contention via `try_*`.
         sorted
             .iter()
             .filter_map(|info| match info.kind {
                 AccessKind::Component | AccessKind::ComponentFilter => {
                     let lock = self.components.get(&info.type_id)?;
                     Some(if info.is_write {
-                        LockGuard::Write(lock.write())
+                        LockGuard::Write(acquire_watched(info, timeout, || lock.try_write()))
                     } else {
-                        LockGuard::Read(lock.read())
+                        LockGuard::Read(acquire_watched(info, timeout, || lock.try_read()))
                     })
                 }
                 AccessKind::Resource => {
-                    if info.is_write {
-                        self.resource_write_guard_dyn(info.type_id)
-                            .map(LockGuard::ResourceWrite)
-                    } else {
-                        self.resource_read_guard_dyn(info.type_id)
-                            .map(LockGuard::ResourceRead)
+                    // Unregistered resource → no lock to take (the fetch
+                    // will panic with its own message).
+                    if !self.resources.contains_dyn(info.type_id) {
+                        return None;
                     }
+                    Some(if info.is_write {
+                        LockGuard::ResourceWrite(acquire_watched(info, timeout, || {
+                            self.resources.try_write_guard_dyn(info.type_id).flatten()
+                        }))
+                    } else {
+                        LockGuard::ResourceRead(acquire_watched(info, timeout, || {
+                            self.resources.try_read_guard_dyn(info.type_id).flatten()
+                        }))
+                    })
                 }
                 // Main-thread resources are single-threaded (no lock); pure
                 // filter markers borrow no storage. RawWorld is a diagnostic
@@ -462,5 +518,57 @@ impl World {
             .get(&TypeId::of::<T>())
             .map(|lock| unsafe { &*lock.data_ptr() });
         RemovedFilter::new(storage, since_tick)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Pos(#[allow(dead_code)] f32);
+
+    /// The #17 watchdog: a lock held by another thread past the timeout is a
+    /// panic naming the storage, not a silent hang. (Cross-system ABBA
+    /// deadlocks reduce to exactly this: some system never releases the lock
+    /// this one is waiting for.)
+    #[test]
+    #[should_panic(expected = "ECS lock acquisition timed out")]
+    fn acquisition_watchdog_panics_instead_of_hanging() {
+        let mut world = World::new();
+        world.register_component::<Pos>();
+
+        let infos = [AccessInfo::component::<Pos>(true)];
+        std::thread::scope(|scope| {
+            let world = &world;
+            scope.spawn(move || {
+                let _guard = world.acquire_sorted(&infos);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            });
+            // Give the holder thread time to take the write lock, then time out.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let _hung =
+                world.acquire_sorted_with_timeout(&infos, std::time::Duration::from_millis(50));
+        });
+    }
+
+    /// The watchdog's retry loop must still succeed when the contended lock
+    /// is released before the deadline.
+    #[test]
+    fn acquisition_watchdog_recovers_after_release() {
+        let mut world = World::new();
+        world.register_component::<Pos>();
+
+        let infos = [AccessInfo::component::<Pos>(true)];
+        std::thread::scope(|scope| {
+            let world = &world;
+            scope.spawn(move || {
+                let _guard = world.acquire_sorted(&infos);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            });
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let guards =
+                world.acquire_sorted_with_timeout(&infos, std::time::Duration::from_secs(5));
+            assert_eq!(guards.len(), 1);
+        });
     }
 }
