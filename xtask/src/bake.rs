@@ -93,6 +93,7 @@ const REGISTRY: &[ShaderSpec] = &[
     vs_fs_spec("debug_draw", "shaders/standard/debug_draw.slang"),
     // Demo shaders — baked so the demos render on the default Slang-off build too.
     vs_fs_spec("skybox", "demos/shaders/skybox.slang"),
+    vs_fs_spec("compressed_quad", "demos/shaders/compressed_quad.slang"),
     vs_fs_spec("deferred_gbuffer", "demos/shaders/deferred_gbuffer.slang"),
     vs_fs_spec("deferred_resolve", "demos/shaders/deferred_resolve.slang"),
     // Meshlet demo (#111): the task/mesh entries force the whole set to

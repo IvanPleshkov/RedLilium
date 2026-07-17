@@ -252,7 +252,11 @@ impl BufferTextureLayout {
             )));
         }
 
-        let rows_per_image_texels = self.rows_per_image.unwrap_or(extent.height);
+        // The tight default is the copy height rounded UP to whole blocks:
+        // edge mips of compressed formats legally copy extents smaller than a
+        // block (a 2×2 BC mip), but the buffer still holds one full block row
+        // (#120). An explicit value must be block-aligned by itself.
+        let rows_per_image_texels = self.rows_per_image.unwrap_or(height_blocks * block_h);
         if !rows_per_image_texels.is_multiple_of(block_h) {
             return Err(GraphicsError::InvalidParameter(format!(
                 "rows_per_image {rows_per_image_texels} is not a multiple of the format block \
@@ -553,64 +557,73 @@ impl TransferOperation {
         dst: Arc<Texture>,
         data: &[u8],
     ) -> Result<Self, GraphicsError> {
-        let format = dst.format();
         let extent = dst.size();
-        let (block_w, block_h) = format.block_dimensions();
-        let block_size = format.block_size();
-        let row_blocks = extent.width.div_ceil(block_w);
-        let col_blocks = extent.height.div_ceil(block_h);
-        let images = extent.depth.max(1);
-        let tight_bpr = row_blocks * block_size;
-        let total_rows = col_blocks as usize * images as usize;
-
-        let expected = tight_bpr as usize * total_rows;
-        if data.len() != expected {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "upload_texture_data: data size {} does not match the texture's tightly-packed \
-                 size {expected}",
-                data.len()
-            )));
-        }
-
-        let multi_row = total_rows > 1;
-        let needs_padding = multi_row && !tight_bpr.is_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
-        let (staging_bytes, bytes_per_row) = if needs_padding {
-            let padded_bpr = tight_bpr.next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
-            let mut padded = vec![0u8; padded_bpr as usize * total_rows];
-            for row in 0..total_rows {
-                let src = row * tight_bpr as usize;
-                let dst_off = row * padded_bpr as usize;
-                padded[dst_off..dst_off + tight_bpr as usize]
-                    .copy_from_slice(&data[src..src + tight_bpr as usize]);
-            }
-            (std::borrow::Cow::Owned(padded), Some(padded_bpr))
-        } else {
-            (std::borrow::Cow::Borrowed(data), None)
-        };
-
-        let staging = device.create_buffer(
-            &BufferDescriptor::new(
-                staging_bytes.len() as u64,
-                // RING is the cross-backend "CPU-written, host-visible" flag:
-                // on Vulkan it forces host-visible memory (under ADR-021 / #89 a
-                // buffer without a mapping flag lands device-local, where the
-                // `write_mapped` below cannot map it), while mapping to no wgpu
-                // usage — so it avoids wgpu's MAP_WRITE/COPY_DST conflict. COPY_DST
-                // is what wgpu's `Queue::write_buffer` requires; COPY_SRC makes it
-                // a valid buffer→texture copy source.
-                BufferUsage::COPY_SRC | BufferUsage::COPY_DST | BufferUsage::RING,
-            )
-            .with_label("texture_upload_staging"),
-        )?;
-        // Fresh staging buffer — never touched by the GPU, so the mapped write
-        // cannot race.
-        staging.write_mapped(0, &staging_bytes)?;
+        let (staging, bytes_per_row) =
+            stage_texture_bytes(device, dst.format(), extent, data, "upload_texture_data")?;
         Ok(Self::BufferToTexture {
             src: staging,
             dst,
             regions: vec![BufferTextureCopyRegion::new(
                 BufferTextureLayout::new(0, bytes_per_row, None),
                 TextureCopyLocation::base(),
+                extent,
+            )],
+        })
+    }
+
+    /// Upload one tightly-packed `(mip, layer)` image into `dst` through the
+    /// frame graph (#120).
+    ///
+    /// Like [`upload_texture_data`](Self::upload_texture_data) but targets a
+    /// single mip level and array layer, sizing the copy region to the mip's
+    /// extent (rounded up to whole blocks for compressed formats — partial
+    /// edge blocks on NPOT sizes still occupy a full block in `data`). For
+    /// cube(-array) textures `layer` is the face-flattened index; for 3D
+    /// textures the image spans the mip's whole (shrinking) depth and `layer`
+    /// must be 0. This is how mip chains and cubemaps loaded from containers
+    /// (KTX2) reach the GPU — one operation per stored image.
+    pub fn upload_texture_level(
+        device: &Arc<GraphicsDevice>,
+        dst: Arc<Texture>,
+        mip: u32,
+        layer: u32,
+        data: &[u8],
+    ) -> Result<Self, GraphicsError> {
+        if mip >= dst.mip_level_count() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "upload_texture_level: mip {mip} out of range ({} levels)",
+                dst.mip_level_count()
+            )));
+        }
+        let (layers, base_depth) = dst.descriptor().layers_and_depth();
+        if layer >= layers {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "upload_texture_level: layer {layer} out of range ({layers} layers)"
+            )));
+        }
+        let base = dst.size();
+        let extent = Extent3d {
+            width: (base.width >> mip).max(1),
+            height: (base.height >> mip).max(1),
+            // 3D mips shrink in depth; array layers are addressed via
+            // `origin.z` instead and copy one slice at a time.
+            depth: if layers > 1 {
+                1
+            } else {
+                (base_depth >> mip).max(1)
+            },
+        };
+        let (staging, bytes_per_row) =
+            stage_texture_bytes(device, dst.format(), extent, data, "upload_texture_level")?;
+        Ok(Self::BufferToTexture {
+            src: staging,
+            dst,
+            regions: vec![BufferTextureCopyRegion::new(
+                BufferTextureLayout::new(0, bytes_per_row, None),
+                TextureCopyLocation {
+                    mip_level: mip,
+                    origin: TextureOrigin::new(0, 0, layer),
+                },
                 extent,
             )],
         })
@@ -654,6 +667,74 @@ impl TransferOperation {
             src_range,
         }
     }
+}
+
+/// Fill a fresh staging buffer with tightly-packed texel `data` for a copy of
+/// `extent`, returning the buffer and the explicit `bytes_per_row` (when the
+/// tight pitch had to be padded to [`COPY_BYTES_PER_ROW_ALIGNMENT`], a rule
+/// both backends enforce for multi-row copies). Validates `data`'s size
+/// against the format arithmetic — blocks rounded up for compressed formats.
+fn stage_texture_bytes(
+    device: &Arc<GraphicsDevice>,
+    format: TextureFormat,
+    extent: Extent3d,
+    data: &[u8],
+    what: &str,
+) -> Result<(Arc<Buffer>, Option<u32>), GraphicsError> {
+    let (block_w, block_h) = format.block_dimensions();
+    let block_size = format.block_size();
+    let row_blocks = extent.width.div_ceil(block_w);
+    let col_blocks = extent.height.div_ceil(block_h);
+    let images = extent.depth.max(1);
+    let tight_bpr = row_blocks * block_size;
+    let total_rows = col_blocks as usize * images as usize;
+
+    let expected = tight_bpr as usize * total_rows;
+    if data.len() != expected {
+        return Err(GraphicsError::InvalidParameter(format!(
+            "{what}: data size {} does not match the tightly-packed size {expected} \
+             for a {}x{}x{} copy of {format:?}",
+            data.len(),
+            extent.width,
+            extent.height,
+            extent.depth
+        )));
+    }
+
+    let multi_row = total_rows > 1;
+    let needs_padding = multi_row && !tight_bpr.is_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
+    let (staging_bytes, bytes_per_row) = if needs_padding {
+        let padded_bpr = tight_bpr.next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
+        let mut padded = vec![0u8; padded_bpr as usize * total_rows];
+        for row in 0..total_rows {
+            let src = row * tight_bpr as usize;
+            let dst_off = row * padded_bpr as usize;
+            padded[dst_off..dst_off + tight_bpr as usize]
+                .copy_from_slice(&data[src..src + tight_bpr as usize]);
+        }
+        (std::borrow::Cow::Owned(padded), Some(padded_bpr))
+    } else {
+        (std::borrow::Cow::Borrowed(data), None)
+    };
+
+    let staging = device.create_buffer(
+        &BufferDescriptor::new(
+            staging_bytes.len() as u64,
+            // RING is the cross-backend "CPU-written, host-visible" flag:
+            // on Vulkan it forces host-visible memory (under ADR-021 / #89 a
+            // buffer without a mapping flag lands device-local, where the
+            // `write_mapped` below cannot map it), while mapping to no wgpu
+            // usage — so it avoids wgpu's MAP_WRITE/COPY_DST conflict. COPY_DST
+            // is what wgpu's `Queue::write_buffer` requires; COPY_SRC makes it
+            // a valid buffer→texture copy source.
+            BufferUsage::COPY_SRC | BufferUsage::COPY_DST | BufferUsage::RING,
+        )
+        .with_label("texture_upload_staging"),
+    )?;
+    // Fresh staging buffer — never touched by the GPU, so the mapped write
+    // cannot race.
+    staging.write_mapped(0, &staging_bytes)?;
+    Ok((staging, bytes_per_row))
 }
 
 /// Configuration for a transfer pass.

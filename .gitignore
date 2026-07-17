@@ -21,6 +21,8 @@ demos/web/pkg/
 # Slang SDK — provisioned locally by scripts/fetch-slang.sh (a real dir), or a
 # dev symlink to an existing SDK. No trailing slash so both forms are ignored.
 .slang
+# KTX-Software CLI — provisioned locally by scripts/fetch-ktx.sh (#120/#122)
+.ktx
 
 # Environment
 .env

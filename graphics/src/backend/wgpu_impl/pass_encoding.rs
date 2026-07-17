@@ -438,11 +438,7 @@ impl WgpuBackend {
                                     .then_some(layout.rows_per_image_blocks),
                             },
                         },
-                        wgpu::Extent3d {
-                            width: region.extent.width,
-                            height: region.extent.height,
-                            depth_or_array_layers: region.extent.depth,
-                        },
+                        block_aligned_extent(format, region.extent),
                     );
                 }
             }
@@ -490,11 +486,7 @@ impl WgpuBackend {
                             },
                             aspect: wgpu::TextureAspect::All,
                         },
-                        wgpu::Extent3d {
-                            width: region.extent.width,
-                            height: region.extent.height,
-                            depth_or_array_layers: region.extent.depth,
-                        },
+                        block_aligned_extent(format, region.extent),
                     );
                 }
             }
@@ -599,5 +591,24 @@ impl WgpuBackend {
         }
 
         Ok(())
+    }
+}
+
+/// Copy extent for wgpu, rounded up to whole format blocks (#120).
+///
+/// WebGPU validates copy extents against the *physical* (block-padded) size
+/// of a compressed subresource — copying a full 2×2 BC edge mip must pass
+/// 4×4. Vulkan wants the *logical* extent, so the rounding lives here, not
+/// in the shared resolver. For block-aligned extents (and every uncompressed
+/// format) this is the identity.
+fn block_aligned_extent(
+    format: redlilium_core::texture::TextureFormat,
+    extent: crate::types::Extent3d,
+) -> wgpu::Extent3d {
+    let (block_w, block_h) = format.block_dimensions();
+    wgpu::Extent3d {
+        width: extent.width.next_multiple_of(block_w),
+        height: extent.height.next_multiple_of(block_h),
+        depth_or_array_layers: extent.depth,
     }
 }

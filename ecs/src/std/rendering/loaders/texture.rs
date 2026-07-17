@@ -16,7 +16,7 @@ use redlilium_assets::{
     Guid, LoadEnv, StageFuture,
 };
 use redlilium_core::sampler::{AddressMode, CpuSampler, FilterMode};
-use redlilium_core::texture::{CpuTexture, TextureFormat};
+use redlilium_core::texture::{CpuTexture, TextureDimension, TextureFormat};
 use redlilium_graphics::{
     Extent3d, GraphicsDevice, Texture, TextureDescriptor, TextureUsage, TransferOperation,
 };
@@ -139,7 +139,7 @@ pub struct TextureLoader;
 
 impl AssetLoader for TextureLoader {
     const NAME: &'static str = "texture";
-    const EXTENSIONS: &'static [&'static str] = &["png", "jpg", "jpeg"];
+    const EXTENSIONS: &'static [&'static str] = &["png", "jpg", "jpeg", "ktx2"];
     type Source = TextureSource;
     type Asset = Texture;
     type Deps = ();
@@ -207,8 +207,12 @@ impl AssetStage for ReadImageStage {
     }
 }
 
-/// CPU stage: decode the image to an RGBA8 [`CpuTexture`] (linear or sRGB per
-/// the record settings).
+/// CPU stage: decode the image to a [`CpuTexture`]. KTX2 containers (sniffed
+/// by magic, #120) carry their own format/mips/layers and bypass the `image`
+/// crate — including the record's `srgb` flag, which the container's vkFormat
+/// already encodes. Everything else decodes to RGBA8 (linear or sRGB per the
+/// record settings). A KTX2 whose format the engine cannot express fails with
+/// a named error — never a silent RGBA8 fallback.
 struct DecodeImageStage {
     settings: TextureSettings,
 }
@@ -223,6 +227,11 @@ impl AssetStage for DecodeImageStage {
             let bytes = input
                 .downcast::<Vec<u8>>()
                 .map_err(|_| AssetError::Decode("texture: expected file bytes".into()))?;
+            if redlilium_core::texture::ktx2::is_ktx2(&bytes) {
+                let cpu = redlilium_core::texture::ktx2::parse_ktx2(&bytes)
+                    .map_err(|e| AssetError::Decode(format!("texture: {e}")))?;
+                return Ok(Box::new(cpu) as AnyAsset);
+            }
             let img = image::load_from_memory(&bytes)
                 .map_err(|e| AssetError::Decode(format!("texture: {e}")))?;
             let rgba = img.to_rgba8();
@@ -279,11 +288,18 @@ impl AssetStage for UploadTextureStage {
             .downcast::<CpuTexture>()
             .map_err(|_| AssetError::Decode("texture: upload stage expected CpuTexture".into()))?;
 
+        // Container-supplied chains (#120): a KTX2 with baked mips and/or
+        // layers/faces uploads exactly what's on disk — one operation per
+        // (mip, layer) image — and never runs GPU mip generation on top.
+        let container_chain = cpu.mip_level_count > 1 || cpu.layer_count() > 1;
+
         // Mip generation (#96) is requested only when the record asks for it,
-        // the backend supports the op, the format is blit-eligible, and the
-        // image is larger than 1×1. Otherwise keep a single mip exactly as
-        // before — never fail the load. Ineligible formats log once.
-        let wants_mips = self.generate_mips && (cpu.width > 1 || cpu.height > 1);
+        // the source has no chain of its own, the backend supports the op, the
+        // format is blit-eligible, and the image is larger than 1×1. Otherwise
+        // keep the stored mips exactly as-is — never fail the load. Ineligible
+        // formats log once.
+        let wants_mips =
+            self.generate_mips && !container_chain && (cpu.width > 1 || cpu.height > 1);
         let can_mip = wants_mips && self.device.supports_mipmap_generation(cpu.format);
         if wants_mips && !can_mip {
             log_mip_fallback(cpu.format);
@@ -291,19 +307,30 @@ impl AssetStage for UploadTextureStage {
         let mip_level_count = if can_mip {
             full_mip_level_count(cpu.width, cpu.height)
         } else {
-            1
+            cpu.mip_level_count
         };
 
         // Blit reads lower mips as TRANSFER_SRC, so the texture needs COPY_SRC
         // when a chain is generated.
         let mut usage = TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST;
-        if mip_level_count > 1 {
+        if can_mip {
             usage |= TextureUsage::COPY_SRC;
         }
 
+        // Arrays/3D carry their layer count / depth in `size.depth`
+        // (`TextureDescriptor::layers_and_depth`); cubemaps get their 6 faces
+        // from the dimension alone.
+        let depth = match cpu.dimension {
+            TextureDimension::D1 | TextureDimension::D2 | TextureDimension::Cube => 1,
+            _ => cpu.depth_or_array_layers,
+        };
         let descriptor = TextureDescriptor {
             label: cpu.name.clone(),
-            size: Extent3d::new_2d(cpu.width, cpu.height),
+            size: Extent3d {
+                width: cpu.width,
+                height: cpu.height,
+                depth,
+            },
             mip_level_count,
             sample_count: 1,
             dimension: cpu.dimension,
@@ -317,15 +344,30 @@ impl AssetStage for UploadTextureStage {
             cross_queue: true,
         };
         let texture = self.device.create_texture(&descriptor)?;
-        let mut ops = vec![TransferOperation::upload_texture_data(
-            &self.device,
-            Arc::clone(&texture),
-            &cpu.data,
-        )?];
-        // The blit chain runs after the mip0 upload; flush_gpu routes it to the
-        // graphics queue (blit is illegal on the transfer family).
-        if mip_level_count > 1 {
-            ops.push(TransferOperation::generate_mipmaps(Arc::clone(&texture)));
+        let mut ops = Vec::new();
+        if container_chain {
+            for mip in 0..cpu.mip_level_count {
+                for layer in 0..cpu.layer_count() {
+                    ops.push(TransferOperation::upload_texture_level(
+                        &self.device,
+                        Arc::clone(&texture),
+                        mip,
+                        layer,
+                        &cpu.data[cpu.byte_range(mip, layer)],
+                    )?);
+                }
+            }
+        } else {
+            ops.push(TransferOperation::upload_texture_data(
+                &self.device,
+                Arc::clone(&texture),
+                &cpu.data,
+            )?);
+            // The blit chain runs after the mip0 upload; flush_gpu routes it to
+            // the graphics queue (blit is illegal on the transfer family).
+            if can_mip {
+                ops.push(TransferOperation::generate_mipmaps(Arc::clone(&texture)));
+            }
         }
         Ok((Box::new(texture) as GpuValue, ops))
     }

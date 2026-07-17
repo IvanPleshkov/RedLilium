@@ -2,7 +2,10 @@
 //!
 //! Provides [`CpuTexture`] for holding raw pixel data, along with
 //! [`TextureFormat`] and [`TextureDimension`] enums shared between
-//! CPU and GPU code.
+//! CPU and GPU code. The [`ktx2`] submodule parses KTX2 containers
+//! into `CpuTexture` (#120).
+
+pub mod ktx2;
 
 /// Texture dimension enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -552,6 +555,14 @@ impl TextureFormat {
 ///
 /// Holds raw pixel data along with dimensions and format metadata.
 /// This is the CPU-side counterpart to a GPU texture resource.
+///
+/// `data` is a single blob holding every (mip, layer) image back to back with
+/// no row padding: **mip-major, layers within a mip** — all of mip 0's layers,
+/// then all of mip 1's, … For cubemaps a "layer" is a face (+X, −X, +Y, −Y,
+/// +Z, −Z per KTX2/Vulkan order); for cube arrays it is `cube_index * 6 +
+/// face`. For 3D textures the z-slices belong to the image itself (layer
+/// count stays 1) and shrink with each mip. Use [`byte_range`](Self::
+/// byte_range) to slice one image out (#120).
 #[derive(Debug, Clone)]
 pub struct CpuTexture {
     /// Texture name.
@@ -566,10 +577,16 @@ pub struct CpuTexture {
     pub format: TextureFormat,
     /// Texture dimension.
     pub dimension: TextureDimension,
+    /// Number of mip levels stored in `data` (≥ 1).
+    pub mip_level_count: u32,
+    /// Depth for 3D textures, array-layer count for array textures, cube
+    /// count for cube arrays (matching [`TextureDimension::layer_count`]'s
+    /// argument). `1` for plain 1D/2D/Cube textures.
+    pub depth_or_array_layers: u32,
 }
 
 impl CpuTexture {
-    /// Create a new 2D CPU texture.
+    /// Create a new 2D CPU texture (single mip, single layer).
     pub fn new(width: u32, height: u32, format: TextureFormat, data: Vec<u8>) -> Self {
         Self {
             name: None,
@@ -578,6 +595,8 @@ impl CpuTexture {
             height,
             format,
             dimension: TextureDimension::D2,
+            mip_level_count: 1,
+            depth_or_array_layers: 1,
         }
     }
 
@@ -591,6 +610,87 @@ impl CpuTexture {
     pub fn with_dimension(mut self, dimension: TextureDimension) -> Self {
         self.dimension = dimension;
         self
+    }
+
+    /// Set the number of mip levels stored in `data` (#120).
+    pub fn with_mip_level_count(mut self, mip_level_count: u32) -> Self {
+        self.mip_level_count = mip_level_count;
+        self
+    }
+
+    /// Set the depth (3D) / array-layer (arrays) / cube count (cube arrays)
+    /// stored in `data` (#120).
+    pub fn with_depth_or_array_layers(mut self, depth_or_array_layers: u32) -> Self {
+        self.depth_or_array_layers = depth_or_array_layers;
+        self
+    }
+
+    /// Number of images per mip level: `1` for 1D/2D/3D, `6` for cubemaps,
+    /// the layer count for arrays (× 6 for cube arrays).
+    pub fn layer_count(&self) -> u32 {
+        match self.dimension {
+            // 3D z-slices live inside the image, not as layers.
+            TextureDimension::D3 => 1,
+            dim => dim.layer_count(self.depth_or_array_layers),
+        }
+    }
+
+    /// Texel extent `(width, height, depth)` of `mip`, each clamped to ≥ 1.
+    /// Depth shrinks only for 3D textures.
+    pub fn mip_extent(&self, mip: u32) -> (u32, u32, u32) {
+        let depth = match self.dimension {
+            TextureDimension::D3 => self.depth_or_array_layers,
+            _ => 1,
+        };
+        (
+            (self.width >> mip).max(1),
+            (self.height >> mip).max(1),
+            (depth >> mip).max(1),
+        )
+    }
+
+    /// Size in bytes of ONE image (one layer/face) at `mip`, tightly packed.
+    /// Compressed formats round the extent up to whole blocks — partial edge
+    /// blocks on NPOT sizes still occupy a full block.
+    pub fn image_size_bytes(&self, mip: u32) -> usize {
+        let (width, height, depth) = self.mip_extent(mip);
+        let (block_w, block_h) = self.format.block_dimensions();
+        let row_blocks = width.div_ceil(block_w) as usize;
+        let col_blocks = height.div_ceil(block_h) as usize;
+        row_blocks * col_blocks * depth as usize * self.format.block_size() as usize
+    }
+
+    /// Total size in bytes `data` must have for this texture's mip/layer
+    /// counts.
+    pub fn expected_data_len(&self) -> usize {
+        let layers = self.layer_count() as usize;
+        (0..self.mip_level_count)
+            .map(|mip| self.image_size_bytes(mip) * layers)
+            .sum()
+    }
+
+    /// Byte range of the `(mip, layer)` image within `data` (#120). Layout is
+    /// mip-major, layers within a mip (see the type-level docs). Panics if
+    /// `mip`/`layer` are out of range — callers index by the texture's own
+    /// counts.
+    pub fn byte_range(&self, mip: u32, layer: u32) -> core::ops::Range<usize> {
+        assert!(
+            mip < self.mip_level_count,
+            "mip {mip} out of range ({} levels)",
+            self.mip_level_count
+        );
+        let layers = self.layer_count();
+        assert!(
+            layer < layers,
+            "layer {layer} out of range ({layers} layers)"
+        );
+        let mut offset = 0usize;
+        for m in 0..mip {
+            offset += self.image_size_bytes(m) * layers as usize;
+        }
+        let image = self.image_size_bytes(mip);
+        offset += image * layer as usize;
+        offset..offset + image
     }
 }
 

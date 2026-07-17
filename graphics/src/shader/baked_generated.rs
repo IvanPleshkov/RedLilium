@@ -76,6 +76,10 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "@binding(0) @group(1) var egui_texture_0 : texture_2d<f32>;\n\n@binding(1) @group(1) var egui_sampler_0 : sampler;\n\nfn linear_to_srgb_0( linear_color_0 : vec3<f32>) -> vec3<f32>\n{\n    return mix(linear_color_0 * vec3<f32>(12.92000007629394531f), vec3<f32>(1.0549999475479126f) * pow(linear_color_0, vec3<f32>(0.4166666567325592f)) - vec3<f32>(0.05499999970197678f), step(vec3<f32>(0.00313080009073019f), linear_color_0));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texture_color_linear_0 : vec4<f32> = (textureSample((egui_texture_0), (egui_sampler_0), (_S1.tex_coords_0)));\n    var _S2 : f32 = texture_color_linear_0.w;\n    var texture_color_linear_premultiplied_0 : vec4<f32> = vec4<f32>(texture_color_linear_0.xyz * vec3<f32>(_S2), _S2);\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(linear_to_srgb_0(texture_color_linear_premultiplied_0.xyz), texture_color_linear_premultiplied_0.w) * _S1.color_0 );\n    return _S3;\n}\n\n",
     ),
     (
+        0x6dae561f607ef805,
+        "@binding(1) @group(0) var quad_texture_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var quad_sampler_0 : sampler;\n\nstruct _MatrixStorage_float4x4std140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct Uniforms_std140_0\n{\n    @align(16) mvp_0 : _MatrixStorage_float4x4std140_0,\n    @align(16) mode_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> uniforms_0 : Uniforms_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texel_0 : vec4<f32> = (textureSample((quad_texture_0), (quad_sampler_0), (_S1.uv_0)));\n    if((uniforms_0.mode_0) == u32(1))\n    {\n        var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(texel_0.xxx, 1.0f) );\n        return _S2;\n    }\n    if((uniforms_0.mode_0) == u32(2))\n    {\n        var xy_0 : vec2<f32> = texel_0.xy * vec2<f32>(2.0f) - vec2<f32>(1.0f);\n        var shade_0 : f32 = 0.07999999821186066f + 0.92000001668930054f * saturate(dot(normalize(vec3<f32>(xy_0, sqrt(saturate(1.0f - dot(xy_0, xy_0))))), normalize(vec3<f32>(0.40000000596046448f, 0.5f, 0.75f))));\n        var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(shade_0, shade_0, shade_0, 1.0f) );\n        return _S3;\n    }\n    var _S4 : pixelOutput_0 = pixelOutput_0( texel_0 );\n    return _S4;\n}\n\n",
+    ),
+    (
         0x6dcd912de89429a3,
         "@binding(0) @group(1) var egui_texture_0 : texture_2d<f32>;\n\n@binding(1) @group(1) var egui_sampler_0 : sampler;\n\nfn srgb_to_linear_0( srgb_0 : vec3<f32>) -> vec3<f32>\n{\n    return mix(srgb_0 / vec3<f32>(12.92000007629394531f), pow((srgb_0 + vec3<f32>(0.05499999970197678f)) / vec3<f32>(1.0549999475479126f), vec3<f32>(2.40000009536743164f)), step(vec3<f32>(0.04044999927282333f), srgb_0));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texture_color_linear_0 : vec4<f32> = (textureSample((egui_texture_0), (egui_sampler_0), (_S1.tex_coords_0)));\n    var _S2 : f32 = texture_color_linear_0.w;\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(texture_color_linear_0.xyz * vec3<f32>(_S2), _S2) * vec4<f32>(srgb_to_linear_0(_S1.color_0.xyz), _S1.color_0.w) );\n    return _S3;\n}\n\n",
     ),
@@ -86,6 +90,10 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
     (
         0x8dac5871efa0030a,
         "struct MaterialParams_std140_0\n{\n    @align(16) base_color_0 : vec4<f32>,\n};\n\n@binding(0) @group(2) var<uniform> gMaterial_0 : MaterialParams_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) world_normal_0 : vec3<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) clip_position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(vec3<f32>(0.15000000596046448f, 0.15000000596046448f, 0.18000000715255737f) + gMaterial_0.base_color_0.xyz * vec3<f32>(max(dot(normalize(_S1.world_normal_0), normalize(vec3<f32>(0.5f, 1.0f, 0.30000001192092896f))), 0.0f)), 1.0f) );\n    return _S2;\n}\n\n",
+    ),
+    (
+        0x9652c850be7527f5,
+        "struct _MatrixStorage_float4x4std140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct Uniforms_std140_0\n{\n    @align(16) mvp_0 : _MatrixStorage_float4x4std140_0,\n    @align(16) mode_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> uniforms_0 : Uniforms_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_1 : vec3<f32>,\n    @location(1) uv_1 : vec2<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.position_0 = (((vec4<f32>(_S1.position_1, 1.0f)) * (mat4x4<f32>(uniforms_0.mvp_0.data_0[i32(0)][i32(0)], uniforms_0.mvp_0.data_0[i32(0)][i32(1)], uniforms_0.mvp_0.data_0[i32(0)][i32(2)], uniforms_0.mvp_0.data_0[i32(0)][i32(3)], uniforms_0.mvp_0.data_0[i32(1)][i32(0)], uniforms_0.mvp_0.data_0[i32(1)][i32(1)], uniforms_0.mvp_0.data_0[i32(1)][i32(2)], uniforms_0.mvp_0.data_0[i32(1)][i32(3)], uniforms_0.mvp_0.data_0[i32(2)][i32(0)], uniforms_0.mvp_0.data_0[i32(2)][i32(1)], uniforms_0.mvp_0.data_0[i32(2)][i32(2)], uniforms_0.mvp_0.data_0[i32(2)][i32(3)], uniforms_0.mvp_0.data_0[i32(3)][i32(0)], uniforms_0.mvp_0.data_0[i32(3)][i32(1)], uniforms_0.mvp_0.data_0[i32(3)][i32(2)], uniforms_0.mvp_0.data_0[i32(3)][i32(3)]))));\n    output_0.uv_0 = _S1.uv_1;\n    return output_0;\n}\n\n",
     ),
     (
         0x97838dfa39845db3,
@@ -173,12 +181,14 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
         "deferred_resolve / vs_main / [HDR_OUTPUT]",
     ),
     (0x67a25e7dfb4ebd69, "egui / fs_main / []"),
+    (0x6dae561f607ef805, "compressed_quad / fs_main / []"),
     (
         0x6dcd912de89429a3,
         "egui / fs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
     ),
     (0x8d1c4a3c5b011219, "egui / vs_main / []"),
     (0x8dac5871efa0030a, "opaque_color / fs_main / []"),
+    (0x9652c850be7527f5, "compressed_quad / vs_main / []"),
     (
         0x97838dfa39845db3,
         "egui / vs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
@@ -532,6 +542,33 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 ],
             },
         ],
+    ),
+    (
+        0x694f806a81377584,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("uniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("quad_texture"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("quad_sampler"),
+                },
+            ],
+        }],
     ),
     (
         0x69d73351801c9f5b,
