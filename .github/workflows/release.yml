@@ -1,0 +1,129 @@
+# Release packaging (#135): on a version tag (v*), build `cargo xtask dist`
+# for every desktop OS plus the web target and attach the artifacts to a
+# GitHub release. No Slang SDK needed — dist uses the committed baked WGSL
+# table; the web job only needs wasm-pack.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # xtask dist packages for the host OS: .app+dmg on macOS, zipped
+        # folder elsewhere (see xtask/src/dist.rs).
+        include:
+          - os: macos-latest
+            artifact: car-game-desktop.dmg
+            suffix: macos.dmg
+          - os: ubuntu-latest
+            artifact: car-game-desktop.zip
+            suffix: linux-x86_64.zip
+          - os: windows-latest
+            artifact: car-game-desktop.zip
+            suffix: windows-x86_64.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-dist-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-dist-
+
+      - name: Build dist (desktop)
+        run: cargo run -p xtask -- dist --target desktop
+
+      - name: Rename artifact for the release
+        shell: bash
+        run: mv "target/dist/${{ matrix.artifact }}" "target/dist/car-game-${{ github.ref_name }}-${{ matrix.suffix }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: target/dist/car-game-${{ github.ref_name }}-*
+          if-no-files-found: error
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-dist-web-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-dist-web-
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: 'latest'
+
+      - name: Build dist (web)
+        run: cargo run -p xtask -- dist --target web
+
+      - name: Rename artifact for the release
+        run: mv target/dist/car-game-web.zip "target/dist/car-game-${{ github.ref_name }}-web.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-web
+          path: target/dist/car-game-${{ github.ref_name }}-web.zip
+          if-no-files-found: error
+
+  release:
+    name: Create release
+    needs: [desktop, web]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release with artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --verify-tag \
+            --title "car-game ${{ github.ref_name }}" \
+            --generate-notes

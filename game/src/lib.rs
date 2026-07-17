@@ -36,6 +36,11 @@ use redlilium_runtime::AppControl;
 pub const MENU_SCENE: &str = "scenes/menu.scene";
 pub const LEVEL_SCENE: &str = "scenes/level1.scene";
 
+/// Build stamp (#135): crate version + git commit, e.g. `0.1.0+1a2b3c4d5`
+/// (`-dirty` marks uncommitted changes, `unknown` a git-less build). Printed
+/// at startup and by `xtask dist` — identifies the build behind a bug report.
+pub const BUILD_STAMP: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("CAR_GAME_GIT_HASH"));
+
 /// Rapier's public math vector (glam `DVec3` in the f64 build).
 type PhysVector = redlilium_ecs::physics::rapier3d::prelude::Vector;
 

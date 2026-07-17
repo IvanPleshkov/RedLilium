@@ -10,6 +10,9 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     env_logger::init();
 
+    // eprintln, not log: visible regardless of RUST_LOG, on log's stream.
+    eprintln!("car-game {}", car_game::BUILD_STAMP);
+
     redlilium_runtime::run(
         GameConfig {
             title: "Car Game".to_string(),

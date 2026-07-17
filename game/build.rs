@@ -24,6 +24,8 @@ use std::path::Path;
 fn main() {
     println!("cargo::rerun-if-changed=assets");
 
+    emit_git_hash();
+
     #[cfg(windows)]
     embed_windows_resources();
 
@@ -48,6 +50,34 @@ fn main() {
 
     let out_path = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_pack.rs");
     std::fs::write(&out_path, out).expect("write embedded_pack.rs");
+}
+
+/// Build stamping (#135): expose the git commit as `CAR_GAME_GIT_HASH` so the
+/// binary can identify itself in bug reports (`car_game::BUILD_STAMP`). A
+/// `-dirty` suffix marks uncommitted changes; without git (source tarball)
+/// the stamp degrades to "unknown". Caveat: cargo reruns this script on
+/// HEAD/ref changes, so the dirty flag can lag edits that don't touch
+/// otherwise-watched files — good enough for identifying builds.
+fn emit_git_hash() {
+    println!("cargo::rerun-if-changed=../.git/HEAD");
+    println!("cargo::rerun-if-changed=../.git/refs");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let hash = match git(&["rev-parse", "--short=9", "HEAD"]) {
+        Some(hash) => {
+            let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+                .is_none_or(|s| !s.is_empty());
+            if dirty { format!("{hash}-dirty") } else { hash }
+        }
+        None => "unknown".to_string(),
+    };
+    println!("cargo::rustc-env=CAR_GAME_GIT_HASH={hash}");
 }
 
 /// Embed the game icon and a version resource into the Windows executable

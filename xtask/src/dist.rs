@@ -80,6 +80,13 @@ const DIST_NAME: &str = "car-game-desktop";
 const BUNDLE_ID: &str = "com.redlilium.car-game";
 
 pub fn run() {
+    // Build stamp (#135) — the same version+hash the binary prints at startup
+    // (workspace version == game version), so dist output identifies the build.
+    println!(
+        "dist: {GAME_PACKAGE} {}+{}",
+        env!("CARGO_PKG_VERSION"),
+        git_hash()
+    );
     let target = parse_target();
     match target.as_str() {
         "desktop" => {
@@ -406,6 +413,28 @@ fn dist_web() -> Result<(), String> {
         dist.display()
     );
     Ok(())
+}
+
+/// Short git hash with a `-dirty` marker, `unknown` without git — mirrors the
+/// stamp `game/build.rs` embeds into the binary (#135).
+fn git_hash() -> String {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(workspace_root())
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    match git(&["rev-parse", "--short=9", "HEAD"]) {
+        Some(hash) => {
+            let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+                .is_none_or(|s| !s.is_empty());
+            if dirty { format!("{hash}-dirty") } else { hash }
+        }
+        None => "unknown".to_string(),
+    }
 }
 
 /// `xtask/..` — the workspace root, independent of the invoking cwd.
