@@ -44,7 +44,7 @@ use redlilium_graphics::{
     DepthStencilAttachment, Extent3d, GraphicsPass, LoadOp, MaterialDescriptor, MaterialInstance,
     QueuePreference, RenderGraph, RenderGraphCompilationMode, RenderTargetConfig,
     SamplerDescriptor, ShaderSource, StoreOp, TextureCopyLocation, TextureDescriptor,
-    TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass,
+    TextureFormat, TextureOrigin, TextureUsage, TransferConfig, TransferOperation, TransferPass,
 };
 
 // ============================================================================
@@ -283,6 +283,123 @@ fn test_generate_mipmaps_4x4_average(#[case] backend: Backend) {
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during mip generation"
+        );
+    }
+}
+
+/// Container-supplied chains (#120): `upload_texture_level` targets one
+/// (mip, layer) image per operation. Uploads a distinct pattern into every
+/// mip of a 3-mip 2D texture and every face of a cubemap, then reads
+/// individual subresources back and checks the bytes landed where addressed.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_upload_texture_level_mips_and_faces(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+
+    // --- 2D, 3 mips (4 → 2 → 1), one upload op per mip. Mip 1 is multi-row
+    // with an 8-byte tight pitch, exercising the 256-byte staging padding.
+    let texture = ctx
+        .device
+        .create_texture(
+            &TextureDescriptor::new_2d(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+            )
+            .with_mip_levels(3),
+        )
+        .expect("create mip texture");
+    let mip_bytes = |mip: u32, fill: u8| vec![fill; ((4usize >> mip).max(1).pow(2)) * 4];
+    let mut pass = TransferPass::new("upload_mips".into());
+    let mut config = TransferConfig::new();
+    for (mip, fill) in [(0u32, 0x11u8), (1, 0x22), (2, 0x33)] {
+        config = config.with_operation(
+            TransferOperation::upload_texture_level(
+                &ctx.device,
+                texture.clone(),
+                mip,
+                0,
+                &mip_bytes(mip, fill),
+            )
+            .expect("stage mip upload"),
+        );
+    }
+    pass.set_transfer_config(config);
+    let mut graph = RenderGraph::new();
+    graph.add_transfer_pass(pass);
+    ctx.execute_graph(graph);
+
+    // --- Cube, 6 faces with distinct fills, one op per face.
+    let cube = ctx
+        .device
+        .create_texture(&TextureDescriptor::new_cube(
+            2,
+            TextureFormat::Rgba8Unorm,
+            TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+        ))
+        .expect("create cube texture");
+    let mut cube_pass = TransferPass::new("upload_faces".into());
+    let mut cube_config = TransferConfig::new();
+    for face in 0..6u32 {
+        cube_config = cube_config.with_operation(
+            TransferOperation::upload_texture_level(
+                &ctx.device,
+                cube.clone(),
+                0,
+                face,
+                &[0x40 + face as u8; 2 * 2 * 4],
+            )
+            .expect("stage face upload"),
+        );
+    }
+    cube_pass.set_transfer_config(cube_config);
+    let mut cube_graph = RenderGraph::new();
+    cube_graph.add_transfer_pass(cube_pass);
+    ctx.execute_graph(cube_graph);
+
+    // Out-of-range subresources are rejected up front.
+    assert!(
+        TransferOperation::upload_texture_level(&ctx.device, texture.clone(), 3, 0, &[]).is_err()
+    );
+    assert!(TransferOperation::upload_texture_level(&ctx.device, cube.clone(), 0, 6, &[]).is_err());
+
+    // The dummy backend performs no real copies.
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    // Read back single-row probes: mip 2 (1×1), a 2×1 strip of mip 1, and a
+    // 2×1 strip of face 3 — each packed, no multi-row pitch rules.
+    let probes: [(&std::sync::Arc<_>, u32, u32, u32, u8); 3] = [
+        (&texture, 2, 0, 1, 0x33),
+        (&texture, 1, 0, 2, 0x22),
+        (&cube, 0, 3, 2, 0x43),
+    ];
+    for (tex, mip, layer, width, expected) in probes {
+        let bytes = (width * 4) as u64;
+        let readback = ctx.create_readback_buffer(bytes);
+        let region = BufferTextureCopyRegion::new(
+            BufferTextureLayout::packed(),
+            TextureCopyLocation::new(mip, TextureOrigin::new(0, 0, layer)),
+            Extent3d::new_2d(width, 1),
+        );
+        let mut read_graph = RenderGraph::new();
+        let mut read_pass = TransferPass::new("read_probe".into());
+        read_pass.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::readback_texture((*tex).clone(), readback.clone(), vec![region]),
+        ));
+        read_graph.add_transfer_pass(read_pass);
+        ctx.execute_graph(read_graph);
+        let data = ctx.read_buffer(&readback, bytes);
+        assert!(
+            data.iter().all(|&b| b == expected),
+            "mip {mip} layer {layer}: got {data:?}, expected all {expected:#x}"
         );
     }
 }

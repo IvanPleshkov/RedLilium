@@ -23,6 +23,10 @@ serde = { workspace = true }
 gltf-dep = { workspace = true }
 image = { workspace = true }
 
+# KTX2 container parsing (#120)
+ktx2 = { workspace = true }
+ruzstd = { workspace = true }
+
 # Profiling (optional)
 tracy-client = { workspace = true, optional = true }
 
