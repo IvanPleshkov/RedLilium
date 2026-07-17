@@ -19,6 +19,14 @@ use crate::error::GraphicsError;
 pub struct OptionalFeatures {
     /// Anisotropic filtering; without it samplers are created isotropic.
     pub sampler_anisotropy: bool,
+    /// BC1–BC7 block-compressed textures (`textureCompressionBC`, #119).
+    /// Universal on desktop; absent on most mobile GPUs.
+    pub texture_compression_bc: bool,
+    /// ETC2 + EAC block-compressed textures (`textureCompressionETC2`, #119).
+    /// The mobile family; desktop drivers often emulate or omit it.
+    pub texture_compression_etc2: bool,
+    /// ASTC LDR block-compressed textures (`textureCompressionASTC_LDR`, #119).
+    pub texture_compression_astc: bool,
     /// Wireframe (`PolygonMode::Line`) pipelines; without it line mode
     /// downgrades to fill.
     pub fill_mode_non_solid: bool,
@@ -337,6 +345,9 @@ pub fn select_physical_device(
                     properties,
                     optional: OptionalFeatures {
                         sampler_anisotropy: features.sampler_anisotropy == vk::TRUE,
+                        texture_compression_bc: features.texture_compression_bc == vk::TRUE,
+                        texture_compression_etc2: features.texture_compression_etc2 == vk::TRUE,
+                        texture_compression_astc: features.texture_compression_astc_ldr == vk::TRUE,
                         fill_mode_non_solid: features.fill_mode_non_solid == vk::TRUE,
                         maintenance9,
                         memory_budget: has_ext(ash::ext::memory_budget::NAME),
@@ -703,7 +714,10 @@ pub fn create_logical_device(
     // Optional features, enabled only where supported.
     let features = vk::PhysicalDeviceFeatures::default()
         .sampler_anisotropy(selected.optional.sampler_anisotropy)
-        .fill_mode_non_solid(selected.optional.fill_mode_non_solid);
+        .fill_mode_non_solid(selected.optional.fill_mode_non_solid)
+        .texture_compression_bc(selected.optional.texture_compression_bc)
+        .texture_compression_etc2(selected.optional.texture_compression_etc2)
+        .texture_compression_astc_ldr(selected.optional.texture_compression_astc);
 
     // Vulkan 1.3 core features. `dynamicRendering` drives the attachment-less
     // render pass path; `synchronization2` backs every barrier
@@ -846,6 +860,11 @@ pub fn device_capabilities(
         // VK_EXT_memory_budget, when advertised (#98). Drives per-heap
         // budget/usage in the stats panel; without it heap budget/usage are None.
         memory_budget: selected.optional.memory_budget,
+        // Compression families (#119): the physical-device feature bits,
+        // enabled on the logical device during creation.
+        texture_compression_bc: selected.optional.texture_compression_bc,
+        texture_compression_etc2: selected.optional.texture_compression_etc2,
+        texture_compression_astc: selected.optional.texture_compression_astc,
         // Inline ray tracing (#110): the extension + feature bundle verified
         // during selection and enabled on the logical device.
         ray_query: selected.optional.ray_query,

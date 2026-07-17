@@ -519,6 +519,12 @@ impl WgpuBackend {
             // No VRAM budget API on wgpu (#98); heaps are empty, the panel
             // falls back to the engine's allocator/resource figures.
             memory_budget: false,
+            // Compression families (#119): granted iff the opportunistic
+            // feature request succeeded (`optional_features`), so this reports
+            // what the device actually accepted, not what was asked for.
+            texture_compression_bc: features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+            texture_compression_etc2: features.contains(wgpu::Features::TEXTURE_COMPRESSION_ETC2),
+            texture_compression_astc: features.contains(wgpu::Features::TEXTURE_COMPRESSION_ASTC),
             // Inline ray tracing is Vulkan-only (#110). wgpu's experimental
             // ray-query support is a named follow-up (issue #110 phase 4).
             ray_query: false,

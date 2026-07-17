@@ -44,6 +44,12 @@ impl DummyBackend {
             gpu_timestamps: false,
             mip_generation: false,
             memory_budget: false,
+            // All three compression families advertised (#119) so unit tests
+            // exercise the "supported" path of the engine-level gating; the
+            // dummy backend stores no texel data either way.
+            texture_compression_bc: true,
+            texture_compression_etc2: true,
+            texture_compression_astc: true,
             // The dummy backend accepts BLAS/TLAS creation (returns dummy
             // handles) so graph-level tests can exercise AS-build passes, but
             // it advertises no ray-query support — engine-level gating (#110)
