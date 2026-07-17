@@ -26,7 +26,12 @@ where
         + 'static,
     S::Asset: Send + Sync,
 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &crate::FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         // Identity + load state; a matching asset dropped from the browser
         // (`S::KIND`) replaces the identity — the new ref starts unresolved and
         // the sync system loads it like any other.

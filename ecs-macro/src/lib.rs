@@ -173,7 +173,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     let fname = f.ident.as_ref().unwrap();
                     let fname_str = fname.to_string();
                     quote! {
-                        let #fname = match redlilium_ecs::inspect::Inspect(&self.#fname).show(#fname_str, __ui) {
+                        let #fname = match redlilium_ecs::inspect::Inspect(&self.#fname).show(#fname_str, __ui, __field_ctx) {
                             Some(v) => { _changed = true; v }
                             None => self.#fname.clone(),
                         };
@@ -278,7 +278,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                         #(#inspect_stmts)*
                         if _changed {
                             redlilium_ecs::set_component_actions(
-                                _entity,
+                                __entity,
                                 self.clone(),
                                 Self { #(#visible_names,)* #(#skipped_clone,)* },
                             )
@@ -309,7 +309,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 let inspect_stmts: Vec<_> = indices.iter().zip(inspect_field_vars.iter()).map(|(idx, var)| {
                     let idx_str = idx.index.to_string();
                     quote! {
-                        let #var = match redlilium_ecs::inspect::Inspect(&self.#idx).show(#idx_str, __ui) {
+                        let #var = match redlilium_ecs::inspect::Inspect(&self.#idx).show(#idx_str, __ui, __field_ctx) {
                             Some(v) => { _changed = true; v }
                             None => self.#idx.clone(),
                         };
@@ -409,7 +409,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                         #(#inspect_stmts)*
                         if _changed {
                             redlilium_ecs::set_component_actions(
-                                _entity,
+                                __entity,
                                 self.clone(),
                                 Self(#(#inspect_field_vars,)*),
                             )
@@ -426,7 +426,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 )
             }
             Fields::Unit => (
-                quote! { let _ = (__ui, _entity); None },
+                quote! { let _ = (__ui, __entity); None },
                 quote! { let _ = collector; },
                 quote! { let _ = map; },
                 quote! { let _ = __f; },
@@ -492,9 +492,14 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
             const NAME: &'static str = #name_str;
             const SCHEMA_VERSION: u32 = #schema_version;
 
-            fn inspect_ui(&self, __ui: &mut redlilium_ecs::egui::Ui, _world: &redlilium_ecs::World, _entity: redlilium_ecs::Entity) -> redlilium_ecs::InspectResult {
+            fn inspect_ui(&self, __ui: &mut redlilium_ecs::egui::Ui, __world: &redlilium_ecs::World, __entity: redlilium_ecs::Entity) -> redlilium_ecs::InspectResult {
                 #[allow(unused_imports)]
                 use redlilium_ecs::inspect::InspectFallback as _;
+                #[allow(unused_variables)]
+                let __field_ctx = &redlilium_ecs::FieldInspectCtx {
+                    world: __world,
+                    entity: __entity,
+                };
                 #inspect_body
             }
 

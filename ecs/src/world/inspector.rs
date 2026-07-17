@@ -229,6 +229,13 @@ impl World {
                 type_name: serialized.type_name.clone(),
             })?;
         let mut ctx = crate::serialize::DeserializeContext::new(self);
+        // In-place edit in the entity's own live world: entity references in
+        // the payload address this world directly, so there is no remap table
+        // to consult — `Keep` resolves them verbatim (same policy as snapshot
+        // restore). The default `Error` policy is for foreign-scope imports
+        // and would reject every entity-reference write made through
+        // `edit_component`/`set_component`.
+        ctx.set_unmapped_policy(crate::serialize::UnmappedEntityPolicy::Keep);
         ctx.set_current_component(&serialized.type_name);
         deser_fn(entity, &serialized.data, &mut ctx)
     }
