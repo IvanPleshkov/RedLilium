@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! target/dist/car-game-desktop/
-//!   car-game            release binary (run it from THIS folder)
+//!   car-game            shipping binary (`--profile dist`: thin LTO, stripped)
 //!   std-assets/         engine asset pack (assets.db + sources)
 //!   game/assets/        game asset pack (assets.db + scenes)
 //! target/dist/car-game-desktop.zip
@@ -12,11 +12,15 @@
 //!
 //! The folder layout mirrors the workspace because `GameConfig::mounts` holds
 //! *relative* directories compiled into the binary (`std-assets`,
-//! `game/assets`) that the runtime resolves against the working directory —
-//! so the game must be launched with the dist folder as cwd. Packs are copied
-//! verbatim (v1); pruning to referenced-assets-only is a later optimization.
-//! Shaders need no extra files: the default (Slang-off) build embeds the
-//! baked WGSL table in the binary.
+//! `game/assets`); the runtime resolves them against the executable's
+//! directory first (#132), so the folder runs from any cwd — double-click
+//! included. Packs are copied verbatim (v1); pruning to
+//! referenced-assets-only is #134. Shaders need no extra files: the default
+//! (Slang-off) build embeds the baked WGSL table in the binary.
+//!
+//! Note cargo's `--profile dist` build artifacts also land under
+//! `target/dist/` (the artifact dir is named after the profile); the packaged
+//! folders live alongside them, which is harmless.
 //!
 //! `cargo xtask dist --target web` (#108) produces
 //!
@@ -86,17 +90,26 @@ fn parse_target() -> String {
 fn dist_desktop() -> Result<(), String> {
     let root = workspace_root();
 
-    // 1. Release build of the game binary. One plain cargo invocation — the
-    //    dist build must not inherit xtask's feature set.
-    println!("dist: building {GAME_PACKAGE} (release)...");
+    // 1. Shipping build of the game binary (`[profile.dist]`: thin LTO,
+    //    codegen-units=1, stripped). One plain cargo invocation — the dist
+    //    build must not inherit xtask's feature set.
+    println!("dist: building {GAME_PACKAGE} (--profile dist)...");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let status = Command::new(&cargo)
         .current_dir(&root)
-        .args(["build", "--release", "-p", GAME_PACKAGE, "--bin", GAME_BIN])
+        .args([
+            "build",
+            "--profile",
+            "dist",
+            "-p",
+            GAME_PACKAGE,
+            "--bin",
+            GAME_BIN,
+        ])
         .status()
         .map_err(|e| format!("failed to run cargo: {e}"))?;
     if !status.success() {
-        return Err("release build failed".to_string());
+        return Err("dist build failed".to_string());
     }
 
     // 2. Fresh dist folder.
@@ -107,9 +120,9 @@ fn dist_desktop() -> Result<(), String> {
     }
     std::fs::create_dir_all(&dist).map_err(|e| format!("creating {dist:?}: {e}"))?;
 
-    // 3. The binary.
+    // 3. The binary (cargo names the artifact dir after the profile).
     let bin_name = format!("{GAME_BIN}{}", std::env::consts::EXE_SUFFIX);
-    let bin_src = root.join("target/release").join(&bin_name);
+    let bin_src = root.join("target/dist").join(&bin_name);
     let bin_dst = dist.join(&bin_name);
     std::fs::copy(&bin_src, &bin_dst).map_err(|e| format!("copying {bin_src:?}: {e}"))?;
 
@@ -134,7 +147,8 @@ fn dist_desktop() -> Result<(), String> {
     }
 
     println!(
-        "dist: done — run the game with the dist folder as cwd:\n  cd {} && ./{bin_name}",
+        "dist: done — the folder is self-contained (assets resolve next to the \
+         binary), run from anywhere:\n  {}/{bin_name}",
         dist.display()
     );
     Ok(())
