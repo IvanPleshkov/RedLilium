@@ -37,6 +37,7 @@ impl ResolvePass {
         device: &Arc<GraphicsDevice>,
         gbuffer: &GBuffer,
         ibl: &IblTextures,
+        shadow_mask: &Arc<redlilium_graphics::Texture>,
         surface_format: TextureFormat,
         hdr_active: bool,
     ) -> Self {
@@ -113,7 +114,8 @@ impl ResolvePass {
                     .with_texture(0, gbuffer.albedo.clone())
                     .with_texture(1, gbuffer.normal_metallic.clone())
                     .with_texture(2, gbuffer.position_roughness.clone())
-                    .with_sampler(3, gbuffer_sampler),
+                    .with_sampler(3, gbuffer_sampler)
+                    .with_texture(4, shadow_mask.clone()),
             )
             .expect("create gbuffer binding group");
 
@@ -197,6 +199,12 @@ impl ResolvePass {
                 height as f32,
                 1.0 / width as f32,
                 1.0 / height as f32,
+            ],
+            light_dir: [
+                crate::uniforms::SUN_DIR_TO_LIGHT[0],
+                crate::uniforms::SUN_DIR_TO_LIGHT[1],
+                crate::uniforms::SUN_DIR_TO_LIGHT[2],
+                0.0,
             ],
         };
 

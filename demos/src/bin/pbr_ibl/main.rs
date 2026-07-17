@@ -21,6 +21,7 @@ mod ibl;
 mod ibl_textures;
 mod resolve_pass;
 mod resources;
+mod shadow_pass;
 mod skybox_pass;
 mod sphere_grid;
 mod ui;

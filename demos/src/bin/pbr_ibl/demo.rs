@@ -20,6 +20,7 @@ use crate::ecs_scene::EcsScene;
 use crate::gbuffer::GBuffer;
 use crate::ibl_textures::IblTextures;
 use crate::resolve_pass::ResolvePass;
+use crate::shadow_pass::ShadowPass;
 use crate::skybox_pass::SkyboxPass;
 use crate::sphere_grid::SphereGrid;
 use crate::ui::PbrUi;
@@ -43,11 +44,14 @@ pub struct PbrIblDemo {
     ibl: Option<IblTextures>,
     spheres: Option<SphereGrid>,
     skybox: Option<SkyboxPass>,
+    shadow: Option<ShadowPass>,
     resolve: Option<ResolvePass>,
 
     // UI
     egui_controller: Option<EguiController>,
     egui_ui: Arc<RwLock<PbrUi>>,
+    /// egui preview id for the shadow mask (#110 debug); refreshed on resize.
+    shadow_mask_egui_id: Option<redlilium_graphics::egui::egui::TextureId>,
 }
 
 impl PbrIblDemo {
@@ -65,9 +69,11 @@ impl PbrIblDemo {
             ibl: None,
             spheres: None,
             skybox: None,
+            shadow: None,
             resolve: None,
             egui_controller: None,
             egui_ui: Arc::new(RwLock::new(PbrUi::new())),
+            shadow_mask_egui_id: None,
         }
     }
 }
@@ -107,15 +113,34 @@ impl AppHandler for PbrIblDemo {
         let ecs_scene = EcsScene::new(ctx.aspect_ratio());
         self.ecs_scene = Some(ecs_scene);
 
+        // Ray-traced shadows (#110) need Vulkan ray queries; the demo degrades
+        // to unshadowed direct lighting elsewhere (web/wgpu). Gate the sphere
+        // mesh's AS-input opt-in and the shadow pass on the same capability.
+        let ray_query = device.capabilities().ray_query;
+        log::info!(
+            "Ray-traced shadows: {} (ray_query = {})",
+            if ray_query { "enabled" } else { "disabled" },
+            ray_query
+        );
+
         // Create subsystems
         let ibl = IblTextures::create(device);
         let mut gbuffer = GBuffer::create(device, ctx.width(), ctx.height());
-        let spheres = SphereGrid::create(device);
+        let spheres = SphereGrid::create(device, ray_query);
         let skybox = SkyboxPass::create(device, &ibl, ctx.surface_format());
+        let shadow = ShadowPass::create(
+            device,
+            &gbuffer,
+            &spheres.mesh,
+            ctx.width(),
+            ctx.height(),
+            ray_query,
+        );
         let resolve = ResolvePass::create(
             device,
             &gbuffer,
             &ibl,
+            shadow.mask(),
             ctx.surface_format(),
             self.hdr_active,
         );
@@ -136,6 +161,10 @@ impl AppHandler for PbrIblDemo {
         // Register G-buffer textures with egui for UI preview
         gbuffer.register_with_egui(&mut egui_controller);
 
+        // Register the ray-traced shadow mask for the debug preview (#110).
+        let shadow_mask_egui_id = egui_controller.register_user_texture(shadow.mask().clone());
+        self.shadow_mask_egui_id = Some(shadow_mask_egui_id);
+
         // Pass texture IDs to UI
         {
             let mut ui = self.egui_ui.write();
@@ -144,6 +173,7 @@ impl AppHandler for PbrIblDemo {
                 gbuffer.normal_egui_id,
                 gbuffer.position_egui_id,
             );
+            ui.set_shadow_mask_id(Some(shadow_mask_egui_id));
         }
 
         self.egui_controller = Some(egui_controller);
@@ -151,6 +181,7 @@ impl AppHandler for PbrIblDemo {
         self.gbuffer = Some(gbuffer);
         self.spheres = Some(spheres);
         self.skybox = Some(skybox);
+        self.shadow = Some(shadow);
         self.resolve = Some(resolve);
     }
 
@@ -170,12 +201,23 @@ impl AppHandler for PbrIblDemo {
             egui.on_resize(ctx.width(), ctx.height());
         }
 
-        // Recreate resolve pass with new G-buffer textures
-        if let Some(ibl) = &self.ibl {
+        // Recreate the shadow mask at the new size and rebind the resized
+        // G-buffer textures (the ray-tracing geometry is preserved).
+        if let Some(shadow) = &mut self.shadow {
+            shadow.resize(ctx.device(), &gbuffer, ctx.width(), ctx.height());
+            // Refresh the egui debug preview to point at the new mask texture.
+            if let (Some(egui), Some(id)) = (&mut self.egui_controller, self.shadow_mask_egui_id) {
+                egui.update_user_texture(id, shadow.mask().clone());
+            }
+        }
+
+        // Recreate resolve pass with new G-buffer + shadow-mask textures
+        if let (Some(ibl), Some(shadow)) = (&self.ibl, &self.shadow) {
             self.resolve = Some(ResolvePass::create(
                 ctx.device(),
                 &gbuffer,
                 ibl,
+                shadow.mask(),
                 ctx.surface_format(),
                 self.hdr_active,
             ));
@@ -253,6 +295,10 @@ impl AppHandler for PbrIblDemo {
                 let instances = scene.build_sphere_instances();
                 spheres.write_instances(&instances);
                 spheres.write_camera_uniforms(view, proj, camera_pos);
+                // Feed the same transforms to the shadow pass's TLAS rebuild.
+                if let Some(shadow) = &mut self.shadow {
+                    shadow.set_instances(&instances);
+                }
             }
             if let Some(skybox) = &mut self.skybox {
                 skybox.update_uniforms(view, proj, camera_pos);
@@ -335,6 +381,14 @@ impl AppHandler for PbrIblDemo {
         }
 
         graph.add_graphics_pass(gbuffer_pass);
+
+        // === Pass 1.5: Ray-traced shadow-mask pass (#110) ===
+        // Reads the G-buffer position/normal, traces a shadow ray per pixel
+        // toward the sun, writes the visibility mask the resolve pass samples.
+        // On devices without ray queries this clears the mask to white (lit).
+        if let Some(shadow) = &mut self.shadow {
+            shadow.record(&mut graph, ctx.device());
+        }
 
         // === Pass 2: Skybox Pass ===
         let mut skybox_pass = GraphicsPass::new("skybox".into());

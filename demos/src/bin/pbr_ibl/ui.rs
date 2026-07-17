@@ -29,6 +29,8 @@ pub struct PbrUiState {
     pub gbuffer_albedo_id: Option<egui::TextureId>,
     pub gbuffer_normal_id: Option<egui::TextureId>,
     pub gbuffer_position_id: Option<egui::TextureId>,
+    /// Ray-traced shadow visibility mask (#110) — debug preview.
+    pub shadow_mask_id: Option<egui::TextureId>,
 }
 
 impl Default for PbrUiState {
@@ -46,6 +48,7 @@ impl Default for PbrUiState {
             gbuffer_albedo_id: None,
             gbuffer_normal_id: None,
             gbuffer_position_id: None,
+            shadow_mask_id: None,
         }
     }
 }
@@ -97,6 +100,11 @@ impl PbrUi {
         self.state.gbuffer_albedo_id = albedo;
         self.state.gbuffer_normal_id = normal;
         self.state.gbuffer_position_id = position;
+    }
+
+    /// Set the ray-traced shadow-mask preview texture (#110 debug).
+    pub fn set_shadow_mask_id(&mut self, id: Option<egui::TextureId>) {
+        self.state.shadow_mask_id = id;
     }
 }
 
@@ -271,6 +279,16 @@ impl EguiApp for PbrUi {
                                 ui.image(egui::load::SizedTexture::new(id, preview_size));
                             } else {
                                 ui.label("(not available)");
+                            }
+                        });
+
+                        // Ray-traced shadow mask (#110) — r = visibility.
+                        ui.vertical(|ui| {
+                            ui.label("Shadow (R)");
+                            if let Some(id) = self.state.shadow_mask_id {
+                                ui.image(egui::load::SizedTexture::new(id, preview_size));
+                            } else {
+                                ui.label("(no RT)");
                             }
                         });
                     });

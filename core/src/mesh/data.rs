@@ -100,6 +100,15 @@ pub struct MeshDescriptor {
     /// Local-space bounds (carried onto the created `Mesh`). `None` when created
     /// from a descriptor without CPU data.
     pub aabb: Option<crate::math::Aabb>,
+    /// Opt-in: also make the vertex/index buffers usable as ray-tracing
+    /// acceleration-structure build input (#110). The graphics backend ORs the
+    /// `ACCELERATION_STRUCTURE_INPUT` usage bit into both buffers when set — the
+    /// mesh can then feed a BLAS build directly, no separate geometry copy. Core
+    /// stays ignorant of the graphics usage flags; this is just the intent.
+    ///
+    /// Only valid on a ray-query-capable device: buffer creation with that bit
+    /// fails otherwise, so gate the opt-in on `DeviceCapabilities::ray_query`.
+    pub acceleration_structure_input: bool,
 }
 
 impl MeshDescriptor {
@@ -113,12 +122,20 @@ impl MeshDescriptor {
             index_count: 0,
             label: None,
             aabb: None,
+            acceleration_structure_input: false,
         }
     }
 
     /// Set the local-space bounds.
     pub fn with_aabb(mut self, aabb: Option<crate::math::Aabb>) -> Self {
         self.aabb = aabb;
+        self
+    }
+
+    /// Opt in to acceleration-structure build input on the vertex/index buffers
+    /// (#110). See [`acceleration_structure_input`](Self::acceleration_structure_input).
+    pub fn with_acceleration_structure_input(mut self) -> Self {
+        self.acceleration_structure_input = true;
         self
     }
 

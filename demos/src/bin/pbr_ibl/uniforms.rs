@@ -48,10 +48,32 @@ pub struct SkyboxUniforms {
     pub _pad1: [f32; 4], // Additional padding to match WGSL vec3<f32> + struct alignment
 }
 
+/// Direction **toward** the key light (the sun). Shared by the resolve shader's
+/// direct-lighting term and the ray-traced shadow pass (#110) so the shadow rays
+/// line up with the light the surface is shaded against. Both shaders normalize
+/// it, so it need not be unit length.
+///
+/// Grazing and diagonal: with the spheres on a flat grid and no ground plane, a
+/// steep light would leave the inter-sphere shadows invisible. A low diagonal
+/// light makes each sphere cast a soft shadow onto its row and column neighbors
+/// without the artificial-looking hard-edged gashes a steeper light produced.
+pub const SUN_DIR_TO_LIGHT: [f32; 3] = [0.75, 0.40, 0.75];
+
 /// Resolve pass uniform data.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ResolveUniforms {
     pub camera_pos: [f32; 4],  // 16 bytes
     pub screen_size: [f32; 4], // xy = dimensions, zw = 1/dimensions
+    /// xyz = normalized direction toward the key light ([`SUN_DIR_TO_LIGHT`]).
+    pub light_dir: [f32; 4],
+}
+
+/// Shadow-mask pass uniform data (#110): the key-light direction the shadow
+/// rays are cast toward.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ShadowUniforms {
+    /// xyz = normalized direction toward the key light ([`SUN_DIR_TO_LIGHT`]).
+    pub light_dir: [f32; 4],
 }

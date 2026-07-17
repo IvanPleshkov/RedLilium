@@ -1271,6 +1271,17 @@ impl GraphicsDevice {
 
         let mesh_label = descriptor.label.as_deref().unwrap_or("mesh");
 
+        // Opt-in ray-tracing AS build input (#110): when set, the vertex/index
+        // buffers additionally carry `ACCELERATION_STRUCTURE_INPUT` so the mesh
+        // can feed a BLAS build directly. The bit is Vulkan/ray-query-only, so
+        // buffer creation fails here on other backends — callers must gate the
+        // opt-in on `DeviceCapabilities::ray_query`.
+        let as_input = if descriptor.acceleration_structure_input {
+            BufferUsage::ACCELERATION_STRUCTURE_INPUT
+        } else {
+            BufferUsage::empty()
+        };
+
         // Create vertex buffers (one per layout buffer slot)
         let mut vertex_buffers = Vec::with_capacity(buffer_count);
         for i in 0..buffer_count {
@@ -1288,8 +1299,11 @@ impl GraphicsDevice {
             };
 
             let buffer = self.create_buffer(
-                &BufferDescriptor::new(buffer_size, BufferUsage::VERTEX | BufferUsage::COPY_DST)
-                    .with_label(label),
+                &BufferDescriptor::new(
+                    buffer_size,
+                    BufferUsage::VERTEX | BufferUsage::COPY_DST | as_input,
+                )
+                .with_label(label),
             )?;
             vertex_buffers.push(buffer);
         }
@@ -1298,8 +1312,11 @@ impl GraphicsDevice {
         let (index_buffer, index_format, index_count) = if descriptor.is_indexed() {
             let index_size = descriptor.index_buffer_size();
             let buffer = self.create_buffer(
-                &BufferDescriptor::new(index_size, BufferUsage::INDEX | BufferUsage::COPY_DST)
-                    .with_label(format!("{mesh_label}_indices")),
+                &BufferDescriptor::new(
+                    index_size,
+                    BufferUsage::INDEX | BufferUsage::COPY_DST | as_input,
+                )
+                .with_label(format!("{mesh_label}_indices")),
             )?;
             (
                 Some(buffer),
@@ -1347,13 +1364,25 @@ impl GraphicsDevice {
         self: &Arc<Self>,
         cpu_mesh: &CpuMesh,
     ) -> Result<(Arc<Mesh>, Vec<TransferOperation>), GraphicsError> {
-        profile_scope!("create_mesh_deferred");
-
         // `to_descriptor` carries the local-space bounds, which `create_mesh`
         // records on the mesh (before the tracking Weak, which would block a
         // later Arc::get_mut).
-        let descriptor = cpu_mesh.to_descriptor();
-        let mesh = self.create_mesh(&descriptor)?;
+        self.create_mesh_deferred_with(cpu_mesh, &cpu_mesh.to_descriptor())
+    }
+
+    /// [`create_mesh_deferred`](Self::create_mesh_deferred) with a caller-built
+    /// descriptor, so opt-ins like
+    /// [`MeshDescriptor::with_acceleration_structure_input`](redlilium_core::mesh::MeshDescriptor::with_acceleration_structure_input)
+    /// (#110) can flow onto the GPU buffers. The descriptor must match
+    /// `cpu_mesh`'s layout and counts (start from `cpu_mesh.to_descriptor()`).
+    pub fn create_mesh_deferred_with(
+        self: &Arc<Self>,
+        cpu_mesh: &CpuMesh,
+        descriptor: &MeshDescriptor,
+    ) -> Result<(Arc<Mesh>, Vec<TransferOperation>), GraphicsError> {
+        profile_scope!("create_mesh_deferred");
+
+        let mesh = self.create_mesh(descriptor)?;
         let mut ops = Vec::new();
 
         for i in 0..cpu_mesh.buffer_count() {

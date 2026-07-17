@@ -48,6 +48,7 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 cbuffer ResolveUniforms {
     float4 camera_pos;
     float4 screen_size; // xy = screen dimensions, zw = 1/screen dimensions
+    float4 light_dir;   // xyz = normalized direction toward the key light
 };
 
 // G-buffer textures
@@ -59,6 +60,11 @@ Texture2D gbuffer_normal_metallic;
 Texture2D gbuffer_position_roughness;
 [[vk::binding(3, 1)]]
 SamplerState gbuffer_sampler;
+// Ray-traced shadow mask (#110): r = key-light visibility (1 = lit, 0 = in
+// shadow). Written by the shadow-mask pass; a 1×1 white texture (all lit) when
+// the device has no ray-query support, so the sampling below is a no-op there.
+[[vk::binding(4, 1)]]
+Texture2D shadow_mask;
 
 // IBL textures
 [[vk::binding(0, 2)]]
@@ -103,12 +109,21 @@ float4 fs_main(VsOutput input) : SV_Target {
     float3 f0 = calculate_f0(albedo, metallic);
 
     // === Direct lighting ===
-    // Simple directional light (sun-like)
-    float3 light_dir = normalize(float3(1.0, 1.0, 0.5));
-    float3 light_color = float3(1.0, 0.98, 0.95) * 3.0;
+    // Key light (sun-like); direction supplied by the CPU so the ray-traced
+    // shadow pass (#110) casts its rays toward the same light.
+    float3 sun_dir = normalize(light_dir.xyz);
+    // Toned down so the image-based lighting stays the dominant look and the
+    // (soft) ray-traced shadows read as a subtle accent rather than a harsh
+    // spotlight fighting the IBL.
+    float3 light_color = float3(1.0, 0.98, 0.95) * 1.6;
+
+    // Ray-traced shadow visibility (1 = lit, 0 = occluded). Modulates only the
+    // direct key-light term — IBL ambient and the fill light stay untouched, so
+    // shadowed regions read as soft ambient rather than pure black.
+    float shadow = shadow_mask.Sample(gbuffer_sampler, input.uv).r;
 
     // Use library function for direct lighting
-    float3 lo = pbr_direct_lighting(normal, v, light_dir, albedo, metallic, roughness, light_color);
+    float3 lo = pbr_direct_lighting(normal, v, sun_dir, albedo, metallic, roughness, light_color) * shadow;
 
     // Fill light (simple diffuse-only)
     float3 fill_light_dir = normalize(float3(-0.5, -0.3, -1.0));

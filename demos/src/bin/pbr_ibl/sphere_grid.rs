@@ -52,7 +52,12 @@ pub struct SphereGrid {
 
 impl SphereGrid {
     /// Create the sphere grid: G-buffer material, sphere mesh, camera/instance rings.
-    pub fn create(device: &Arc<GraphicsDevice>) -> Self {
+    ///
+    /// `as_input` opts the sphere mesh's vertex/index buffers into ray-tracing
+    /// acceleration-structure build input (#110), so the shadow pass can build a
+    /// BLAS straight from the rendered mesh. Only pass `true` on a ray-query
+    /// capable device — the AS-input buffer usage is unsupported elsewhere.
+    pub fn create(device: &Arc<GraphicsDevice>, as_input: bool) -> Self {
         profile_function!();
 
         // Generate sphere mesh on CPU
@@ -120,9 +125,16 @@ impl SphereGrid {
         let wireframe_material_instance =
             Self::make_instance(device, &wireframe_material, &camera_ring, &instance_ring);
 
-        // Create GPU mesh; its data uploads through the frame graph.
+        // Create GPU mesh; its data uploads through the frame graph. When
+        // `as_input` is set the vertex/index buffers additionally carry the
+        // AS-build-input usage so the shadow pass (#110) can build a BLAS over
+        // this exact mesh — no duplicate geometry.
+        let mut mesh_descriptor = sphere_cpu.to_descriptor();
+        if as_input {
+            mesh_descriptor = mesh_descriptor.with_acceleration_structure_input();
+        }
         let (mesh, mesh_ops) = device
-            .create_mesh_deferred(&sphere_cpu)
+            .create_mesh_deferred_with(&sphere_cpu, &mesh_descriptor)
             .expect("Failed to create sphere mesh");
 
         Self {
