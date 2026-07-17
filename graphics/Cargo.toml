@@ -73,6 +73,8 @@ rstest.workspace = true
 pollster.workspace = true
 env_logger.workspace = true
 criterion = { workspace = true }
+# Headless egui render tests build an ArcEguiApp (Arc<parking_lot::RwLock<_>>).
+parking_lot = { workspace = true }
 
 [[bench]]
 name = "graphics_benchmarks"

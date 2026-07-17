@@ -341,6 +341,13 @@ impl AppHandler for PbrIblDemo {
         if let Some(resolve) = &mut self.resolve {
             resolve.flush_uploads(&mut graph);
         }
+        // The egui font-atlas deltas queue in the controller and must be
+        // flushed like every other upload — without this the atlas texture
+        // stays uninitialized (garbled glyph blocks on Vulkan, fully
+        // transparent UI on wgpu, which zero-inits textures).
+        if let Some(egui) = &mut self.egui_controller {
+            egui.flush_uploads(&mut graph);
+        }
 
         // === Pass 1: G-Buffer Pass ===
         let mut gbuffer_pass = GraphicsPass::new("gbuffer".into());

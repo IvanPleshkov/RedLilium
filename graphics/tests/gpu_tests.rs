@@ -42,7 +42,7 @@ use redlilium_graphics::{
     BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
     BufferTextureCopyRegion, BufferTextureLayout, BufferUsage, ColorAttachment,
     DepthStencilAttachment, Extent3d, GraphicsPass, LoadOp, MaterialDescriptor, MaterialInstance,
-    QueuePreference, RenderGraph, RenderGraphCompilationMode, RenderTargetConfig,
+    QueuePreference, RenderGraph, RenderGraphCompilationMode, RenderTarget, RenderTargetConfig,
     SamplerDescriptor, ShaderSource, StoreOp, TextureCopyLocation, TextureDescriptor,
     TextureFormat, TextureOrigin, TextureUsage, TransferConfig, TransferOperation, TransferPass,
 };
@@ -3000,6 +3000,273 @@ fn test_depth_only_pass_zero_color_attachments(#[case] backend: Backend) {
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during the depth-only workload"
+        );
+    }
+}
+
+/// Upload a texture and sample it in the SAME graph — the egui font-atlas
+/// flow: `EguiRenderer::flush_uploads` puts a `TransferPass` (atlas bytes via
+/// `upload_texture_data` into Rgba8UnormSrgb) into the same frame's graph as
+/// the egui draw that samples it. The graph compiler must order the copy
+/// before the draw and make the write visible to sampling; a miss here shows
+/// up as egui text rendering from a stale/undefined atlas.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_sample_uploaded_texture_same_graph(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    const W: u32 = 16;
+    const H: u32 = 16;
+
+    // The egui atlas shape: sRGB sampled texture filled through the graph.
+    let atlas = ctx.create_texture_2d(
+        W,
+        H,
+        TextureFormat::Rgba8UnormSrgb,
+        TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+    );
+
+    // Left half pure red, right half pure blue (0/255 are sRGB fixed points,
+    // so the values survive the decode untouched).
+    let mut pixels = Vec::with_capacity((W * H * 4) as usize);
+    for _y in 0..H {
+        for x in 0..W {
+            if x < W / 2 {
+                pixels.extend_from_slice(&[255, 0, 0, 255]);
+            } else {
+                pixels.extend_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+    }
+
+    let material = create_texture_sample_material(&ctx);
+    let instance = create_texture_sample_instance(&ctx, material, atlas.clone());
+    let fullscreen = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &fullscreen, &FULLSCREEN_QUAD_VERTICES);
+    let target = ctx.create_render_target(W, H);
+
+    // ONE graph: upload pass + draw sampling the freshly-uploaded texture.
+    let mut graph = RenderGraph::new();
+    let mut upload = TransferPass::new("atlas_upload".into());
+    upload.set_transfer_config(
+        TransferConfig::new().with_operation(
+            TransferOperation::upload_texture_data(&ctx.device, atlas.clone(), &pixels)
+                .expect("stage atlas upload"),
+        ),
+    );
+    graph.add_transfer_pass(upload);
+
+    let mut draw = GraphicsPass::new("atlas_sample".into());
+    draw.set_render_targets(RenderTargetConfig::new().with_color(
+        ColorAttachment::from_texture(target.clone()).with_clear_color(0.0, 1.0, 0.0, 1.0),
+    ));
+    draw.add_draw(fullscreen, instance);
+    graph.add_graphics_pass(draw);
+    ctx.execute_graph(graph);
+
+    // Read the render target back.
+    let readback_size = readback_buffer_size(W, H, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+    let mut g2 = RenderGraph::new();
+    let mut copy = TransferPass::new("atlas_sample_readback".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(target, readback.clone()),
+    ));
+    g2.add_transfer_pass(copy);
+    ctx.execute_graph(g2);
+
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let data = ctx.read_buffer(&readback, readback_size);
+    let left = get_pixel(&data, W, W / 4, H / 2);
+    let right = get_pixel(&data, W, 3 * W / 4, H / 2);
+    eprintln!("same-graph sample left {left:?} right {right:?} ({backend:?})");
+    assert!(
+        verify_pixel(
+            &data,
+            W,
+            W / 4,
+            H / 2,
+            ExpectedPixel::from_float(1.0, 0.0, 0.0, 1.0),
+            3
+        ),
+        "left half must sample the uploaded red, got {left:?} ({backend:?})"
+    );
+    assert!(
+        verify_pixel(
+            &data,
+            W,
+            3 * W / 4,
+            H / 2,
+            ExpectedPixel::from_float(0.0, 0.0, 1.0, 1.0),
+            3
+        ),
+        "right half must sample the uploaded blue, got {right:?} ({backend:?})"
+    );
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during the same-graph sample workload"
+        );
+    }
+}
+
+/// Headless egui render: draw large text into an offscreen target through the
+/// full controller path (atlas delta upload + tessellated draw in one graph)
+/// and verify actual GLYPHS came out, on both the SDR and the HDR surface
+/// format. Two properties are checked per format:
+///
+/// 1. egui rendered at all (pixels differ from the clear color);
+/// 2. the text is antialiased glyph coverage, not solid blocks — a broken
+///    (all-white) font atlas turns every glyph into a filled rectangle, which
+///    collapses the pixel-value diversity this asserts on.
+#[rstest]
+#[case::vulkan_sdr(Backend::Vulkan, TextureFormat::Bgra8UnormSrgb)]
+#[case::vulkan_hdr(Backend::Vulkan, TextureFormat::Rgba16Float)]
+#[case::webgpu_sdr(Backend::WebGpu, TextureFormat::Bgra8UnormSrgb)]
+#[case::webgpu_hdr(Backend::WebGpu, TextureFormat::Rgba16Float)]
+fn test_egui_headless_text_renders_glyphs(
+    #[case] backend: Backend,
+    #[case] surface_format: TextureFormat,
+) {
+    use redlilium_graphics::egui::{EguiApp, EguiController, egui};
+
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    const W: u32 = 256;
+    const H: u32 = 128;
+
+    struct TextUi;
+    impl EguiApp for TextUi {
+        fn update(&mut self, ctx: &egui::Context) {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("Wg Text 123")
+                        .size(48.0)
+                        .color(egui::Color32::WHITE),
+                );
+            });
+        }
+    }
+
+    let target = ctx.create_texture_2d(
+        W,
+        H,
+        surface_format,
+        TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+    );
+
+    let app: redlilium_graphics::egui::ArcEguiApp = Arc::new(parking_lot::RwLock::new(TextUi));
+    let mut controller = EguiController::new(ctx.device.clone(), app, W, H, 1.0, surface_format);
+
+    // Two frames: egui emits the font-atlas delta on the first tessellated
+    // frame; run a second to also cover the steady state.
+    for frame in 0..2 {
+        controller.begin_frame(frame as f64 * 0.016);
+        let render_target = RenderTarget::from_texture(target.clone());
+
+        // Clear the target in its own submission (the egui pass loads
+        // existing content; same-target pass ordering inside one graph is
+        // not what this test is probing).
+        let mut clear_graph = RenderGraph::new();
+        let mut clear = GraphicsPass::new("egui_test_clear".into());
+        clear.set_render_targets(RenderTargetConfig::new().with_color(
+            ColorAttachment::from_texture(target.clone()).with_clear_color(0.0, 0.0, 0.0, 1.0),
+        ));
+        clear_graph.add_graphics_pass(clear);
+        ctx.execute_graph(clear_graph);
+
+        let mut graph = RenderGraph::new();
+        controller.flush_uploads(&mut graph);
+        if let Some(pass) = controller.end_frame(&render_target, W, H) {
+            eprintln!(
+                "frame {frame}: egui pass has {} draw commands ({backend:?}/{surface_format:?})",
+                pass.draw_commands().len()
+            );
+            graph.add_graphics_pass(pass);
+        } else {
+            panic!("egui produced no draw pass ({backend:?}/{surface_format:?})");
+        }
+        ctx.execute_graph(graph);
+    }
+
+    // Read back the final frame.
+    let bpp: u32 = match surface_format {
+        TextureFormat::Rgba16Float => 8,
+        _ => 4,
+    };
+    let readback_size = readback_buffer_size(W, H, bpp);
+    let readback = ctx.create_readback_buffer(readback_size);
+    let mut g = RenderGraph::new();
+    let mut copy = TransferPass::new("egui_test_readback".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(target, readback.clone()),
+    ));
+    g.add_transfer_pass(copy);
+    ctx.execute_graph(g);
+
+    let data = ctx.read_buffer(&readback, readback_size);
+
+    // Walk pixels of the top-left text area, collecting distinct pixel byte
+    // patterns and counting non-background pixels. Row pitch is 256-aligned.
+    let row_pitch = ((W * bpp).div_ceil(256) * 256) as usize;
+    let mut patterns = std::collections::HashSet::new();
+    let mut non_bg = 0usize;
+    let bg = &data[0..bpp as usize]; // top-left corner: clear+panel fill, no text
+    for y in 0..H as usize {
+        for x in 0..W as usize {
+            let off = y * row_pitch + x * bpp as usize;
+            let px = &data[off..off + bpp as usize];
+            patterns.insert(px.to_vec());
+            if px != bg {
+                non_bg += 1;
+            }
+        }
+    }
+    eprintln!(
+        "egui headless: {} distinct pixel patterns, {} non-bg pixels ({backend:?}/{surface_format:?})",
+        patterns.len(),
+        non_bg
+    );
+    assert!(
+        non_bg > 500,
+        "egui drew almost nothing: {non_bg} non-background pixels ({backend:?}/{surface_format:?})"
+    );
+    assert!(
+        patterns.len() >= 16,
+        "text collapsed to flat blocks: only {} distinct pixel patterns ({backend:?}/{surface_format:?})",
+        patterns.len()
+    );
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during the egui headless render"
         );
     }
 }
