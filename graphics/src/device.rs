@@ -15,7 +15,8 @@ use crate::resources::{
     Blas, BlasDescriptor, Buffer, Sampler, Texture, Tlas, TlasDescriptor, instance_buffer_size,
 };
 use crate::types::{
-    BufferDescriptor, BufferUsage, CpuSampler, SamplerDescriptor, TextureDescriptor,
+    BufferDescriptor, BufferUsage, CompressionFamily, CpuSampler, SamplerDescriptor,
+    TextureDescriptor, TextureUsage,
 };
 use redlilium_core::profiling::profile_scope;
 
@@ -107,6 +108,19 @@ pub struct DeviceCapabilities {
     /// draws. Always false on wgpu/dummy and on wasm (WebGPU has no mesh
     /// shaders).
     pub mesh_shading: bool,
+    /// Whether BC1–BC7 (DXT/S3TC) block-compressed textures can be created
+    /// (#119). Vulkan `textureCompressionBC` / wgpu `TEXTURE_COMPRESSION_BC`.
+    /// The desktop family; compressed textures are sample-only (no
+    /// `RENDER_ATTACHMENT`/`STORAGE_BINDING` usage).
+    pub texture_compression_bc: bool,
+    /// Whether ETC2 + EAC block-compressed textures can be created (#119).
+    /// Vulkan `textureCompressionETC2` / wgpu `TEXTURE_COMPRESSION_ETC2`.
+    /// The mobile/GLES family; one bit covers ETC2 and EAC together.
+    pub texture_compression_etc2: bool,
+    /// Whether ASTC (LDR profile) block-compressed textures can be created
+    /// (#119). Vulkan `textureCompressionASTC_LDR` / wgpu
+    /// `TEXTURE_COMPRESSION_ASTC`. Covers every block size, Unorm + sRGB.
+    pub texture_compression_astc: bool,
     /// Whether the bindless texture/sampler heap (#117) is available:
     /// update-after-bind, partially-bound, runtime-sized descriptor arrays
     /// indexed non-uniformly from shaders. True only on the Vulkan backend
@@ -123,6 +137,17 @@ impl DeviceCapabilities {
     /// Whether MSAA render attachments with `count` samples are supported.
     pub fn supports_sample_count(&self, count: u32) -> bool {
         count.is_power_of_two() && (self.sample_count_mask & count) != 0
+    }
+
+    /// Whether textures of the given block-compression family can be created
+    /// (#119). Support is per-family, not per-format — one feature bit gates
+    /// the whole family on every backend.
+    pub fn supports_compression_family(&self, family: CompressionFamily) -> bool {
+        match family {
+            CompressionFamily::Bc => self.texture_compression_bc,
+            CompressionFamily::Etc2 => self.texture_compression_etc2,
+            CompressionFamily::Astc => self.texture_compression_astc,
+        }
     }
 }
 
@@ -435,6 +460,31 @@ impl GraphicsDevice {
                 "sample count {} not supported by this device (supported mask: {:#x})",
                 descriptor.sample_count, self.capabilities.sample_count_mask
             )));
+        }
+
+        // Block-compressed formats (#119): sample-only on every backend, and
+        // gated per-family by the device feature bit. The usage check comes
+        // first so it fails the same way on every device. NPOT sizes are fine —
+        // partial edge blocks are legal, and the transfer path already sizes
+        // uploads in blocks.
+        if let Some(family) = descriptor.format.compression_family() {
+            if descriptor
+                .usage
+                .intersects(TextureUsage::RENDER_ATTACHMENT | TextureUsage::STORAGE_BINDING)
+            {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "compressed texture format {:?} is sample-only; \
+                     RENDER_ATTACHMENT/STORAGE_BINDING usage is not supported",
+                    descriptor.format
+                )));
+            }
+            if !self.capabilities.supports_compression_family(family) {
+                return Err(GraphicsError::FeatureNotSupported(format!(
+                    "texture format {:?} requires {family} texture compression, \
+                     which this device does not support",
+                    descriptor.format
+                )));
+            }
         }
 
         // Create the GPU texture via backend
@@ -1727,6 +1777,64 @@ mod tests {
 
         descriptor.sample_count = 4;
         assert!(device.create_texture(&descriptor).is_ok());
+    }
+
+    /// #119: NPOT compressed textures are legal — partial edge blocks are a
+    /// normal part of the format, and the transfer path sizes uploads in
+    /// blocks. 5×3 BC1 = 2×1 blocks.
+    #[test]
+    fn test_create_texture_compressed_npot() {
+        let device = create_test_device();
+        let descriptor = TextureDescriptor::new_2d(
+            5,
+            3,
+            TextureFormat::Bc1RgbaUnorm,
+            TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+        );
+        if device.capabilities().texture_compression_bc {
+            assert!(device.create_texture(&descriptor).is_ok());
+        } else {
+            assert!(matches!(
+                device.create_texture(&descriptor),
+                Err(GraphicsError::FeatureNotSupported(_))
+            ));
+        }
+    }
+
+    /// #119: compressed formats are sample-only. The usage check runs before
+    /// the capability check, so this is `InvalidParameter` on every device —
+    /// with or without BC support.
+    #[test]
+    fn test_create_texture_compressed_rejects_attachment_and_storage() {
+        let device = create_test_device();
+        for usage in [
+            TextureUsage::RENDER_ATTACHMENT,
+            TextureUsage::STORAGE_BINDING,
+        ] {
+            let descriptor = TextureDescriptor::new_2d(
+                256,
+                256,
+                TextureFormat::Bc7RgbaUnorm,
+                TextureUsage::TEXTURE_BINDING | usage,
+            );
+            assert!(matches!(
+                device.create_texture(&descriptor),
+                Err(GraphicsError::InvalidParameter(_))
+            ));
+        }
+    }
+
+    /// #119: the per-family capability lookup, independent of any backend.
+    #[test]
+    fn test_supports_compression_family() {
+        let mut caps = *create_test_device().capabilities();
+        caps.texture_compression_bc = true;
+        caps.texture_compression_etc2 = false;
+        caps.texture_compression_astc = false;
+        use crate::types::CompressionFamily;
+        assert!(caps.supports_compression_family(CompressionFamily::Bc));
+        assert!(!caps.supports_compression_family(CompressionFamily::Etc2));
+        assert!(!caps.supports_compression_family(CompressionFamily::Astc));
     }
 
     #[test]

@@ -48,6 +48,30 @@ impl TextureDimension {
     }
 }
 
+/// Family of block-compressed texture formats, each gated by a single device
+/// feature bit (#119): Vulkan `textureCompression{BC,ETC2,ASTC_LDR}`, wgpu
+/// `TEXTURE_COMPRESSION_{BC,ETC2,ASTC}`. Support is all-or-nothing per family;
+/// see [`TextureFormat::compression_family`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompressionFamily {
+    /// BC1–BC7 (a.k.a. DXT/S3TC), the desktop family.
+    Bc,
+    /// ETC2 + EAC, the mobile/GLES family.
+    Etc2,
+    /// ASTC LDR profile (all block sizes, Unorm + sRGB).
+    Astc,
+}
+
+impl std::fmt::Display for CompressionFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Bc => "BC",
+            Self::Etc2 => "ETC2/EAC",
+            Self::Astc => "ASTC (LDR)",
+        })
+    }
+}
+
 /// Texture format enumeration.
 ///
 /// Deliberately NOT `#[non_exhaustive]`: the backend format converters match
@@ -324,61 +348,71 @@ impl TextureFormat {
 
     /// Returns true if this is a compressed (block-based) texture format.
     pub fn is_compressed(&self) -> bool {
-        matches!(
-            self,
+        self.compression_family().is_some()
+    }
+
+    /// The device feature family gating this format (#119), or `None` for
+    /// uncompressed formats.
+    ///
+    /// Whole families are gated by a single capability bit — there is no
+    /// per-format support query. EAC formats belong to the ETC2 family
+    /// (Vulkan's `textureCompressionETC2` covers both).
+    pub fn compression_family(&self) -> Option<CompressionFamily> {
+        match self {
             Self::Bc1RgbaUnorm
-                | Self::Bc1RgbaUnormSrgb
-                | Self::Bc2RgbaUnorm
-                | Self::Bc2RgbaUnormSrgb
-                | Self::Bc3RgbaUnorm
-                | Self::Bc3RgbaUnormSrgb
-                | Self::Bc4RUnorm
-                | Self::Bc4RSnorm
-                | Self::Bc5RgUnorm
-                | Self::Bc5RgSnorm
-                | Self::Bc6hRgbUfloat
-                | Self::Bc6hRgbFloat
-                | Self::Bc7RgbaUnorm
-                | Self::Bc7RgbaUnormSrgb
-                | Self::Etc2Rgb8Unorm
-                | Self::Etc2Rgb8UnormSrgb
-                | Self::Etc2Rgb8A1Unorm
-                | Self::Etc2Rgb8A1UnormSrgb
-                | Self::Etc2Rgba8Unorm
-                | Self::Etc2Rgba8UnormSrgb
-                | Self::EacR11Unorm
-                | Self::EacR11Snorm
-                | Self::EacRg11Unorm
-                | Self::EacRg11Snorm
-                | Self::Astc4x4Unorm
-                | Self::Astc4x4UnormSrgb
-                | Self::Astc5x4Unorm
-                | Self::Astc5x4UnormSrgb
-                | Self::Astc5x5Unorm
-                | Self::Astc5x5UnormSrgb
-                | Self::Astc6x5Unorm
-                | Self::Astc6x5UnormSrgb
-                | Self::Astc6x6Unorm
-                | Self::Astc6x6UnormSrgb
-                | Self::Astc8x5Unorm
-                | Self::Astc8x5UnormSrgb
-                | Self::Astc8x6Unorm
-                | Self::Astc8x6UnormSrgb
-                | Self::Astc8x8Unorm
-                | Self::Astc8x8UnormSrgb
-                | Self::Astc10x5Unorm
-                | Self::Astc10x5UnormSrgb
-                | Self::Astc10x6Unorm
-                | Self::Astc10x6UnormSrgb
-                | Self::Astc10x8Unorm
-                | Self::Astc10x8UnormSrgb
-                | Self::Astc10x10Unorm
-                | Self::Astc10x10UnormSrgb
-                | Self::Astc12x10Unorm
-                | Self::Astc12x10UnormSrgb
-                | Self::Astc12x12Unorm
-                | Self::Astc12x12UnormSrgb
-        )
+            | Self::Bc1RgbaUnormSrgb
+            | Self::Bc2RgbaUnorm
+            | Self::Bc2RgbaUnormSrgb
+            | Self::Bc3RgbaUnorm
+            | Self::Bc3RgbaUnormSrgb
+            | Self::Bc4RUnorm
+            | Self::Bc4RSnorm
+            | Self::Bc5RgUnorm
+            | Self::Bc5RgSnorm
+            | Self::Bc6hRgbUfloat
+            | Self::Bc6hRgbFloat
+            | Self::Bc7RgbaUnorm
+            | Self::Bc7RgbaUnormSrgb => Some(CompressionFamily::Bc),
+            Self::Etc2Rgb8Unorm
+            | Self::Etc2Rgb8UnormSrgb
+            | Self::Etc2Rgb8A1Unorm
+            | Self::Etc2Rgb8A1UnormSrgb
+            | Self::Etc2Rgba8Unorm
+            | Self::Etc2Rgba8UnormSrgb
+            | Self::EacR11Unorm
+            | Self::EacR11Snorm
+            | Self::EacRg11Unorm
+            | Self::EacRg11Snorm => Some(CompressionFamily::Etc2),
+            Self::Astc4x4Unorm
+            | Self::Astc4x4UnormSrgb
+            | Self::Astc5x4Unorm
+            | Self::Astc5x4UnormSrgb
+            | Self::Astc5x5Unorm
+            | Self::Astc5x5UnormSrgb
+            | Self::Astc6x5Unorm
+            | Self::Astc6x5UnormSrgb
+            | Self::Astc6x6Unorm
+            | Self::Astc6x6UnormSrgb
+            | Self::Astc8x5Unorm
+            | Self::Astc8x5UnormSrgb
+            | Self::Astc8x6Unorm
+            | Self::Astc8x6UnormSrgb
+            | Self::Astc8x8Unorm
+            | Self::Astc8x8UnormSrgb
+            | Self::Astc10x5Unorm
+            | Self::Astc10x5UnormSrgb
+            | Self::Astc10x6Unorm
+            | Self::Astc10x6UnormSrgb
+            | Self::Astc10x8Unorm
+            | Self::Astc10x8UnormSrgb
+            | Self::Astc10x10Unorm
+            | Self::Astc10x10UnormSrgb
+            | Self::Astc12x10Unorm
+            | Self::Astc12x10UnormSrgb
+            | Self::Astc12x12Unorm
+            | Self::Astc12x12UnormSrgb => Some(CompressionFamily::Astc),
+            _ => None,
+        }
     }
 
     /// Returns the block dimensions (width, height) for this format.
@@ -557,5 +591,48 @@ impl CpuTexture {
     pub fn with_dimension(mut self, dimension: TextureDimension) -> Self {
         self.dimension = dimension;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #119: every compressed format maps to exactly one feature family;
+    /// uncompressed formats map to none. `is_compressed` delegates to
+    /// `compression_family`, so the two can never disagree.
+    #[test]
+    fn compression_family_mapping() {
+        assert_eq!(
+            TextureFormat::Bc1RgbaUnorm.compression_family(),
+            Some(CompressionFamily::Bc)
+        );
+        assert_eq!(
+            TextureFormat::Bc6hRgbUfloat.compression_family(),
+            Some(CompressionFamily::Bc)
+        );
+        assert_eq!(
+            TextureFormat::Etc2Rgb8A1UnormSrgb.compression_family(),
+            Some(CompressionFamily::Etc2)
+        );
+        // EAC belongs to the ETC2 family — one Vulkan feature bit covers both.
+        assert_eq!(
+            TextureFormat::EacRg11Snorm.compression_family(),
+            Some(CompressionFamily::Etc2)
+        );
+        assert_eq!(
+            TextureFormat::Astc4x4UnormSrgb.compression_family(),
+            Some(CompressionFamily::Astc)
+        );
+        assert_eq!(
+            TextureFormat::Astc12x12Unorm.compression_family(),
+            Some(CompressionFamily::Astc)
+        );
+        assert_eq!(TextureFormat::Rgba8UnormSrgb.compression_family(), None);
+        assert_eq!(TextureFormat::Rgba16Float.compression_family(), None);
+        assert_eq!(TextureFormat::Depth32Float.compression_family(), None);
+
+        assert!(TextureFormat::Bc7RgbaUnormSrgb.is_compressed());
+        assert!(!TextureFormat::Rgba8Unorm.is_compressed());
     }
 }

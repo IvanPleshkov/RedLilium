@@ -24,6 +24,18 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/IvanPleshkov/RedLilium"
 
+# Shipping profile for `cargo xtask dist` (#132) — a separate profile so
+# dev-time `--release` builds keep their fast link times. Fat LTO measured
+# marginally smaller than thin (11 vs 12 MB, release baseline 17 MB) at +25%
+# build time — fine for a rarely-run command. `panic` stays at the default
+# `"unwind"`: the runtime's in-image panic shield catches unwinds, and
+# `abort` would turn every game panic into a process kill.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 [workspace.dependencies]
 # Window and input handling
 winit = "0.30.12"

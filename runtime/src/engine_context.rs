@@ -51,6 +51,11 @@ impl EngineContext {
     /// load their `assets.db` files into one merged database, and create the
     /// GPU resource managers.
     ///
+    /// On native, a relative mount dir is resolved against the executable's
+    /// directory first and the working directory second (see
+    /// [`resolve_mount_dir`]) — a dist folder runs from any cwd, while dev
+    /// runs (`cargo run`) keep finding the packs at the workspace root.
+    ///
     /// On wasm, a mount whose source dir has an entry in `embedded_packs`
     /// (`GameConfig::embedded_packs`, #108) is served from that in-memory
     /// table; otherwise the built-in `std-assets` embed (or an empty provider)
@@ -77,7 +82,7 @@ impl EngineContext {
         let mut vfs = Vfs::new();
         for &(name, dir) in mounts {
             #[cfg(not(target_arch = "wasm32"))]
-            vfs.mount(name, FileSystemProvider::new(dir));
+            vfs.mount(name, FileSystemProvider::new(resolve_mount_dir(dir)));
             // Wasm has no local disk: the pack is compiled into the binary and
             // served from memory. An unknown mount (e.g. an empty project pack)
             // gets an empty provider.
@@ -104,6 +109,9 @@ impl EngineContext {
                 }
                 continue;
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            ctx.merge_db_file(name, &resolve_mount_dir(dir).join("assets.db"));
+            #[cfg(target_arch = "wasm32")]
             ctx.load_mount_db(name, dir);
         }
         ctx
@@ -143,7 +151,9 @@ impl EngineContext {
     }
 
     /// Merge the mount's `<dir>/assets.db` (if present) into the shared
-    /// asset database.
+    /// asset database. `dir` is taken as-is (cwd-relative if relative) — the
+    /// exe-dir-first resolution applies only to [`new`](Self::new)'s mounts,
+    /// not to callers that manage their own directories (the editor).
     pub fn load_mount_db(&self, mount: &str, dir: &str) {
         // Wasm has no local disk: read the DB from the embedded pack instead of
         // `std::fs` (and instead of the async VFS, so this stays synchronous).
@@ -157,17 +167,22 @@ impl EngineContext {
                 }
                 None => log::warn!("mount '{mount}' has no embedded assets.db ({dir})"),
             }
-            return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        match std::fs::read_to_string(format!("{dir}/assets.db")) {
+        self.merge_db_file(mount, &std::path::Path::new(dir).join("assets.db"));
+    }
+
+    /// Merge the `assets.db` at `path` into the shared asset database.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn merge_db_file(&self, mount: &str, path: &std::path::Path) {
+        match std::fs::read_to_string(path) {
             Ok(text) => {
                 if let Err(e) = self.asset_db.write().merge_ron(mount, &text) {
                     log::error!("failed to parse {mount} assets.db: {e}");
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::warn!("mount '{mount}' has no assets.db ({dir})");
+                log::warn!("mount '{mount}' has no assets.db ({})", path.display());
             }
             Err(e) => log::warn!("{mount} assets.db not readable: {e}"),
         }
@@ -212,4 +227,29 @@ impl EngineContext {
         world.insert_resource_shared(self.asset_db.clone());
         world.insert_resource_shared(self.generation_registry.clone());
     }
+}
+
+/// Resolve a relative mount directory for a standalone game (#132): the
+/// executable's directory wins, the working directory is the fallback.
+///
+/// Exe-first makes a dist folder self-contained — the game finds its packs no
+/// matter where it was launched from (double-click included). Dev runs
+/// (`cargo run -p car-game`) fall through to the cwd: `target/debug/` holds
+/// no asset packs, and cargo runs from the workspace root where they live.
+/// Absolute directories pass through untouched.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_mount_dir(dir: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(dir);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        let candidate = exe_dir.join(path);
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
 }

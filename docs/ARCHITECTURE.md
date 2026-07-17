@@ -677,7 +677,25 @@ The engine repo keeps a plain `redlilium-editor` binary (no game;
 `REDLILIUM_GAME=<cdylib>` hosts one dynamically with the warm-restart reload
 of ADR-020) for engine development.
 
-## Multi-World Architecture
+### Shipping builds (dist)
+
+`cargo xtask dist --target desktop|web` packages the standalone game
+(#107/#108/#132):
+
+- **Profile.** Desktop builds use `[profile.dist]` (workspace `Cargo.toml`):
+  inherits `release`, adds thin LTO, `codegen-units = 1`, symbol stripping.
+  `panic` stays `"unwind"` — the runtime's in-image panic shield catches
+  unwinds, `abort` would turn every game panic into a process kill. Web is
+  pinned to wasm-pack's `release` profile; its size pass is `wasm-opt -Oz`
+  (`[package.metadata.wasm-pack]` in `game/Cargo.toml`).
+- **Mount resolution.** `GameConfig::mounts` holds relative directories
+  compiled into the binary. The runtime (`EngineContext::new`) resolves them
+  **against the executable's directory first, the working directory second**.
+  Exe-first makes the dist folder self-contained (runs from any cwd,
+  double-click included); dev runs fall through to the cwd because
+  `target/debug/` holds no asset packs and `cargo run` starts at the
+  workspace root. The editor is unaffected — it builds its own VFS and
+  resolves its own directories.
 
 The engine supports multiple ECS worlds with shared rendering backend
 (this is exactly how editor Play works — an editing world and a play world

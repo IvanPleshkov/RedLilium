@@ -145,8 +145,10 @@ pub struct GameConfig {
     /// Window title.
     pub title: String,
     /// Local asset-pack mounts `(name, dir)`; each directory's `assets.db`
-    /// is loaded into the merged in-memory database at startup. Paths are
-    /// relative to the working directory.
+    /// is loaded into the merged in-memory database at startup. A relative
+    /// dir is resolved against the executable's directory first (so a dist
+    /// folder runs from any cwd, #132), then against the working directory
+    /// (dev runs from the workspace root).
     pub mounts: Vec<(&'static str, &'static str)>,
     /// Embedded packs for targets without a local disk (wasm), keyed by the
     /// mount *source dir* from [`mounts`](Self::mounts). On wasm a mount with

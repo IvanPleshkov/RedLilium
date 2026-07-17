@@ -128,9 +128,10 @@ pub use shader::{
 };
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
-    AddressMode, BufferDescriptor, BufferUsage, ClearValue, CompareFunction, CpuSampler,
-    CpuTexture, DrawIndexedIndirectArgs, DrawIndirectArgs, Extent3d, FilterMode, SamplerDescriptor,
-    ScissorRect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsage, Viewport,
+    AddressMode, BufferDescriptor, BufferUsage, ClearValue, CompareFunction, CompressionFamily,
+    CpuSampler, CpuTexture, DrawIndexedIndirectArgs, DrawIndirectArgs, Extent3d, FilterMode,
+    SamplerDescriptor, ScissorRect, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsage, Viewport,
 };
 
 /// Graphics library version
