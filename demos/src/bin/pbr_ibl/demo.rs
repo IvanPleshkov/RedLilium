@@ -15,6 +15,7 @@ use redlilium_graphics::{
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use crate::GRID_SIZE;
 use crate::camera::OrbitCamera;
 use crate::ecs_scene::EcsScene;
 use crate::gbuffer::GBuffer;
@@ -24,7 +25,6 @@ use crate::shadow_pass::ShadowPass;
 use crate::skybox_pass::SkyboxPass;
 use crate::sphere_grid::SphereGrid;
 use crate::ui::PbrUi;
-use crate::{GRID_SIZE, PREFILTER_SIZE};
 
 /// The main PBR IBL demo application.
 pub struct PbrIblDemo {
@@ -174,6 +174,7 @@ impl AppHandler for PbrIblDemo {
                 gbuffer.position_egui_id,
             );
             ui.set_shadow_mask_id(Some(shadow_mask_egui_id));
+            ui.set_skybox_max_mip(skybox.max_mip);
         }
 
         self.egui_controller = Some(egui_controller);
@@ -511,27 +512,25 @@ impl AppHandler for PbrIblDemo {
         }
 
         // Shift + digit: change skybox MIP level
-        if self.shift_pressed {
-            let mip_levels = (PREFILTER_SIZE as f32).log2().floor() as u32 + 1;
-            let max_mip = mip_levels as f32 - 1.0;
-
-            let new_mip = match event.physical_key {
+        if self.shift_pressed
+            && let Some(skybox) = &mut self.skybox
+        {
+            let new_mip: Option<f32> = match event.physical_key {
                 PhysicalKey::Code(KeyCode::Digit0) => Some(0.0),
-                PhysicalKey::Code(KeyCode::Digit1) => Some(1.0_f32.min(max_mip)),
-                PhysicalKey::Code(KeyCode::Digit2) => Some(2.0_f32.min(max_mip)),
-                PhysicalKey::Code(KeyCode::Digit3) => Some(3.0_f32.min(max_mip)),
-                PhysicalKey::Code(KeyCode::Digit4) => Some(4.0_f32.min(max_mip)),
-                PhysicalKey::Code(KeyCode::Digit5) => Some(5.0_f32.min(max_mip)),
-                PhysicalKey::Code(KeyCode::Digit6) => Some(6.0_f32.min(max_mip)),
-                PhysicalKey::Code(KeyCode::Digit7) => Some(7.0_f32.min(max_mip)),
+                PhysicalKey::Code(KeyCode::Digit1) => Some(1.0),
+                PhysicalKey::Code(KeyCode::Digit2) => Some(2.0),
+                PhysicalKey::Code(KeyCode::Digit3) => Some(3.0),
+                PhysicalKey::Code(KeyCode::Digit4) => Some(4.0),
+                PhysicalKey::Code(KeyCode::Digit5) => Some(5.0),
+                PhysicalKey::Code(KeyCode::Digit6) => Some(6.0),
+                PhysicalKey::Code(KeyCode::Digit7) => Some(7.0),
+                PhysicalKey::Code(KeyCode::Digit8) => Some(8.0),
                 _ => None,
             };
 
-            if let Some(mip) = new_mip
-                && let Some(skybox) = &mut self.skybox
-            {
-                skybox.mip_level = mip;
-                log::info!("Skybox MIP level: {}", mip);
+            if let Some(mip) = new_mip {
+                skybox.mip_level = mip.min(skybox.max_mip);
+                log::info!("Skybox MIP level: {}", skybox.mip_level);
             }
         }
     }

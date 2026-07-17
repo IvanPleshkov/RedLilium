@@ -1,256 +1,126 @@
 //! IBL (Image-Based Lighting) texture management.
+//!
+//! The IBL inputs are baked offline (`cargo run -p xtask -- bake-ibl`, #137)
+//! into Zstd-supercompressed KTX2 under `std-assets/textures/ibl/` and
+//! embedded here. Parsing and per-(mip, layer) upload go through the same
+//! path the asset loader uses (#120): `parse_ktx2` → `CpuTexture` →
+//! `TransferOperation::upload_texture_level` through the frame graph.
 
 use std::sync::Arc;
 
 use redlilium_core::profiling::profile_scope;
+use redlilium_core::texture::ktx2::parse_ktx2;
 use redlilium_graphics::{
-    BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage, CpuSampler,
-    Extent3d, GraphicsDevice, TextureCopyLocation, TextureDescriptor, TextureFormat, TextureOrigin,
+    CpuSampler, CpuTexture, GraphicsDevice, Texture, TextureDescriptor, TextureDimension,
     TextureUsage, TransferConfig, TransferOperation,
 };
 
-use crate::ibl::compute_ibl_cpu;
-use crate::resources::{BRDF_LUT_URL, HDR_URL, load_brdf_lut_from_url, load_hdr_from_url};
-use crate::{IRRADIANCE_SIZE, PREFILTER_SIZE};
+const BRDF_LUT_KTX2: &[u8] = include_bytes!("../../../../std-assets/textures/ibl/brdf_lut.ktx2");
+const IRRADIANCE_KTX2: &[u8] =
+    include_bytes!("../../../../std-assets/textures/ibl/irradiance_cube.ktx2");
+const PREFILTER_KTX2: &[u8] =
+    include_bytes!("../../../../std-assets/textures/ibl/prefilter_cube.ktx2");
+const SKY_KTX2: &[u8] = include_bytes!("../../../../std-assets/textures/ibl/sky_cube.ktx2");
 
-/// A staging buffer paired with the CPU bytes to fill it through the graph.
-type StagingUpload = (Arc<redlilium_graphics::Buffer>, Arc<[u8]>);
-
-/// IBL cubemap textures, BRDF LUT, and staging buffers for GPU upload.
+/// IBL cubemaps, BRDF LUT, and the background sky cubemap.
 pub struct IblTextures {
-    pub irradiance_cubemap: Arc<redlilium_graphics::Texture>,
-    pub prefilter_cubemap: Arc<redlilium_graphics::Texture>,
-    pub brdf_lut: Arc<redlilium_graphics::Texture>,
+    pub irradiance_cubemap: Arc<Texture>,
+    pub prefilter_cubemap: Arc<Texture>,
+    pub brdf_lut: Arc<Texture>,
+    pub sky_cubemap: Arc<Texture>,
     pub sampler: Arc<redlilium_graphics::Sampler>,
-    // Staging state for first-frame upload. The staging buffers are filled
-    // through the frame graph (a `write_buffer` transfer op precedes the
-    // buffer→texture copy in the same transfer pass), so there is no direct GPU
-    // upload at create time.
-    irradiance_staging: Option<StagingUpload>,
-    prefilter_staging: Option<Vec<StagingUpload>>,
-    prefilter_aligned_bytes_per_row: Vec<u32>,
-    /// BRDF LUT upload op, staged once and consumed on the first frame.
-    brdf_upload: Option<TransferOperation>,
-    needs_upload: bool,
+    /// Mip count of the sky cubemap (drives the skybox LOD controls).
+    pub sky_mip_levels: u32,
+    /// Per-(mip, layer) upload ops, staged once and consumed on the first frame.
+    pending_ops: Vec<TransferOperation>,
 }
 
 impl IblTextures {
-    /// Load HDR environment, compute IBL cubemaps on CPU, and create GPU textures.
+    /// Parse the baked KTX2 set and create GPU textures with staged uploads.
     pub fn create(device: &Arc<GraphicsDevice>) -> Self {
         profile_scope!("IblTextures::create");
 
-        // Load HDR environment and compute IBL data on CPU
-        log::info!("Loading HDR environment map...");
-        let (hdr_width, hdr_height, hdr_data) =
-            load_hdr_from_url(HDR_URL).expect("Failed to load HDR texture");
+        let brdf_cpu = parse_and_check(BRDF_LUT_KTX2, TextureDimension::D2, "ibl_brdf_lut");
+        let irradiance_cpu =
+            parse_and_check(IRRADIANCE_KTX2, TextureDimension::Cube, "ibl_irradiance");
+        let prefilter_cpu =
+            parse_and_check(PREFILTER_KTX2, TextureDimension::Cube, "ibl_prefilter");
+        let sky_cpu = parse_and_check(SKY_KTX2, TextureDimension::Cube, "ibl_sky");
+        let sky_mip_levels = sky_cpu.mip_level_count;
 
-        log::info!("Computing IBL cubemaps on CPU...");
-        let (irradiance_data, prefilter_data) = compute_ibl_cpu(&hdr_data, hdr_width, hdr_height);
+        let mut pending_ops = Vec::new();
+        let brdf_lut = create_texture(device, &brdf_cpu, &mut pending_ops);
+        let irradiance_cubemap = create_texture(device, &irradiance_cpu, &mut pending_ops);
+        let prefilter_cubemap = create_texture(device, &prefilter_cpu, &mut pending_ops);
+        let sky_cubemap = create_texture(device, &sky_cpu, &mut pending_ops);
 
-        // Load BRDF LUT
-        let brdf_cpu = load_brdf_lut_from_url(BRDF_LUT_URL).expect("Failed to load BRDF LUT");
-
-        // Create IBL textures
-        let irradiance_cubemap = device
-            .create_texture(
-                &TextureDescriptor::new_cube(
-                    IRRADIANCE_SIZE,
-                    TextureFormat::Rgba16Float,
-                    TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
-                )
-                .with_label("irradiance_cubemap"),
-            )
-            .expect("Failed to create irradiance cubemap");
-
-        let mip_levels = (PREFILTER_SIZE as f32).log2().floor() as u32 + 1;
-        let prefilter_cubemap = device
-            .create_texture(
-                &TextureDescriptor::new_cube(
-                    PREFILTER_SIZE,
-                    TextureFormat::Rgba16Float,
-                    TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
-                )
-                .with_mip_levels(mip_levels)
-                .with_label("prefilter_cubemap"),
-            )
-            .expect("Failed to create prefilter cubemap");
-
-        // BRDF LUT (Rg8Unorm). Its CPU data is tightly packed; for the BRDF LUT
-        // (width is a power of two, 2 bytes/pixel) rows are 256-byte aligned, so
-        // `upload_texture_data` can stage and copy it directly through the graph.
-        let brdf_lut = device
-            .create_texture(
-                &TextureDescriptor::new_2d(
-                    brdf_cpu.width,
-                    brdf_cpu.height,
-                    brdf_cpu.format,
-                    TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
-                )
-                .with_label("brdf_lut"),
-            )
-            .expect("Failed to create BRDF LUT");
-        let brdf_upload =
-            TransferOperation::upload_texture_data(device, brdf_lut.clone(), &brdf_cpu.data)
-                .expect("Failed to stage BRDF LUT upload");
-
-        // Create staging buffers for IBL data upload. The buffers are filled by a
-        // `write_buffer` transfer op on the first frame (no direct GPU upload).
-        let irradiance_bytes: Arc<[u8]> = Arc::from(bytemuck::cast_slice(&irradiance_data));
-        let irradiance_staging = device
-            .create_buffer(&BufferDescriptor::new(
-                irradiance_bytes.len() as u64,
-                BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create irradiance staging buffer");
-
-        // Create staging buffers for each mip level with aligned bytes per row
-        const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
-        let bytes_per_pixel = 8u32; // Rgba16Float = 4 channels * 2 bytes
-        let mut prefilter_staging_buffers = Vec::new();
-        let mut prefilter_aligned_bytes_per_row = Vec::new();
-
-        for (mip, mip_data) in prefilter_data.iter().enumerate() {
-            let mip_size = (PREFILTER_SIZE >> mip).max(1);
-            let bytes_per_row = mip_size * bytes_per_pixel;
-            let aligned_bytes_per_row =
-                bytes_per_row.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
-            prefilter_aligned_bytes_per_row.push(aligned_bytes_per_row);
-
-            let bytes: &[u8] = bytemuck::cast_slice(mip_data);
-
-            // Pad data if alignment is needed
-            let padded_data = if aligned_bytes_per_row != bytes_per_row {
-                let face_size = (mip_size * mip_size) as usize * bytes_per_pixel as usize;
-                let padded_face_size = (aligned_bytes_per_row * mip_size) as usize;
-                let mut padded = vec![0u8; padded_face_size * 6];
-                for face in 0..6 {
-                    for y in 0..mip_size {
-                        let src_start = face * face_size + (y as usize * bytes_per_row as usize);
-                        let src_end = src_start + bytes_per_row as usize;
-                        let dst_start =
-                            face * padded_face_size + (y as usize * aligned_bytes_per_row as usize);
-                        padded[dst_start..dst_start + bytes_per_row as usize]
-                            .copy_from_slice(&bytes[src_start..src_end]);
-                    }
-                }
-                padded
-            } else {
-                bytes.to_vec()
-            };
-
-            let padded_data: Arc<[u8]> = Arc::from(padded_data.as_slice());
-            let buffer = device
-                .create_buffer(&BufferDescriptor::new(
-                    padded_data.len() as u64,
-                    BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
-                ))
-                .expect("Failed to create prefilter staging buffer");
-            prefilter_staging_buffers.push((buffer, padded_data));
-        }
-
-        // Create IBL sampler
         let sampler = device
             .create_sampler_from_cpu(&CpuSampler::linear().with_name("ibl_sampler"))
             .expect("Failed to create IBL sampler");
 
-        log::info!("IBL resources created successfully");
+        log::info!("IBL resources created from baked KTX2 set");
 
         Self {
             irradiance_cubemap,
             prefilter_cubemap,
             brdf_lut,
+            sky_cubemap,
             sampler,
-            irradiance_staging: Some((irradiance_staging, irradiance_bytes)),
-            prefilter_staging: Some(prefilter_staging_buffers),
-            prefilter_aligned_bytes_per_row,
-            brdf_upload: Some(brdf_upload),
-            needs_upload: true,
+            sky_mip_levels,
+            pending_ops,
         }
     }
 
-    /// If an IBL upload is pending, returns the transfer config and clears the staging state.
-    ///
-    /// Within the returned config, each staging buffer is first filled via a
-    /// `write_buffer` op and then copied into its texture; transfer ops execute
-    /// in order within a pass, so the fill always precedes the copy.
+    /// If the first-frame IBL upload is pending, returns its transfer config.
     pub fn take_transfer_config(&mut self) -> Option<TransferConfig> {
-        if !self.needs_upload {
+        if self.pending_ops.is_empty() {
             return None;
         }
-        self.needs_upload = false;
-
-        let mut config = TransferConfig::new();
-
-        // BRDF LUT (staging fill + copy already encapsulated by upload_texture_data).
-        if let Some(brdf_upload) = self.brdf_upload.take() {
-            config = config.with_operation(brdf_upload);
-        }
-
-        // Upload irradiance cubemap (6 faces)
-        if let Some((staging, bytes)) = &self.irradiance_staging {
-            // Fill the staging buffer through the graph first.
-            config = config.with_operation(TransferOperation::write_buffer(
-                staging.clone(),
-                0,
-                bytes.clone(),
-            ));
-
-            let face_bytes = (IRRADIANCE_SIZE * IRRADIANCE_SIZE * 4 * 2) as u64;
-            for face in 0..6u32 {
-                let region = BufferTextureCopyRegion::new(
-                    BufferTextureLayout::new(
-                        face as u64 * face_bytes,
-                        Some(IRRADIANCE_SIZE * 4 * 2),
-                        None,
-                    ),
-                    TextureCopyLocation::new(0, TextureOrigin::new(0, 0, face)),
-                    Extent3d::new_2d(IRRADIANCE_SIZE, IRRADIANCE_SIZE),
-                );
-                config = config.with_operation(TransferOperation::upload_texture(
-                    staging.clone(),
-                    self.irradiance_cubemap.clone(),
-                    vec![region],
-                ));
-            }
-        }
-
-        // Upload prefilter cubemap (all mip levels, 6 faces each)
-        if let Some(staging_buffers) = &self.prefilter_staging {
-            for (mip, (staging, bytes)) in staging_buffers.iter().enumerate() {
-                // Fill this mip's staging buffer through the graph first.
-                config = config.with_operation(TransferOperation::write_buffer(
-                    staging.clone(),
-                    0,
-                    bytes.clone(),
-                ));
-
-                let mip_size = (PREFILTER_SIZE >> mip).max(1);
-                let aligned_bytes_per_row = self.prefilter_aligned_bytes_per_row[mip];
-                let face_bytes = (aligned_bytes_per_row * mip_size) as u64;
-                for face in 0..6u32 {
-                    let region = BufferTextureCopyRegion::new(
-                        BufferTextureLayout::new(
-                            face as u64 * face_bytes,
-                            Some(aligned_bytes_per_row),
-                            None,
-                        ),
-                        TextureCopyLocation::new(mip as u32, TextureOrigin::new(0, 0, face)),
-                        Extent3d::new_2d(mip_size, mip_size),
-                    );
-                    config = config.with_operation(TransferOperation::upload_texture(
-                        staging.clone(),
-                        self.prefilter_cubemap.clone(),
-                        vec![region],
-                    ));
-                }
-            }
-        }
-
-        // Clear staging buffers after building the config
-        self.irradiance_staging = None;
-        self.prefilter_staging = None;
-
+        let ops = std::mem::take(&mut self.pending_ops);
         log::info!("IBL textures upload config created");
-        Some(config)
+        Some(TransferConfig::new().with_operations(ops))
     }
+}
+
+/// Parse a baked KTX2 blob and assert it has the expected dimension.
+fn parse_and_check(bytes: &[u8], dimension: TextureDimension, name: &str) -> CpuTexture {
+    let cpu = parse_ktx2(bytes)
+        .unwrap_or_else(|e| panic!("baked IBL asset {name} failed to parse: {e}"))
+        .with_name(name);
+    assert_eq!(cpu.dimension, dimension, "baked IBL asset {name}");
+    cpu
+}
+
+/// Create the GPU texture for a parsed [`CpuTexture`] and stage every
+/// (mip, layer) image through the frame graph.
+fn create_texture(
+    device: &Arc<GraphicsDevice>,
+    cpu: &CpuTexture,
+    ops: &mut Vec<TransferOperation>,
+) -> Arc<Texture> {
+    let usage = TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST;
+    let descriptor = match cpu.dimension {
+        TextureDimension::Cube => TextureDescriptor::new_cube(cpu.width, cpu.format, usage),
+        _ => TextureDescriptor::new_2d(cpu.width, cpu.height, cpu.format, usage),
+    }
+    .with_mip_levels(cpu.mip_level_count)
+    .with_label(cpu.name.as_deref().unwrap_or("ibl_texture"));
+    let texture = device
+        .create_texture(&descriptor)
+        .unwrap_or_else(|e| panic!("create IBL texture {:?}: {e}", cpu.name));
+    for mip in 0..cpu.mip_level_count {
+        for layer in 0..cpu.layer_count() {
+            ops.push(
+                TransferOperation::upload_texture_level(
+                    device,
+                    Arc::clone(&texture),
+                    mip,
+                    layer,
+                    &cpu.data[cpu.byte_range(mip, layer)],
+                )
+                .unwrap_or_else(|e| panic!("stage IBL upload {:?}: {e}", cpu.name)),
+            );
+        }
+    }
+    texture
 }

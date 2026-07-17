@@ -32,10 +32,9 @@ serde.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger.workspace = true
 redlilium-graphics = { path = "../graphics" }
-# For PBR IBL demo - HDR texture loading
-image = { version = "0.25", default-features = false, features = ["hdr", "png"] }
+# PNG decode for the textured-quad and compressed-texture demos.
+image = { version = "0.25", default-features = false, features = ["png"] }
 ureq = "2.10"
-half = { version = "2.4", features = ["bytemuck"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true

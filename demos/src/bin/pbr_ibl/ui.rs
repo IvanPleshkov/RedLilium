@@ -9,8 +9,10 @@ use crate::{GRID_SIZE, SPHERE_SPACING};
 pub struct PbrUiState {
     /// Base color RGB (0.0-1.0)
     pub base_color: [f32; 3],
-    /// Skybox MIP level (0-7)
+    /// Skybox MIP level (0..=skybox_max_mip)
     pub skybox_mip_level: f32,
+    /// Highest selectable skybox mip (sky cubemap mip count - 1).
+    pub skybox_max_mip: f32,
     /// Camera auto-rotation enabled
     pub auto_rotate: bool,
     /// Camera zoom level
@@ -38,6 +40,7 @@ impl Default for PbrUiState {
         Self {
             base_color: [0.9, 0.1, 0.1],
             skybox_mip_level: 0.0,
+            skybox_max_mip: 7.0,
             auto_rotate: true,
             camera_distance: 8.0,
             ui_visible: true,
@@ -106,6 +109,11 @@ impl PbrUi {
     pub fn set_shadow_mask_id(&mut self, id: Option<egui::TextureId>) {
         self.state.shadow_mask_id = id;
     }
+
+    /// Set the skybox mip slider range from the sky cubemap's mip count.
+    pub fn set_skybox_max_mip(&mut self, max_mip: f32) {
+        self.state.skybox_max_mip = max_mip;
+    }
 }
 
 impl EguiApp for PbrUi {
@@ -149,8 +157,11 @@ impl EguiApp for PbrUi {
                     ui.label("Skybox Blur:");
                     if ui
                         .add(
-                            egui::Slider::new(&mut self.state.skybox_mip_level, 0.0..=7.0)
-                                .step_by(0.5),
+                            egui::Slider::new(
+                                &mut self.state.skybox_mip_level,
+                                0.0..=self.state.skybox_max_mip,
+                            )
+                            .step_by(0.5),
                         )
                         .changed()
                     {

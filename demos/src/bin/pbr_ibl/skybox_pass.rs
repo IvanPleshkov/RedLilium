@@ -21,6 +21,8 @@ pub struct SkyboxPass {
     pub material_instance: Arc<MaterialInstance>,
     pub mesh: Arc<redlilium_graphics::Mesh>,
     pub mip_level: f32,
+    /// Highest selectable mip of the sky cubemap (mip count - 1).
+    pub max_mip: f32,
 
     /// Per-frame uniform ring (dynamic offset per draw).
     uniform_ring: RingBuffer,
@@ -83,7 +85,7 @@ impl SkyboxPass {
                         0,
                         std::mem::size_of::<SkyboxUniforms>() as u64,
                     )
-                    .with_texture(1, ibl.prefilter_cubemap.clone())
+                    .with_texture(1, ibl.sky_cubemap.clone())
                     .with_sampler(2, ibl.sampler.clone()),
             )
             .expect("create skybox binding group");
@@ -125,6 +127,7 @@ impl SkyboxPass {
             material_instance,
             mesh,
             mip_level: 0.0,
+            max_mip: ibl.sky_mip_levels.saturating_sub(1) as f32,
             uniform_ring,
             uniform_offset: 0,
             pending_uploads,

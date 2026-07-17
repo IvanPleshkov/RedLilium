@@ -2,14 +2,13 @@
 //!
 //! Demonstrates:
 //! - Forward PBR rendering with Image-Based Lighting (IBL)
-//! - HDR environment map converted to cubemap
-//! - Irradiance cubemap for diffuse IBL
-//! - Pre-filtered environment map for specular IBL
-//! - BRDF Look-Up Table for split-sum approximation
+//! - Baked IBL asset set (#137): sky cubemap, irradiance cubemap,
+//!   GGX-prefiltered environment map, and BRDF LUT, loaded from the
+//!   Zstd-supercompressed KTX2 files in `std-assets/textures/ibl/`
 //! - Orbit camera (no ECS)
 //! - Grid of PBR spheres with varying metallic/roughness
 //!
-//! Based on LearnOpenGL IBL tutorials:
+//! Shading follows the LearnOpenGL IBL tutorials:
 //! - https://learnopengl.com/PBR/IBL/Diffuse-irradiance
 //! - https://learnopengl.com/PBR/IBL/Specular-IBL
 
@@ -17,10 +16,8 @@ mod camera;
 mod demo;
 mod ecs_scene;
 mod gbuffer;
-mod ibl;
 mod ibl_textures;
 mod resolve_pass;
-mod resources;
 mod shadow_pass;
 mod skybox_pass;
 mod sphere_grid;
@@ -37,8 +34,6 @@ create_profiled_allocator!(GLOBAL_ALLOCATOR, 32);
 // Demo configuration constants
 pub const GRID_SIZE: usize = 5;
 pub const SPHERE_SPACING: f32 = 1.5;
-pub const IRRADIANCE_SIZE: u32 = 32;
-pub const PREFILTER_SIZE: u32 = 128;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
