@@ -23,7 +23,7 @@ mod staging;
 pub mod swapchain;
 mod timestamps;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -461,6 +461,36 @@ fn op_ok_on_coarse_transfer(op: &crate::graph::TransferOperation) -> bool {
         // at all, and already routed to the graphics queue by
         // `RenderGraph::requires_graphics_queue`. Never legal on a transfer queue.
         Op::GenerateMipmaps { .. } => false,
+    }
+}
+
+/// The GPU-side buffer accesses of a transfer op, as `(handle, is_write)`,
+/// for intra-pass hazard tracking (#139).
+///
+/// The staging-belt buffer behind `WriteBuffer` is deliberately absent: it is
+/// host-written before submit and only ever read by the GPU, so it cannot
+/// participate in an intra-pass hazard. `ReadbackBuffer` encodes no GPU work
+/// (drained on the CPU after the fence), and mip generation touches no
+/// buffers.
+fn transfer_op_buffer_accesses(
+    op: &crate::graph::TransferOperation,
+) -> [Option<(vk::Buffer, bool)>; 2] {
+    use crate::graph::TransferOperation as Op;
+    let vk_buffer = |b: &crate::resources::Buffer| match b.gpu_handle() {
+        GpuBuffer::Vulkan { buffer, .. } => Some(*buffer),
+        _ => None,
+    };
+    match op {
+        Op::BufferToBuffer { src, dst, .. } => [
+            vk_buffer(src).map(|b| (b, false)),
+            vk_buffer(dst).map(|b| (b, true)),
+        ],
+        Op::WriteBuffer { dst, .. } => [vk_buffer(dst).map(|b| (b, true)), None],
+        Op::BufferToTexture { src, .. } => [vk_buffer(src).map(|b| (b, false)), None],
+        Op::TextureToBuffer { dst, .. } => [vk_buffer(dst).map(|b| (b, true)), None],
+        Op::ReadbackBuffer { .. } | Op::TextureToTexture { .. } | Op::GenerateMipmaps { .. } => {
+            [None, None]
+        }
     }
 }
 
@@ -4227,7 +4257,55 @@ impl VulkanBackend {
             return Ok(());
         };
 
+        // Intra-pass buffer hazards (#139): pass-entry barriers are derived
+        // from the declared usage and ORDER THE PASS against other passes —
+        // they cannot order operations within it. A `WriteBuffer` followed by
+        // a copy reading the same buffer (the staged-upload pattern) is a RAW
+        // hazard with no barrier between the two commands. Track each
+        // buffer's last access as ops encode and emit a TRANSFER->TRANSFER
+        // buffer barrier before any op that conflicts (RAW/WAW/WAR). The
+        // barrier uses full transfer scopes, so chained hazards on one buffer
+        // stay covered regardless of the read/write history. Intra-pass
+        // texture write->read is a separate gap (it also needs a layout
+        // change mid-pass) and is not handled here.
+        let mut tracked: HashMap<BufferId, bool> = HashMap::new();
+        let mut hazard_barriers: Vec<vk::BufferMemoryBarrier2> = Vec::new();
         for operation in &config.operations {
+            hazard_barriers.clear();
+            for (buffer, is_write) in transfer_op_buffer_accesses(operation).into_iter().flatten() {
+                match tracked.entry(BufferId::from(buffer)) {
+                    std::collections::hash_map::Entry::Occupied(mut prev) => {
+                        if *prev.get() || is_write {
+                            hazard_barriers.push(
+                                vk::BufferMemoryBarrier2::default()
+                                    .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                                    .dst_access_mask(
+                                        vk::AccessFlags2::TRANSFER_READ
+                                            | vk::AccessFlags2::TRANSFER_WRITE,
+                                    )
+                                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                                    .buffer(buffer)
+                                    .offset(0)
+                                    .size(vk::WHOLE_SIZE),
+                            );
+                        }
+                        prev.insert(is_write);
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(is_write);
+                    }
+                }
+            }
+            if !hazard_barriers.is_empty() {
+                let dependency_info =
+                    vk::DependencyInfo::default().buffer_memory_barriers(&hazard_barriers);
+                unsafe {
+                    self.device.cmd_pipeline_barrier2(cmd, &dependency_info);
+                }
+            }
             self.encode_transfer_operation(cmd, operation)?;
         }
         Ok(())

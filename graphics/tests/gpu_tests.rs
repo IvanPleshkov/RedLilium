@@ -3126,6 +3126,133 @@ fn test_sample_uploaded_texture_same_graph(#[case] backend: Backend) {
     }
 }
 
+/// Chained staging inside ONE transfer pass (#139): `WriteBuffer` fills a
+/// staging buffer, `BufferToBuffer` copies it onward, `BufferToTexture` reads
+/// the copy — every op reads what the previous op in the same pass wrote.
+/// Pass-entry barriers come from the declared usage, but ordering WITHIN a
+/// pass needs intra-pass barriers; without them sync validation reports
+/// READ_AFTER_WRITE (the original `ibl_upload` repro on both dev GPUs).
+/// Verifies the bytes arrive intact and, on Vulkan, that the workload is
+/// validation-clean.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_transfer_pass_intra_pass_buffer_chain(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    // 64px rows: the tight 256-byte row pitch satisfies the multi-row copy
+    // alignment without padding.
+    const W: u32 = 64;
+    const H: u32 = 64;
+    let byte_len = (W * H * 4) as u64;
+
+    // Left half red, right half blue.
+    let mut pixels = Vec::with_capacity(byte_len as usize);
+    for _y in 0..H {
+        for x in 0..W {
+            if x < W / 2 {
+                pixels.extend_from_slice(&[255u8, 0, 0, 255]);
+            } else {
+                pixels.extend_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+    }
+
+    let staging = ctx.create_buffer(byte_len, BufferUsage::COPY_DST | BufferUsage::COPY_SRC);
+    let bounce = ctx.create_buffer(byte_len, BufferUsage::COPY_DST | BufferUsage::COPY_SRC);
+    let texture = ctx.create_texture_2d(
+        W,
+        H,
+        TextureFormat::Rgba8Unorm,
+        // TEXTURE_BINDING on top of the copy usages: the backend always
+        // creates a default view, which needs a view-compatible usage bit.
+        TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+    );
+
+    let mut graph = RenderGraph::new();
+    let mut pass = TransferPass::new("staged_chain".into());
+    pass.set_transfer_config(
+        TransferConfig::new()
+            .with_operation(TransferOperation::write_buffer(
+                staging.clone(),
+                0,
+                Arc::from(pixels.as_slice()),
+            ))
+            .with_operation(TransferOperation::copy_buffer_whole(
+                staging.clone(),
+                bounce.clone(),
+            ))
+            .with_operation(TransferOperation::upload_texture_whole(
+                bounce.clone(),
+                texture.clone(),
+            )),
+    );
+    graph.add_transfer_pass(pass);
+    ctx.execute_graph(graph);
+
+    // Read the texture back and verify the pattern survived the chain.
+    let readback_size = readback_buffer_size(W, H, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+    let mut g2 = RenderGraph::new();
+    let mut copy = TransferPass::new("staged_chain_readback".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(texture, readback.clone()),
+    ));
+    g2.add_transfer_pass(copy);
+    ctx.execute_graph(g2);
+
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let data = ctx.read_buffer(&readback, readback_size);
+    let left = get_pixel(&data, W, W / 4, H / 2);
+    let right = get_pixel(&data, W, 3 * W / 4, H / 2);
+    eprintln!("staged chain left {left:?} right {right:?} ({backend:?})");
+    assert!(
+        verify_pixel(
+            &data,
+            W,
+            W / 4,
+            H / 2,
+            ExpectedPixel::from_float(1.0, 0.0, 0.0, 1.0),
+            0
+        ),
+        "left half must arrive as the written red, got {left:?} ({backend:?})"
+    );
+    assert!(
+        verify_pixel(
+            &data,
+            W,
+            3 * W / 4,
+            H / 2,
+            ExpectedPixel::from_float(0.0, 0.0, 1.0, 1.0),
+            0
+        ),
+        "right half must arrive as the written blue, got {right:?} ({backend:?})"
+    );
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during the intra-pass \
+             buffer chain (#139: ops within one TransferPass need barriers between \
+             a write and a later read/write of the same buffer)"
+        );
+    }
+}
+
 /// Headless egui render: draw large text into an offscreen target through the
 /// full controller path (atlas delta upload + tessellated draw in one graph)
 /// and verify actual GLYPHS came out, on both the SDR and the HDR surface
