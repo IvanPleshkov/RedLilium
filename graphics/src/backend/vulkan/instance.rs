@@ -143,6 +143,14 @@ pub fn create_instance(
         log::info!("No Vulkan surface extensions available; headless mode (offscreen only)");
     }
 
+    // VK_EXT_swapchain_colorspace: without it the surface only ever reports
+    // SRGB_NONLINEAR, so an HDR float swapchain (Rgba16Float) cannot be paired
+    // with EXTENDED_SRGB_LINEAR_EXT and linear output gets sRGB-decoded by the
+    // display (too-dark picture). Enable whenever surfaces are in play.
+    if surface_support && has(ash::ext::swapchain_colorspace::NAME) {
+        extensions.push(ash::ext::swapchain_colorspace::NAME.as_ptr());
+    }
+
     // Enable VK_EXT_debug_utils whenever the loader offers it, independent of
     // validation (#123): it powers object naming and pass label regions for
     // RenderDoc, which injects the extension even with no validation layers.

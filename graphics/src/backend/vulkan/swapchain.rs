@@ -83,17 +83,23 @@ impl VulkanSwapchain {
             ));
         }
         let requested_format = convert_texture_format(config.format);
+        // Float formats are HDR: the app writes linear values with 1.0 = SDR
+        // white, which is the EXTENDED_SRGB_LINEAR_EXT contract (what wgpu
+        // configures on Metal). Pairing them with SRGB_NONLINEAR makes the
+        // display sRGB-decode linear data — a visibly too-dark picture.
+        // Unorm formats keep preferring the standard sRGB color space over
+        // e.g. Display-P3 variants on macOS.
+        let wants_linear_extended = matches!(
+            requested_format,
+            vk::Format::R16G16B16A16_SFLOAT | vk::Format::R32G32B32A32_SFLOAT
+        );
         let surface_format = formats
             .iter()
             .filter(|f| f.format == requested_format)
-            // Prefer the standard sRGB color space when several color spaces
-            // expose the same format (e.g. Display-P3 variants on macOS).
-            .min_by_key(|f| {
-                if f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR {
-                    0
-                } else {
-                    1
-                }
+            .min_by_key(|f| match f.color_space {
+                vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT if wants_linear_extended => 0,
+                vk::ColorSpaceKHR::SRGB_NONLINEAR => 1,
+                _ => 2,
             })
             .cloned()
             .ok_or_else(|| {
@@ -103,6 +109,17 @@ impl VulkanSwapchain {
                     formats.iter().map(|f| f.format).collect::<Vec<_>>()
                 ))
             })?;
+        if wants_linear_extended
+            && surface_format.color_space != vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT
+        {
+            log::warn!(
+                "HDR swapchain format {:?} paired with {:?} (EXTENDED_SRGB_LINEAR_EXT \
+                 unavailable — is VK_EXT_swapchain_colorspace enabled?); linear output \
+                 will be decoded by the display and render too dark",
+                surface_format.format,
+                surface_format.color_space
+            );
+        }
 
         // Choose present mode
         let present_modes = vulkan_backend.get_surface_present_modes(surface)?;
@@ -339,11 +356,13 @@ impl VulkanSwapchain {
         }
 
         log::info!(
-            "Created Vulkan swapchain: {}x{} with {} images, {} frames in flight",
+            "Created Vulkan swapchain: {}x{} with {} images, {} frames in flight, {:?} / {:?}",
             extent.width,
             extent.height,
             images.len(),
-            frames_in_flight
+            frames_in_flight,
+            surface_format.format,
+            surface_format.color_space
         );
 
         Ok(Self {
