@@ -34,6 +34,7 @@ mod asset_inspect;
 #[cfg(feature = "rendering")]
 mod asset_ref_field;
 pub mod components;
+pub mod deferred;
 #[cfg(feature = "rendering")]
 pub mod loaders;
 pub(crate) mod material_inspector;
@@ -53,9 +54,10 @@ pub use asset_drag::{AssetDragPayload, asset_drop_target};
 pub use asset_inspect::{NewAssetSpec, new_asset_spec};
 pub use asset_inspect::{inspect_asset_settings, reference_accepted_kind};
 pub use components::{
-    CameraOutput, CameraTarget, CameraTargetSpec, FORWARD_PIPELINE, MeshRenderer, OutputFormat,
-    PipelineTargets, Primitive, RenderPath, SizePolicy,
+    CameraOutput, CameraTarget, CameraTargetSpec, DEFERRED_PIPELINE, FORWARD_PIPELINE,
+    MeshRenderer, OutputFormat, PipelineTargets, Primitive, RenderPath, SizePolicy,
 };
+pub use deferred::DeferredPipeline;
 #[cfg(feature = "rendering")]
 pub use loaders::{
     MaterialData, MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource,

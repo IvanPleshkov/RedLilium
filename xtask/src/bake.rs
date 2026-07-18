@@ -91,6 +91,17 @@ const REGISTRY: &[ShaderSpec] = &[
     // Debug-draw lines/shapes — used by the editor's gizmos (debug_drawer), so it
     // must be baked or the default (Slang-off) editor build misses at runtime.
     vs_fs_spec("debug_draw", "shaders/standard/debug_draw.slang"),
+    // Standard deferred PBR/IBL path (#144) — the G-buffer shader behind the
+    // `pbr` shading model plus the pipeline's own fullscreen passes.
+    vs_fs_spec(
+        "std_deferred_gbuffer",
+        "std-assets/shaders/deferred_gbuffer.slang",
+    ),
+    vs_fs_spec(
+        "std_deferred_resolve",
+        "std-assets/shaders/deferred_resolve.slang",
+    ),
+    vs_fs_spec("std_skybox", "std-assets/shaders/skybox.slang"),
     // Demo shaders — baked so the demos render on the default Slang-off build too.
     vs_fs_spec("skybox", "demos/shaders/skybox.slang"),
     vs_fs_spec("compressed_quad", "demos/shaders/compressed_quad.slang"),

@@ -110,6 +110,7 @@ impl Default for PipelineRegistry {
             warned: Mutex::new(HashSet::new()),
         };
         registry.register(Arc::new(ForwardPipeline::default()));
+        registry.register(Arc::new(super::deferred::DeferredPipeline::default()));
         registry
     }
 }

@@ -129,10 +129,11 @@ pub struct DrawArgs {
     /// [`CameraUniforms`](shaders::CameraUniforms) (pushed by the pipeline,
     /// selected per draw via the external set's dynamic offset).
     pub camera_offset: u32,
-    /// Color format of the pass's render target (a pipeline-specialization
-    /// key). `None` for zero-color-attachment (depth-only) passes — which
-    /// require a [`depth_override`](Self::depth_override).
-    pub color_format: Option<TextureFormat>,
+    /// Color formats of the pass's render targets in attachment order (a
+    /// pipeline-specialization key): one for a regular pass, several for MRT
+    /// (a G-buffer, #144). Empty for zero-color-attachment (depth-only)
+    /// passes — which require a [`depth_override`](Self::depth_override).
+    pub color_formats: Vec<TextureFormat>,
     /// Depth format of the pass's depth attachment.
     pub depth_format: TextureFormat,
     /// Which slice of the scene this view draws.
@@ -155,7 +156,23 @@ impl DrawArgs {
     ) -> Self {
         Self {
             camera_offset,
-            color_format: Some(color_format),
+            color_formats: vec![color_format],
+            depth_format,
+            phase: RenderPhase::Opaque,
+            depth_override: None,
+        }
+    }
+
+    /// Arguments for an MRT color pass (a G-buffer, #144): every visible
+    /// primitive with its own material, writing all attachments in order.
+    pub fn mrt(
+        camera_offset: u32,
+        color_formats: Vec<TextureFormat>,
+        depth_format: TextureFormat,
+    ) -> Self {
+        Self {
+            camera_offset,
+            color_formats,
             depth_format,
             phase: RenderPhase::Opaque,
             depth_override: None,
@@ -173,7 +190,7 @@ impl DrawArgs {
     ) -> Self {
         Self {
             camera_offset,
-            color_format: None,
+            color_formats: Vec::new(),
             depth_format,
             phase,
             depth_override: Some((shader_guid, shader)),
@@ -263,22 +280,22 @@ impl SceneDrawer {
                 // when the forward path grows system axes (lighting modes),
                 // this is where it completes them via with_features +
                 // .system().
-                let pipeline = match (&args.depth_override, args.color_format) {
+                let pipeline = match (&args.depth_override, args.color_formats.is_empty()) {
                     (Some((guid, shader)), _) => pipelines.get_or_build_depth_only(
                         *guid,
                         shader,
                         mesh.layout(),
                         args.depth_format,
                     ),
-                    (None, Some(color_format)) => pipelines.get_or_build(
+                    (None, false) => pipelines.get_or_build(
                         instance.shader_guid,
                         &instance.shader,
                         &instance.variant,
                         mesh.layout(),
-                        color_format,
+                        &args.color_formats,
                         args.depth_format,
                     ),
-                    (None, None) => {
+                    (None, true) => {
                         // A zero-color pass without a depth override cannot
                         // draw materials (they all have fragment output).
                         log::debug!("scene drawer: color-less pass without depth override");

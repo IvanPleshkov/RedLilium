@@ -24,6 +24,10 @@
 /// default path for every camera without an explicit [`RenderPath`].
 pub const FORWARD_PIPELINE: &str = "forward";
 
+/// Stable registry name of the engine's built-in deferred PBR/IBL pipeline
+/// (#144) — select with `RenderPath::named(DEFERRED_PIPELINE)`.
+pub const DEFERRED_PIPELINE: &str = "deferred";
+
 /// Serializable choice of the render pipeline that produces this camera's
 /// frame — see the module docs. Attach next to a [`Camera`](crate::Camera);
 /// a camera without one renders with the [`FORWARD_PIPELINE`].

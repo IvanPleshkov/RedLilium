@@ -35,8 +35,10 @@ struct PipelineKey {
     shader: Guid,
     variant: VariantKey,
     layout: usize,
-    /// `None` for depth-only pipelines (zero color attachments, #129).
-    color: Option<TextureFormat>,
+    /// Color attachment formats in attachment order — one for a regular pass,
+    /// several for MRT (a G-buffer, #144), empty for depth-only pipelines
+    /// (zero color attachments, #129).
+    colors: Vec<TextureFormat>,
     depth: Option<TextureFormat>,
 }
 
@@ -67,7 +69,11 @@ impl PipelineCache {
     }
 
     /// Get (or build + cache) the pipeline specialized for this shader + mesh
-    /// vertex layout + target formats. `shader_guid` keys the cache; `shader` is
+    /// vertex layout + target formats. `colors` lists the pass's color
+    /// attachment formats in order (one for a regular pass, several for MRT —
+    /// a G-buffer, #144) and must not be empty (use
+    /// [`get_or_build_depth_only`](Self::get_or_build_depth_only) for
+    /// zero-color pipelines). `shader_guid` keys the cache; `shader` is
     /// the resident source compiled on a miss — and revalidated by pointer
     /// identity on a hit, so a hot-reloaded shader recompiles. If the recompile
     /// fails (broken source mid-edit), the last-good pipeline keeps serving.
@@ -77,18 +83,23 @@ impl PipelineCache {
         shader: &Arc<Shader>,
         variant: &VariantKey,
         layout: &Arc<VertexLayout>,
-        color: TextureFormat,
+        colors: &[TextureFormat],
         depth: TextureFormat,
     ) -> Result<Arc<Material>, GraphicsError> {
+        debug_assert!(
+            !colors.is_empty(),
+            "get_or_build needs at least one color format; \
+             use get_or_build_depth_only for zero-color pipelines"
+        );
         let key = PipelineKey {
             shader: shader_guid,
             variant: variant.clone(),
             layout: Arc::as_ptr(layout) as usize,
-            color: Some(color),
+            colors: colors.to_vec(),
             depth: Some(depth),
         };
         self.get_or_build_with(key, shader_guid, shader, |device, shader| {
-            Self::build(device, shader, variant, layout, color, depth)
+            Self::build(device, shader, variant, layout, colors, depth)
         })
     }
 
@@ -107,7 +118,7 @@ impl PipelineCache {
             shader: shader_guid,
             variant: VariantKey::default(),
             layout: Arc::as_ptr(layout) as usize,
-            color: None,
+            colors: Vec::new(),
             depth: Some(depth),
         };
         self.get_or_build_with(key, shader_guid, shader, |device, shader| {
@@ -166,26 +177,29 @@ impl PipelineCache {
         shader: &Arc<Shader>,
         variant: &VariantKey,
         layout: &Arc<VertexLayout>,
-        color: TextureFormat,
+        colors: &[TextureFormat],
         depth: TextureFormat,
     ) -> Result<Arc<Material>, GraphicsError> {
+        let mut descriptor = MaterialDescriptor::new()
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Vertex,
+                shader.source.clone(),
+                "vs_main",
+                vec![],
+            ))
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Fragment,
+                shader.source.clone(),
+                "fs_main",
+                vec![],
+            ));
+        for &color in colors {
+            descriptor = descriptor.with_color_format(color);
+        }
         device.create_material(
-            &MaterialDescriptor::new()
-                .with_shader(ShaderSource::slang(
-                    ShaderStage::Vertex,
-                    shader.source.clone(),
-                    "vs_main",
-                    vec![],
-                ))
-                .with_shader(ShaderSource::slang(
-                    ShaderStage::Fragment,
-                    shader.source.clone(),
-                    "fs_main",
-                    vec![],
-                ))
+            &descriptor
                 .with_variant(variant.clone())
                 .with_vertex_layout(Arc::clone(layout))
-                .with_color_format(color)
                 .with_depth_format(depth)
                 // Cull back faces (#39): closed meshes shade ~half as many
                 // fragments. Meshes use the engine's CCW-front convention

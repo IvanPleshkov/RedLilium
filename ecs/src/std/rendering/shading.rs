@@ -143,7 +143,7 @@ impl ShadingRegistry {
     /// Build the registry with the built-in engine shading models.
     pub fn with_builtins() -> Self {
         let mut models = HashMap::new();
-        for model in [Self::opaque(), Self::opaque_textured()] {
+        for model in [Self::opaque(), Self::opaque_textured(), Self::pbr()] {
             models.insert(model.id.clone(), model);
         }
         Self { models }
@@ -184,6 +184,32 @@ impl ShadingRegistry {
                 PropDef {
                     name: "base_texture".to_owned(),
                     default: PropValue::Texture(TextureSource::WHITE),
+                },
+            ],
+        }
+    }
+
+    /// The `pbr` model (#144): metallic-roughness PBR drawn by the deferred
+    /// path's G-buffer pass and lit by the resolve (IBL + key light). Backed
+    /// by `deferred_gbuffer.slang`, which writes the properties to MRT
+    /// instead of shading directly — so `pbr` materials render only through
+    /// the `"deferred"` pipeline (the forward path's single color target
+    /// cannot satisfy the shader's three outputs).
+    fn pbr() -> ShadingModel {
+        ShadingModel {
+            id: "pbr".to_owned(),
+            shader: Guid::stable("shaders/deferred_gbuffer.slang"),
+            schema: vec![
+                PropDef {
+                    name: "base_color".to_owned(),
+                    default: PropValue::Vec4([1.0, 1.0, 1.0, 1.0]),
+                },
+                PropDef {
+                    // x: metallic, y: roughness (z, w reserved — a full Vec4
+                    // slot keeps the packed uniform 16-byte aligned, matching
+                    // the shader's cbuffer layout).
+                    name: "pbr_params".to_owned(),
+                    default: PropValue::Vec4([0.0, 0.5, 0.0, 0.0]),
                 },
             ],
         }
