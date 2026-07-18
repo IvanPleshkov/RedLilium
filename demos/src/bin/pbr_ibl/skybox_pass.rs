@@ -39,8 +39,18 @@ impl SkyboxPass {
         device: &Arc<GraphicsDevice>,
         ibl: &IblTextures,
         surface_format: TextureFormat,
+        hdr_active: bool,
     ) -> Self {
         profile_scope!("SkyboxPass::create");
+
+        // Select the HDR variant exactly like the resolve pass: on a linear
+        // HDR surface the shader must NOT tonemap/gamma-encode its output.
+        let variant = redlilium_graphics::ShaderVariantSpace::parse(SKYBOX_SHADER_SLANG)
+            .expect("skybox.slang variant pragmas")
+            .select()
+            .system("HDR_OUTPUT", hdr_active)
+            .build()
+            .expect("skybox variant selection");
 
         // Create skybox material using Slang shader (no vertex layout needed for
         // fullscreen triangle). Binding 0 (uniforms) is a per-draw dynamic offset.
@@ -59,6 +69,7 @@ impl SkyboxPass {
                         "fs_main",
                         vec![],
                     ))
+                    .with_variant(variant)
                     .with_color_format(surface_format)
                     .with_dynamic_uniform(0, 0)
                     .with_label("skybox_material"),

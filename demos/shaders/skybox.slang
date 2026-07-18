@@ -1,5 +1,11 @@
 // PBR IBL Demo - Skybox Shader
-// Renders environment cubemap as background with tone mapping and gamma correction.
+// Renders environment cubemap as background.
+//
+// HDR_OUTPUT gates the output transform exactly like deferred_resolve.slang:
+// off = tonemap + gamma encode for an sRGB-ish SDR target, on = raw linear
+// color for a linear-HDR surface (1.0 = SDR white) — encoding there would be
+// decoded a second time by the display and wash the background out.
+//#pragma variant_system HDR_OUTPUT
 
 import color;
 
@@ -57,9 +63,13 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 float4 fs_main(VsOutput input) : SV_Target {
     float3 color = env_map.SampleLevel(env_sampler, input.view_dir, mip_level).rgb;
 
-    // Tonemap and gamma correct using library functions
-    float3 mapped = tonemap_reinhard(color);
-    float3 corrected = gamma_correct(mapped);
+#ifdef HDR_OUTPUT
+    // Linear-HDR surface: pass radiance through (same clamp as the resolve).
+    float3 result = clamp(color, float3(0.0), float3(10.0));
+#else
+    // SDR surface: tonemap and gamma correct using library functions
+    float3 result = gamma_correct(tonemap_reinhard(color));
+#endif
 
-    return float4(corrected, 1.0);
+    return float4(result, 1.0);
 }

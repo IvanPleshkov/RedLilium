@@ -127,7 +127,7 @@ impl AppHandler for PbrIblDemo {
         let ibl = IblTextures::create(device);
         let mut gbuffer = GBuffer::create(device, ctx.width(), ctx.height());
         let spheres = SphereGrid::create(device, ray_query);
-        let skybox = SkyboxPass::create(device, &ibl, ctx.surface_format());
+        let skybox = SkyboxPass::create(device, &ibl, ctx.surface_format(), self.hdr_active);
         let shadow = ShadowPass::create(
             device,
             &gbuffer,
