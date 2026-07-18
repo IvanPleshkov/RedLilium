@@ -74,9 +74,25 @@ the entities mean.
   (defaulted from node directions, then hand-editable). `params` carries
   surface semantics (road vs path, material class, …) interpreted by the
   generator.
-- **Intersection surface** — a node with N attached roads needs a patch
-  filling the area between the N cross-sections. Generated from the node +
-  its attachments; stub: planar fill.
+- **Junction** — N connector nodes closed into one boundary loop:
+  `Junction { connectors: Vec<Entity>, corner_tangent }`. Connectors are
+  *ordinary road nodes* (the same entity is a road's endpoint and the
+  junction's socket); their order is never stored — the loop re-derives by
+  angle around the centroid on every evaluation, so dragging connectors
+  cannot corrupt authored data. The boundary alternates cross-sections with
+  **corner curves**: cubic Béziers leaving a connector along its inward −Z
+  and arriving along the next connector's outward +Z — G1-continuous with
+  the roads' side edges (curbs flow road → corner → road, watertight per
+  P5). The three authoring cases are one continuum, distinguished only at
+  evaluation: a "convex quad" 4-way is the degenerate loop whose corner
+  curves collapse to points (the *generator* may special-case it into a
+  single patch); connectors that don't touch are the general case (corners
+  span the gaps); a 3-way T/Y is the same loop at N = 3 — as is any N.
+  Interior fill for previews/stubs: fan from the centroid; quality N-sided
+  patches are the generator's concern.
+  **Convention:** a connector's **+Z faces outward** (the road side); the
+  junction fills the −Z side. Roads should attach to a connector as their
+  `a` end (departing along +Z).
 - **Terrain control point** — entity with `Transform` +
   `TerrainControlPoint`. Terrain fills the regions *between* roads (faces of
   the planar road graph, projected to ground plane); control points bend the
@@ -252,4 +268,9 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
   cover everything described so far.
 - Chunk cell identity for terrain regions (roads/intersections have natural
   ids; regions appear/disappear as the graph changes).
+- Road attachment side: today a road always departs its `a` node along +Z
+  and arrives at its `b` node from −Z, so a junction connector must be the
+  road's `a` end (the junction owns −Z). Whether `RoadSegment` should grow
+  an explicit per-end side instead of this convention — decide when it
+  first bites.
 - Crate name.

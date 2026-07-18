@@ -22,6 +22,10 @@ pub struct ViewportOpCtx<'a> {
     pub world: &'a World,
     pub actions: &'a ActionQueue<World>,
     pub selection: &'a [Entity],
+    /// World-space ray under the position the menu was opened at (`None`
+    /// when the shell cannot unproject, e.g. no camera yet). Lets ops place
+    /// things at the click point ("add X here" stamps).
+    pub cursor_ray: Option<ViewportRay>,
     /// An op can set this to a registered tool's label; the shell activates
     /// that tool after the menu closes (e.g. "Add road" arms the connect
     /// tool instead of editing anything itself).

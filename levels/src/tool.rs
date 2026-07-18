@@ -195,8 +195,9 @@ fn node_under_cursor(world: &World, ray: &ViewportRay) -> Option<Entity> {
 }
 
 /// Intersection of the cursor ray with the ground plane (y = 0), when the
-/// ray points at it.
-fn ground_hit(ray: &ViewportRay) -> Option<Vec3> {
+/// ray points at it. Also serves the menu ops that place things at the
+/// click point.
+pub(crate) fn ground_hit(ray: &ViewportRay) -> Option<Vec3> {
     if ray.dir.y.abs() < 1e-6 {
         return None;
     }

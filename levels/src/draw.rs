@@ -5,6 +5,7 @@ use redlilium_debug_drawer::{DebugDrawer, DebugDrawerContext};
 use redlilium_ecs::{GlobalTransform, Res, System, SystemContext, SystemError};
 
 use crate::bezier::{self, Patch};
+use crate::junction::{self, Junction};
 use crate::{RoadNode, RoadSegment};
 
 /// Node cross-sections + heading arrows (amber).
@@ -41,6 +42,15 @@ impl System for DrawLevelGraph {
                         continue;
                     };
                     draw_node(&mut draw, &gt.0, node.half_width);
+                }
+            }
+
+            if let Ok(junctions) = world.read_all::<Junction>() {
+                for (_, j) in junctions.iter() {
+                    let Some(lp) = junction::junction_loop(world, j) else {
+                        continue;
+                    };
+                    draw_junction(&mut draw, &lp);
                 }
             }
 
@@ -93,6 +103,27 @@ fn draw_node(draw: &mut DebugDrawerContext<'_>, world: &Mat4, half_width: f32) {
     draw.draw_line(pt(&center), pt(&tip), NODE_COLOR);
     draw.draw_line(pt(&tip), pt(&(tip - fwd * 0.5 + side * 0.3)), NODE_COLOR);
     draw.draw_line(pt(&tip), pt(&(tip - fwd * 0.5 - side * 0.3)), NODE_COLOR);
+}
+
+/// Junction boundary: corner curves in the edge color (they continue the
+/// roads' curb lines), plus a faint fan from the centroid so the enclosed
+/// area reads as a surface.
+fn draw_junction(draw: &mut DebugDrawerContext<'_>, lp: &junction::JunctionLoop) {
+    let pt = |v: &redlilium_core::math::Vec3| [v.x, v.y, v.z];
+    const CORNER_STEPS: usize = 10;
+    for corner in &lp.corners {
+        let mut prev = junction::eval_corner(corner, 0.0);
+        for step in 1..=CORNER_STEPS {
+            let next = junction::eval_corner(corner, step as f32 / CORNER_STEPS as f32);
+            draw.draw_line(pt(&prev), pt(&next), EDGE_COLOR);
+            prev = next;
+        }
+        draw.draw_line(pt(&lp.centroid), pt(&corner.points[0]), GRID_COLOR);
+    }
+    for connector in &lp.connectors {
+        let mid = (connector.section[0] + connector.section[3]) * 0.5;
+        draw.draw_line(pt(&lp.centroid), pt(&mid), GRID_COLOR);
+    }
 }
 
 /// Patch wireframe: bright side edges (v = 0, 1), dim centerline and rungs.

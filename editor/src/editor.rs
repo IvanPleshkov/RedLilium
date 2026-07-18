@@ -605,6 +605,21 @@ impl Editor {
 
         let inv = 1.0 / pixels_per_point;
         let pos = egui::pos2(pos_phys[0] * inv, pos_phys[1] * inv);
+        // World ray under the menu anchor, for "add X here" ops. The menu
+        // position is window-space physical pixels; the camera unprojects
+        // scene-image coordinates.
+        let cursor_ray = self.scene_view_rect_phys.and_then(|[rx, ry, rw, rh]| {
+            let local = (pos_phys[0] - rx, pos_phys[1] - ry);
+            let inside = local.0 >= 0.0 && local.1 >= 0.0 && local.0 < rw && local.1 < rh;
+            inside
+                .then(|| crate::gizmo_system::gizmo_camera(world, (rw, rh)))
+                .flatten()
+                .and_then(|cam| cam.ray_from_screen(local))
+                .map(|r| redlilium_ecs::ui::ViewportRay {
+                    origin: r.origin,
+                    dir: r.dir,
+                })
+        });
         let mut close = false;
         let mut request_tool = None;
         let mut exit_tool = false;
@@ -635,6 +650,7 @@ impl Editor {
                             world,
                             actions: &actions,
                             selection: &selection,
+                            cursor_ray,
                             request_tool: None,
                         };
                         let enabled = op.is_enabled(&ctx);

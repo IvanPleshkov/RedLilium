@@ -595,7 +595,7 @@ pub fn spawn_levels_playground(world: &mut World) {
     // A lone cross-section: what a node looks like before it is connected.
     node(world, -8.0, 6.0, -0.5);
 
-    for (a, b) in [(n1, n2), (n2, n3), (n3, n4)] {
+    let road = |world: &mut World, a, b| {
         let road = world.spawn();
         world
             .insert(
@@ -607,7 +607,66 @@ pub fn spawn_levels_playground(world: &mut World) {
                 },
             )
             .unwrap();
-    }
+    };
+    road(world, n1, n2);
+    road(world, n2, n3);
+    road(world, n3, n4);
+
+    // Junction examples (docs/DESIGN_PROCEDURAL_LEVELS.md): connectors are
+    // ordinary nodes with +Z outward; the loop re-derives on every edit.
+    use redlilium_levels::Junction;
+    use redlilium_levels::junction::stamp_connector_transform;
+    let connector = |world: &mut World, transform: Transform| {
+        let e = world.spawn();
+        world.insert(e, transform).unwrap();
+        world
+            .insert(e, GlobalTransform(transform.to_matrix()))
+            .unwrap();
+        world
+            .insert(e, redlilium_levels::RoadNode::default())
+            .unwrap();
+        e
+    };
+
+    // A 4-way cross with two exit roads.
+    let cross_center = Vec3::new(34.0, 0.0, 10.0);
+    let cross: Vec<_> = (0..4)
+        .map(|i| {
+            let yaw = i as f32 * std::f32::consts::FRAC_PI_2;
+            connector(world, stamp_connector_transform(cross_center, yaw, 8.0))
+        })
+        .collect();
+    let j = world.spawn();
+    world
+        .insert(
+            j,
+            Junction {
+                connectors: cross.clone(),
+                ..Junction::default()
+            },
+        )
+        .unwrap();
+    let exit_north = node(world, 34.0, 30.0, 0.0);
+    let exit_east = node(world, 54.0, 10.0, std::f32::consts::FRAC_PI_2);
+    road(world, cross[0], exit_north);
+    road(world, cross[1], exit_east);
+
+    // A 3-way (Y) junction: the same model at N = 3, no exits.
+    let y_center = Vec3::new(-16.0, 0.0, 22.0);
+    let y: Vec<_> = [0.0f32, 2.094, -2.094]
+        .into_iter()
+        .map(|yaw| connector(world, stamp_connector_transform(y_center, yaw, 6.0)))
+        .collect();
+    let j = world.spawn();
+    world
+        .insert(
+            j,
+            Junction {
+                connectors: y,
+                ..Junction::default()
+            },
+        )
+        .unwrap();
 }
 
 fn spawn_box(

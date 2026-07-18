@@ -13,9 +13,11 @@
 
 pub mod bezier;
 mod draw;
+pub mod junction;
 mod tool;
 
 pub use draw::DrawLevelGraph;
+pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
 use redlilium_ecs::{Component, Entity, Update, World};
@@ -77,6 +79,7 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
     fn register_types(&self, world: &mut World) {
         world.register_inspector_default::<RoadNode>();
         world.register_inspector_default::<RoadSegment>();
+        world.register_inspector_default::<Junction>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
@@ -90,6 +93,39 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
             "Add road",
             |_ctx| true,
             |ctx| ctx.request_tool = Some(CONNECT_TOOL.to_owned()),
+        );
+        // "Create junction": close the selected road nodes into one
+        // junction loop (order irrelevant — derived by angle).
+        view.ops.add(
+            "Create junction",
+            |ctx| {
+                ctx.selection
+                    .iter()
+                    .filter(|&&e| ctx.world.get::<RoadNode>(e).is_some())
+                    .count()
+                    >= 3
+            },
+            |ctx| {
+                let connectors: Vec<Entity> = ctx
+                    .selection
+                    .iter()
+                    .copied()
+                    .filter(|&e| ctx.world.get::<RoadNode>(e).is_some())
+                    .collect();
+                ctx.actions
+                    .push(Box::new(CreateJunctionAction::new(connectors)));
+            },
+        );
+        // "Add 4-way junction": stamp a cross template at the click point;
+        // drag the connectors into shape, attach roads with the connect tool.
+        view.ops.add(
+            "Add 4-way junction",
+            |ctx| ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some(),
+            |ctx| {
+                if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
+                    ctx.actions.push(Box::new(StampJunctionAction::new(point)));
+                }
+            },
         );
     }
 }
