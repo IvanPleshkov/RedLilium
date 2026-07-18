@@ -3253,6 +3253,73 @@ fn test_transfer_pass_intra_pass_buffer_chain(#[case] backend: Backend) {
     }
 }
 
+/// Ambiguous WAW graph through the SCHEDULER (#141): two transfer passes
+/// write the same buffer with no explicit edge, which Strict compilation
+/// rejects. The scheduler used to drop the whole graph silently (empty frame,
+/// one log line); it must instead fall back to addition-order resolution and
+/// still execute. The readback proves execution happened AND that addition
+/// order won (the second writer's bytes land).
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_ambiguous_waw_graph_falls_back_and_executes(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    const LEN: usize = 16;
+    let buffer = ctx.create_buffer(LEN as u64, BufferUsage::COPY_DST | BufferUsage::COPY_SRC);
+
+    let mut graph = RenderGraph::new();
+    for value in [0x11u8, 0x22] {
+        let mut pass = TransferPass::new(format!("writer_{value:02x}"));
+        pass.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::write_buffer(buffer.clone(), 0, Arc::from(&[value; LEN][..])),
+        ));
+        graph.add_transfer_pass(pass);
+    }
+    ctx.execute_graph(graph);
+
+    // Copy into a mappable buffer and read it back.
+    let readback = ctx.create_readback_buffer(LEN as u64);
+    let mut g2 = RenderGraph::new();
+    let mut copy = TransferPass::new("waw_readback".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::copy_buffer_whole(buffer, readback.clone()),
+    ));
+    g2.add_transfer_pass(copy);
+    ctx.execute_graph(g2);
+
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let data = ctx.read_buffer(&readback, LEN as u64);
+    assert_eq!(
+        data,
+        vec![0x22u8; LEN],
+        "the graph must execute via addition-order fallback, with the \
+         second writer winning ({backend:?})"
+    );
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during the ambiguous \
+             WAW fallback workload"
+        );
+    }
+}
+
 /// Headless egui render: draw large text into an offscreen target through the
 /// full controller path (atlas delta upload + tessellated draw in one graph)
 /// and verify actual GLYPHS came out, on both the SDR and the HDR surface

@@ -143,6 +143,11 @@ pub enum GraphError {
     AmbiguousOrder {
         pass_a: PassHandle,
         pass_b: PassHandle,
+        /// Pass names (#141) — filled in by [`compile_into`], since the
+        /// conflict detector only sees resource usages. Empty when the error
+        /// comes straight out of `infer_resource_edges`.
+        name_a: String,
+        name_b: String,
     },
 }
 
@@ -153,12 +158,17 @@ impl std::fmt::Display for GraphError {
             Self::InvalidPassHandle(handle) => {
                 write!(f, "invalid pass handle: {:?}", handle)
             }
-            Self::AmbiguousOrder { pass_a, pass_b } => {
+            Self::AmbiguousOrder {
+                pass_a,
+                pass_b,
+                name_a,
+                name_b,
+            } => {
                 write!(
                     f,
-                    "ambiguous ordering between passes {:?} and {:?}: \
-                     both write the same resource without explicit dependency",
-                    pass_a, pass_b
+                    "ambiguous ordering between pass '{name_a}' ({pass_a:?}) and pass \
+                     '{name_b}' ({pass_b:?}): both write the same resource without an \
+                     explicit dependency (RenderGraph::add_edge)"
                 )
             }
         }
@@ -212,11 +222,21 @@ pub(crate) fn compile_into(
         usages = passes.iter().map(|p| p.infer_resource_usage()).collect();
     }
 
-    // Step 2: Auto-generate dependency edges from resource access patterns
+    // Step 2: Auto-generate dependency edges from resource access patterns.
+    // An ambiguity error gets the pass names attached here (#141) — the
+    // detector below works on usages alone and cannot name the passes.
     let auto_edges;
     {
         profile_scope!("infer_resource_edges");
-        auto_edges = infer_resource_edges(&usages, edges, mode)?;
+        auto_edges = infer_resource_edges(&usages, edges, mode).map_err(|e| match e {
+            GraphError::AmbiguousOrder { pass_a, pass_b, .. } => GraphError::AmbiguousOrder {
+                name_a: passes[pass_a.index()].name().to_string(),
+                name_b: passes[pass_b.index()].name().to_string(),
+                pass_a,
+                pass_b,
+            },
+            other => other,
+        })?;
     }
 
     // Step 3: Merge explicit + auto edges (deduplicated)
@@ -435,6 +455,8 @@ fn infer_resource_edges(
                         return Err(GraphError::AmbiguousOrder {
                             pass_a: a,
                             pass_b: b,
+                            name_a: String::new(),
+                            name_b: String::new(),
                         });
                     }
                 }
@@ -765,6 +787,47 @@ mod tests {
 
         let result = infer_resource_edges(&usages, &[], RenderGraphCompilationMode::Strict);
         assert!(matches!(result, Err(GraphError::AmbiguousOrder { .. })));
+    }
+
+    #[test]
+    fn test_strict_ambiguous_error_names_passes() {
+        // Full-graph compile attaches pass NAMES to the ambiguity error
+        // (#141) — handle indices alone are useless in a frame log.
+        use std::sync::Arc;
+
+        use crate::graph::{RenderGraph, TransferConfig, TransferOperation, TransferPass};
+        use crate::instance::GraphicsInstance;
+        use crate::types::{BufferDescriptor, BufferUsage};
+
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(16, BufferUsage::COPY_DST))
+            .unwrap();
+
+        let mut graph = RenderGraph::new();
+        for name in ["first_writer", "second_writer"] {
+            let mut pass = TransferPass::new(name.into());
+            pass.set_transfer_config(TransferConfig::new().with_operation(
+                TransferOperation::write_buffer(buffer.clone(), 0, Arc::from(&[0u8; 16][..])),
+            ));
+            graph.add_transfer_pass(pass);
+        }
+
+        let err = match graph.compile(RenderGraphCompilationMode::Strict) {
+            Err(e) => e,
+            Ok(_) => panic!("ambiguous WAW graph must fail Strict compilation"),
+        };
+        let GraphError::AmbiguousOrder { name_a, name_b, .. } = &err else {
+            panic!("expected AmbiguousOrder, got {err:?}");
+        };
+        assert_eq!(name_a, "first_writer");
+        assert_eq!(name_b, "second_writer");
+        let message = err.to_string();
+        assert!(
+            message.contains("first_writer") && message.contains("second_writer"),
+            "Display must name both passes: {message}"
+        );
     }
 
     #[test]

@@ -330,21 +330,42 @@ impl FrameSchedule {
         // derivation (empty if compilation fails — no GPU work, no edges).
         let mut usage = GraphUsage::default();
 
-        match graph.compile(RenderGraphCompilationMode::Strict) {
-            Ok(_) => {
-                profile_scope!("execute_graph");
-                let compiled = graph.compiled().unwrap();
-                usage = GraphUsage::from_compiled(compiled);
-                let backend = self.device.instance().backend();
-                if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
-                    log::error!("Failed to execute frame graph: {e}");
-                    fence = Fence::new_signaled();
+        // Strict compilation surfaces ambiguous WAW pairs (two writers, no
+        // explicit edge, no derivable order). Dropping the graph over that
+        // renders NOTHING with one log line to explain it — brutal to debug
+        // (#141). Instead fall back to Automatic resolution (addition order,
+        // which is what the graph author almost always meant) and say so
+        // loudly with pass names. The ERROR repeats every submit on purpose:
+        // ambiguity is a graph-construction bug to fix with an explicit
+        // edge, not a supported steady state.
+        let compiled_ok = match graph.compile(RenderGraphCompilationMode::Strict) {
+            Ok(_) => true,
+            Err(e @ crate::compiler::GraphError::AmbiguousOrder { .. }) => {
+                log::error!("frame graph: {e}; falling back to addition-order resolution (#141)");
+                match graph.compile(RenderGraphCompilationMode::Automatic) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        log::error!("Failed to compile frame graph: {e}");
+                        false
+                    }
                 }
             }
             Err(e) => {
                 log::error!("Failed to compile frame graph: {e}");
+                false
+            }
+        };
+        if compiled_ok {
+            profile_scope!("execute_graph");
+            let compiled = graph.compiled().unwrap();
+            usage = GraphUsage::from_compiled(compiled);
+            let backend = self.device.instance().backend();
+            if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
+                log::error!("Failed to execute frame graph: {e}");
                 fence = Fence::new_signaled();
             }
+        } else {
+            fence = Fence::new_signaled();
         }
 
         // Derive dependency edges against every earlier submit of this frame
