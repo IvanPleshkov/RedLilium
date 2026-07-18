@@ -91,10 +91,14 @@ impl ViewportTool for ConnectRoadsTool {
             match (self.anchor, hovered, edge) {
                 // First click on a node: anchor there.
                 (None, Some(node), _) => self.anchor = Some(node),
-                // Click a second node: connect, chain from it.
+                // Click a second node: connect, chain from it. A socket
+                // target is met from its front (+Z) side — its −Z belongs
+                // to the junction fill / future building.
                 (Some(anchor), Some(node), _) => {
                     if node != anchor {
-                        ctx.actions.push(Box::new(AddRoadAction::new(anchor, node)));
+                        let from_front = is_socket(ctx.world, node);
+                        ctx.actions
+                            .push(Box::new(AddRoadAction::new(anchor, node, from_front)));
                         self.anchor = Some(node);
                     }
                 }
@@ -222,7 +226,9 @@ impl ConnectRoadsTool {
             let b = Vec3::new(b_mat[(0, 3)], b_mat[(1, 3)], b_mat[(2, 3)]);
             ((b - a).norm() / 3.0).max(0.1)
         };
-        let patch = bezier::patch_from_nodes(&a_mat, a_half, chord, &b_mat, b_half, chord);
+        let from_front = hovered.is_some_and(|node| is_socket(ctx.world, node));
+        let patch =
+            bezier::patch_from_nodes(&a_mat, a_half, chord, &b_mat, b_half, chord, from_front);
         draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);
     }
 }
@@ -251,6 +257,23 @@ fn road_touches(world: &World, road: Entity, node: Option<Entity>) -> bool {
     world
         .get::<RoadSegment>(road)
         .is_some_and(|seg| seg.a == node || seg.b == node)
+}
+
+/// Whether `node` is a socket — a junction connector or an attachment's
+/// outer node. Sockets keep +Z toward the road network, so a road arriving
+/// AT one must meet it from the front (`RoadSegment::b_from_front`).
+fn is_socket(world: &World, node: Entity) -> bool {
+    if let Ok(junctions) = world.read_all::<crate::Junction>()
+        && junctions.iter().any(|(_, j)| j.connectors.contains(&node))
+    {
+        return true;
+    }
+    if let Ok(attachments) = world.read_all::<EdgeAttachment>()
+        && attachments.iter().any(|(_, a)| a.node == node)
+    {
+        return true;
+    }
+    false
 }
 
 /// A node's world matrix + half width, when it is a live road node.
@@ -344,12 +367,18 @@ fn node_transform(anchor: Option<Entity>, point: Vec3, world: &World) -> Transfo
 pub struct AddRoadAction {
     a: Entity,
     b: Entity,
+    b_from_front: bool,
     road: Option<Entity>,
 }
 
 impl AddRoadAction {
-    pub fn new(a: Entity, b: Entity) -> Self {
-        Self { a, b, road: None }
+    pub fn new(a: Entity, b: Entity, b_from_front: bool) -> Self {
+        Self {
+            a,
+            b,
+            b_from_front,
+            road: None,
+        }
     }
 }
 
@@ -367,6 +396,7 @@ impl EditAction<World> for AddRoadAction {
                 RoadSegment {
                     a: self.a,
                     b: self.b,
+                    b_from_front: self.b_from_front,
                     ..RoadSegment::default()
                 },
             )
@@ -599,7 +629,7 @@ mod tests {
         let a = make_node(&mut world);
         let b = make_node(&mut world);
 
-        let mut action = AddRoadAction::new(a, b);
+        let mut action = AddRoadAction::new(a, b, false);
         action.apply(&mut world).unwrap();
         let roads = world.read_all::<RoadSegment>().unwrap().iter().count();
         assert_eq!(roads, 1);

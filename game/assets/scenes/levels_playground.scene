@@ -6,13 +6,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "RoadNode",
-                    schema_version: 1,
-                    data: Map([
-                        ("half_width", F32(3.0)),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -34,13 +27,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 1,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -48,6 +34,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 1,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -70,13 +63,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 2,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -84,6 +70,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 2,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -106,13 +99,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 3,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -120,6 +106,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 3,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -142,13 +135,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 4,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -156,6 +142,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 4,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -176,6 +169,13 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(3.0)),
                     ]),
                 ),
             ],
@@ -199,6 +199,7 @@
                         )),
                         ("tangent_a", F32(0.0)),
                         ("tangent_b", F32(0.0)),
+                        ("b_from_front", Bool(false)),
                     ]),
                 ),
             ],
@@ -222,6 +223,7 @@
                         )),
                         ("tangent_a", F32(0.0)),
                         ("tangent_b", F32(0.0)),
+                        ("b_from_front", Bool(false)),
                     ]),
                 ),
             ],
@@ -245,6 +247,7 @@
                         )),
                         ("tangent_a", F32(0.0)),
                         ("tangent_b", F32(0.0)),
+                        ("b_from_front", Bool(false)),
                     ]),
                 ),
             ],
@@ -254,13 +257,6 @@
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
-                (
-                    type_name: "RoadNode",
-                    schema_version: 1,
-                    data: Map([
-                        ("half_width", F32(3.0)),
-                    ]),
-                ),
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -281,6 +277,13 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(3.0)),
                     ]),
                 ),
             ],
@@ -317,13 +320,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "RoadNode",
-                    schema_version: 1,
-                    data: Map([
-                        ("half_width", F32(3.0)),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -345,13 +341,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 11,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -359,6 +348,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 11,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -381,13 +377,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 12,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -395,6 +384,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 12,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -417,13 +413,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 13,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -431,6 +420,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 13,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -451,6 +447,13 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(3.0)),
                     ]),
                 ),
             ],
@@ -493,13 +496,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "RoadNode",
-                    schema_version: 1,
-                    data: Map([
-                        ("half_width", F32(3.0)),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -521,13 +517,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 16,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -535,6 +524,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 16,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -555,6 +551,13 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(3.0)),
                     ]),
                 ),
             ],
@@ -578,6 +581,7 @@
                         )),
                         ("tangent_a", F32(0.0)),
                         ("tangent_b", F32(0.0)),
+                        ("b_from_front", Bool(false)),
                     ]),
                 ),
             ],
@@ -601,6 +605,7 @@
                         )),
                         ("tangent_a", F32(0.0)),
                         ("tangent_b", F32(0.0)),
+                        ("b_from_front", Bool(false)),
                     ]),
                 ),
             ],
@@ -610,13 +615,6 @@
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
-                (
-                    type_name: "RoadNode",
-                    schema_version: 1,
-                    data: Map([
-                        ("half_width", F32(3.0)),
-                    ]),
-                ),
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -639,13 +637,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 20,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -653,6 +644,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 20,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -675,13 +673,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 21,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "RoadNode",
                     schema_version: 1,
@@ -689,6 +680,13 @@
                         ("half_width", F32(3.0)),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 21,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -709,6 +707,13 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(3.0)),
                     ]),
                 ),
             ],
@@ -745,30 +750,30 @@
     resources: [],
     metadata: (
         engine_fingerprint: "",
-        timestamp: 1784390955,
+        timestamp: 1784392325,
         component_schemas: {
-            "RenderPath": "a423c0d36d1e6289",
-            "EdgeAttachment": "76f1bea551ff8611",
-            "RoadSegment": "d3eaffd8c1506296",
-            "RoadNode": "baff4354f0b378f3",
-            "PointLight": "c2de590ad3761220",
-            "SpotLight": "00945c87ce2de8db",
             "DirectionalLight": "12b906e5389ce958",
-            "Camera": "ad5fbce407082262",
+            "Collider3D": "a39247f1249750e7",
             "Junction": "e7bd6fa35d204f69",
-            "FollowCamera": "21d1db18d14cff54",
-            "Parent": "a91799e57333f547",
-            "Visibility": "c1bac1b299fc1b84",
+            "Camera": "ad5fbce407082262",
             "Children": "2bb9642f7f8700bb",
+            "RenderPath": "a423c0d36d1e6289",
+            "RoadSegment": "0b419cbd0c745715",
+            "Visibility": "c1bac1b299fc1b84",
+            "FollowCamera": "21d1db18d14cff54",
+            "Name": "e8b72b8ee639d17d",
+            "FreeFlyCamera": "5f11e33f3f164d87",
             "CameraOutput": "ac6c44bbf8aba2c0",
+            "EditorOnly": "c680d604bee70f02",
+            "SpotLight": "00945c87ce2de8db",
+            "RoadNode": "baff4354f0b378f3",
             "Transform": "8438ab3d4ed5ea92",
+            "Parent": "a91799e57333f547",
+            "PointLight": "c2de590ad3761220",
+            "RigidBody3D": "4c303fe7f34110a5",
+            "EdgeAttachment": "76f1bea551ff8611",
             "CarController": "fc41e6ec35f9fc4f",
             "CarSpawn": "c680d604bee70f02",
-            "FreeFlyCamera": "5f11e33f3f164d87",
-            "Name": "e8b72b8ee639d17d",
-            "EditorOnly": "c680d604bee70f02",
-            "RigidBody3D": "4c303fe7f34110a5",
-            "Collider3D": "a39247f1249750e7",
         },
     ),
 )

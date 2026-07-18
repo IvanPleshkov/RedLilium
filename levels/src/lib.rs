@@ -63,6 +63,12 @@ pub struct RoadSegment {
     pub tangent_a: f32,
     /// Tangent length at `b`, meters — same rules as `tangent_a`.
     pub tangent_b: f32,
+    /// The road meets `b` on its **+Z (front) side** instead of the default
+    /// −Z. Set when `b` is a socket (junction connector, attachment outer
+    /// node): sockets keep +Z toward the road network, so a road arriving
+    /// *at* one must approach from the front — and a road between two
+    /// sockets departs `a` along +Z and enters `b` from the front.
+    pub b_from_front: bool,
 }
 
 impl Default for RoadSegment {
@@ -72,6 +78,7 @@ impl Default for RoadSegment {
             b: Entity::DANGLING,
             tangent_a: 0.0, // auto
             tangent_b: 0.0, // auto
+            b_from_front: false,
         }
     }
 }
@@ -131,6 +138,9 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
             |ctx| {
                 if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
                     ctx.actions.push(Box::new(StampJunctionAction::new(point)));
+                    // Straight into wiring: stamp, then click a connector
+                    // and chain roads out of it.
+                    ctx.request_tool = Some(CONNECT_TOOL.to_owned());
                 }
             },
         );

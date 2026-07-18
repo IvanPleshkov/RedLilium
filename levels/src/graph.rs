@@ -103,6 +103,7 @@ pub fn road_patch(world: &World, road: Entity) -> Option<Patch> {
         &b_gt.0,
         b_node.half_width,
         tangent_b,
+        seg.b_from_front,
     ))
 }
 
@@ -193,7 +194,7 @@ mod tests {
                     a,
                     b,
                     tangent_a: 7.5,
-                    tangent_b: 0.0,
+                    ..RoadSegment::default()
                 },
             )
             .unwrap();

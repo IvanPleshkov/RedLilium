@@ -66,6 +66,17 @@ the entities mean.
   segment runs along a local axis, centered at the entity origin). A node is
   where roads attach: for each attached road, the node contributes **4 patch
   control points distributed uniformly along its segment**.
+  **Cross-sections stay straight by design** (decided 2026-07-18): the
+  authoring patch is a *reference surface*, not the final one. Crown,
+  ditches, curbs — profile shape — is the mesh generator's responsibility,
+  driven by semantic params (road class, profile id), with cross-seam
+  profile continuity part of the generator's stitching metadata. Keeping
+  the reference rows straight is what keeps `∂P/∂v`, edge picking, and
+  seam math trivial; what the graph *does* express is width (it affects
+  topology: landing intervals, junction loops) and bank/pitch via the
+  node's rotation. Per-node profile geometry would also break network
+  uniformity — the procedural win is that changing a class's profile in
+  the generator updates the whole map.
 - **Road** — connects two nodes. Entity with
   `RoadSegment { start: Entity, end: Entity, control: [Vec3; 8], params }`.
   The road surface is a **bicubic Bézier patch (4×4 = 16 control points)**:
@@ -277,9 +288,11 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
   cover everything described so far.
 - Chunk cell identity for terrain regions (roads/intersections have natural
   ids; regions appear/disappear as the graph changes).
-- Road attachment side: today a road always departs its `a` node along +Z
-  and arrives at its `b` node from −Z, so a junction connector must be the
-  road's `a` end (the junction owns −Z). Whether `RoadSegment` should grow
-  an explicit per-end side instead of this convention — decide when it
-  first bites.
+- ~~Road attachment side~~ — **resolved** (2026-07-18): `RoadSegment` grew
+  `b_from_front` — the road meets `b` on its +Z side instead of the default
+  −Z. The connect tool sets it automatically when the clicked target is a
+  socket (junction connector / attachment outer node), which also makes
+  socket↔socket roads representable: depart `a` along +Z, enter `b` from
+  the front. The `a` end needs no flag — an anchor socket departs along
+  its +Z by construction.
 - Crate name.

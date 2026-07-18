@@ -32,6 +32,8 @@ pub fn heading(world: &Mat4) -> Vec3 {
 /// would cross the patch over itself (a node rotated ~180° should widen the
 /// road's twist, not bowtie it). Headings are taken as-is: hairpins where a
 /// node faces "back at" its partner are legitimate authoring.
+/// `b_from_front`: the patch meets `b` on its +Z side instead of the
+/// default −Z — used when `b` is a socket whose +Z faces the road network.
 pub fn patch_from_nodes(
     a_world: &Mat4,
     a_half_width: f32,
@@ -39,6 +41,7 @@ pub fn patch_from_nodes(
     b_world: &Mat4,
     b_half_width: f32,
     tangent_b: f32,
+    b_from_front: bool,
 ) -> Patch {
     let row0 = cross_section(a_world, a_half_width);
     let mut row3 = cross_section(b_world, b_half_width);
@@ -51,8 +54,9 @@ pub fn patch_from_nodes(
 
     let fwd_a = heading(a_world);
     let fwd_b = heading(b_world);
+    let b_sign = if b_from_front { 1.0 } else { -1.0 };
     let row1 = row0.map(|p| p + fwd_a * tangent_a);
-    let row2 = row3.map(|p| p - fwd_b * tangent_b);
+    let row2 = row3.map(|p| p + fwd_b * (b_sign * tangent_b));
     [row0, row1, row2, row3]
 }
 
@@ -125,6 +129,7 @@ mod tests {
             &translation(0.0, 0.0, 10.0),
             3.0,
             4.0,
+            false,
         );
         assert!((eval(&patch, 0.0, 0.0) - patch[0][0]).norm() < 1e-5);
         assert!((eval(&patch, 0.0, 1.0) - patch[0][3]).norm() < 1e-5);
@@ -141,6 +146,7 @@ mod tests {
             &translation(0.0, 0.0, 12.0),
             3.0,
             4.0,
+            false,
         );
         let mid = eval(&patch, 0.5, 0.5);
         assert!(mid.y.abs() < 1e-5);
@@ -161,6 +167,7 @@ mod tests {
                 * Mat4::from_axis_angle(&redlilium_core::math::nalgebra::Vector3::y_axis(), 0.7)),
             2.0,
             5.0,
+            false,
         );
         let (u, v) = (0.37, 0.62);
         let h = 1e-3;
@@ -178,12 +185,31 @@ mod tests {
             &translation(0.0, 0.0, 12.0),
             3.0,
             4.0,
+            false,
         );
         let row = sample_edge_row(&patch, 1.0, 0.25, 0.75);
         for (i, p) in row.iter().enumerate() {
             let u = 0.25 + 0.5 * (i as f32 / 3.0);
             assert!((p - eval(&patch, u, 1.0)).norm() < 1e-5);
         }
+    }
+
+    #[test]
+    fn b_from_front_puts_the_end_tangent_on_plus_z() {
+        // b's +Z faces BACK at a (a socket looking at the road network).
+        let b = translation(0.0, 0.0, 10.0)
+            * Mat4::from_axis_angle(
+                &redlilium_core::math::nalgebra::Vector3::y_axis(),
+                std::f32::consts::PI,
+            );
+        let default_side =
+            patch_from_nodes(&translation(0.0, 0.0, 0.0), 3.0, 4.0, &b, 3.0, 4.0, false);
+        let front_side =
+            patch_from_nodes(&translation(0.0, 0.0, 0.0), 3.0, 4.0, &b, 3.0, 4.0, true);
+        // Default: control row behind b (z > 10, the far side — an S-kink
+        // for a socket). Front: control row between a and b (z < 10).
+        assert!(default_side[2].iter().all(|p| p.z > 10.0));
+        assert!(front_side[2].iter().all(|p| p.z < 10.0));
     }
 
     #[test]
@@ -195,7 +221,7 @@ mod tests {
                 &redlilium_core::math::nalgebra::Vector3::y_axis(),
                 std::f32::consts::PI,
             );
-        let patch = patch_from_nodes(&translation(0.0, 0.0, 0.0), 3.0, 4.0, &b, 3.0, 4.0);
+        let patch = patch_from_nodes(&translation(0.0, 0.0, 0.0), 3.0, 4.0, &b, 3.0, 4.0, false);
         // Same-side corners stay on the same side of the X=0 plane.
         assert!(patch[0][0].x < 0.0 && patch[3][0].x < 0.0);
         assert!(patch[0][3].x > 0.0 && patch[3][3].x > 0.0);
