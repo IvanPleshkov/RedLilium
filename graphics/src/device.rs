@@ -108,6 +108,18 @@ pub struct DeviceCapabilities {
     /// draws. Always false on wgpu/dummy and on wasm (WebGPU has no mesh
     /// shaders).
     pub mesh_shading: bool,
+    /// Maximum task/mesh work-group count per dimension accepted by a mesh-
+    /// tasks draw (`VkPhysicalDeviceMeshShaderPropertiesEXT::
+    /// maxTaskWorkGroupCount`, #116). `[0; 3]` when
+    /// [`mesh_shading`](Self::mesh_shading) is false. Mesh-tasks draws are
+    /// validated per-axis against this at encode time so an over-large group
+    /// count cannot reach the driver as undefined behaviour. The indirect
+    /// variant cannot be checked (its counts live in a GPU buffer).
+    pub mesh_tasks_max_group_count: [u32; 3],
+    /// Maximum product of the three task/mesh work-group dimensions
+    /// (`maxTaskWorkGroupTotalCount`, #116). `0` when mesh shading is false.
+    /// Validated alongside [`mesh_tasks_max_group_count`](Self::mesh_tasks_max_group_count).
+    pub mesh_tasks_max_total_count: u32,
     /// Whether BC1–BC7 (DXT/S3TC) block-compressed textures can be created
     /// (#119). Vulkan `textureCompressionBC` / wgpu `TEXTURE_COMPRESSION_BC`.
     /// The desktop family; compressed textures are sample-only (no

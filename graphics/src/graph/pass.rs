@@ -347,6 +347,144 @@ impl std::fmt::Debug for MeshTasksDrawCommand {
 }
 
 // ============================================================================
+// Indirect Mesh-Tasks Draw Command (#115)
+// ============================================================================
+
+/// A GPU-driven mesh-tasks draw (#115): the task/mesh work-group counts are
+/// read from an indirect buffer instead of being supplied on the CPU, so a
+/// compute pass can decide how much to dispatch (culling, LOD, procedural
+/// counts).
+///
+/// This is the [`MeshTasksDrawCommand`] analogue of [`IndirectDrawCommand`]:
+/// like the direct form there is no [`Mesh`] (the mesh shader fetches geometry
+/// from storage buffers bound through the material instance), and like the
+/// classic indirect form the arguments live in a buffer that must carry
+/// [`BufferUsage::INDIRECT`](crate::types::BufferUsage::INDIRECT).
+///
+/// # Buffer layout
+///
+/// Each entry is a
+/// [`DrawMeshTasksIndirectArgs`](crate::types::DrawMeshTasksIndirectArgs) —
+/// three work-group counts, matching `VkDrawMeshTasksIndirectCommandEXT`. With
+/// `draw_count > 1`, consecutive entries are read `stride` bytes apart.
+///
+/// The group counts in the buffer are NOT validated against the device's
+/// `maxTaskWorkGroupCount` (#116) — the CPU never sees them, so producers must
+/// keep them in range.
+pub struct MeshTasksIndirectDrawCommand {
+    /// The material instance with bound resources (meshlet buffers included).
+    pub material: Arc<MaterialInstance>,
+    /// Buffer containing the mesh-tasks indirect arguments. Must have
+    /// [`BufferUsage::INDIRECT`](crate::types::BufferUsage::INDIRECT).
+    pub indirect_buffer: Arc<Buffer>,
+    /// Byte offset into the indirect buffer where arguments begin.
+    pub indirect_offset: u64,
+    /// Number of dispatches to issue (multi-draw). Consecutive entries are read
+    /// `stride` bytes apart.
+    pub draw_count: u32,
+    /// Stride between consecutive argument entries in bytes. Only relevant when
+    /// `draw_count > 1`.
+    pub stride: u32,
+    /// Optional scissor rectangle for clipping.
+    pub scissor_rect: Option<ScissorRect>,
+    /// Per-bind-group dynamic byte offsets (see
+    /// [`DrawCommand::dynamic_offsets`]).
+    pub dynamic_offsets: Vec<Vec<u32>>,
+}
+
+impl MeshTasksIndirectDrawCommand {
+    /// Create a new indirect mesh-tasks draw (a single dispatch).
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the material has no mesh shader stage, or if the indirect
+    /// buffer lacks
+    /// [`BufferUsage::INDIRECT`](crate::types::BufferUsage::INDIRECT).
+    pub fn new(material: Arc<MaterialInstance>, indirect_buffer: Arc<Buffer>) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            use crate::materials::ShaderStage;
+            debug_assert!(
+                material
+                    .material()
+                    .shaders()
+                    .iter()
+                    .any(|s| s.stage == ShaderStage::Mesh),
+                "MeshTasksIndirectDrawCommand requires a material with a mesh shader stage \
+                 (material {:?})",
+                material.label()
+            );
+            Self::check_indirect_buffer(&indirect_buffer);
+        }
+        Self {
+            material,
+            indirect_buffer,
+            indirect_offset: 0,
+            draw_count: 1,
+            stride: 0,
+            scissor_rect: None,
+            dynamic_offsets: Vec::new(),
+        }
+    }
+
+    /// Set the byte offset into the indirect buffer.
+    pub fn with_offset(mut self, offset: u64) -> Self {
+        self.indirect_offset = offset;
+        self
+    }
+
+    /// Set the number of dispatches for multi-draw. When greater than 1, also
+    /// set [`with_stride`](Self::with_stride).
+    pub fn with_draw_count(mut self, count: u32) -> Self {
+        self.draw_count = count;
+        self
+    }
+
+    /// Set the stride between consecutive argument entries in bytes.
+    pub fn with_stride(mut self, stride: u32) -> Self {
+        self.stride = stride;
+        self
+    }
+
+    /// Set the scissor rectangle for clipping.
+    pub fn with_scissor_rect(mut self, rect: ScissorRect) -> Self {
+        self.scissor_rect = Some(rect);
+        self
+    }
+
+    /// Set per-bind-group dynamic uniform offsets (see
+    /// [`DrawCommand::dynamic_offsets`]).
+    pub fn with_dynamic_offsets(mut self, offsets: Vec<Vec<u32>>) -> Self {
+        self.dynamic_offsets = offsets;
+        self
+    }
+
+    /// Check that the buffer has INDIRECT usage flag.
+    #[cfg(debug_assertions)]
+    fn check_indirect_buffer(buffer: &Buffer) {
+        use crate::types::BufferUsage;
+        if !buffer.descriptor().usage.contains(BufferUsage::INDIRECT) {
+            panic!(
+                "Mesh-tasks indirect buffer '{}' must have BufferUsage::INDIRECT flag",
+                buffer.label().unwrap_or("unnamed")
+            );
+        }
+    }
+}
+
+impl std::fmt::Debug for MeshTasksIndirectDrawCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeshTasksIndirectDrawCommand")
+            .field("material", &self.material.label())
+            .field("indirect_buffer", &self.indirect_buffer.label())
+            .field("indirect_offset", &self.indirect_offset)
+            .field("draw_count", &self.draw_count)
+            .field("stride", &self.stride)
+            .finish()
+    }
+}
+
+// ============================================================================
 // Indirect Draw Command
 // ============================================================================
 
@@ -556,6 +694,7 @@ pub struct GraphicsPass {
     draw_commands: Vec<DrawCommand>,
     indirect_draw_commands: Vec<IndirectDrawCommand>,
     mesh_tasks_commands: Vec<MeshTasksDrawCommand>,
+    mesh_tasks_indirect_commands: Vec<MeshTasksIndirectDrawCommand>,
 }
 
 impl GraphicsPass {
@@ -569,6 +708,7 @@ impl GraphicsPass {
             draw_commands: Vec::new(),
             indirect_draw_commands: Vec::new(),
             mesh_tasks_commands: Vec::new(),
+            mesh_tasks_indirect_commands: Vec::new(),
         }
     }
 
@@ -678,14 +818,16 @@ impl GraphicsPass {
         self.draw_commands.clear();
         self.indirect_draw_commands.clear();
         self.mesh_tasks_commands.clear();
+        self.mesh_tasks_indirect_commands.clear();
     }
 
-    /// Check if this pass has any draw commands (direct, indirect, or mesh
-    /// tasks).
+    /// Check if this pass has any draw commands (direct, indirect, mesh tasks,
+    /// or indirect mesh tasks).
     pub fn has_draws(&self) -> bool {
         !self.draw_commands.is_empty()
             || !self.indirect_draw_commands.is_empty()
             || !self.mesh_tasks_commands.is_empty()
+            || !self.mesh_tasks_indirect_commands.is_empty()
     }
 
     // ========================================================================
@@ -714,6 +856,34 @@ impl GraphicsPass {
     /// Get all mesh-tasks draw commands.
     pub fn mesh_tasks_commands(&self) -> &[MeshTasksDrawCommand] {
         &self.mesh_tasks_commands
+    }
+
+    /// Add a GPU-driven mesh-tasks draw (#115): the task/mesh work-group counts
+    /// are read from `indirect_buffer` (which must carry
+    /// [`BufferUsage::INDIRECT`](crate::types::BufferUsage::INDIRECT)) rather
+    /// than supplied here. See [`MeshTasksIndirectDrawCommand`].
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the material has no mesh shader stage, or if the buffer lacks
+    /// the INDIRECT flag.
+    pub fn add_draw_mesh_tasks_indirect(
+        &mut self,
+        material: Arc<MaterialInstance>,
+        indirect_buffer: Arc<Buffer>,
+    ) {
+        self.mesh_tasks_indirect_commands
+            .push(MeshTasksIndirectDrawCommand::new(material, indirect_buffer));
+    }
+
+    /// Add a pre-built indirect mesh-tasks draw command (#115).
+    pub fn add_mesh_tasks_indirect_command(&mut self, command: MeshTasksIndirectDrawCommand) {
+        self.mesh_tasks_indirect_commands.push(command);
+    }
+
+    /// Get all indirect mesh-tasks draw commands (#115).
+    pub fn mesh_tasks_indirect_commands(&self) -> &[MeshTasksIndirectDrawCommand] {
+        &self.mesh_tasks_indirect_commands
     }
 
     // ========================================================================
@@ -937,6 +1107,17 @@ impl GraphicsPass {
         // StorageRead/StorageReadWrite declarations).
         for cmd in &self.mesh_tasks_commands {
             extract_material_resources(&cmd.material, &mut usage, &mut seen);
+        }
+
+        // Infer from indirect mesh-tasks draws (#115): material resources plus
+        // the indirect argument buffer, which the GPU reads for dispatch counts.
+        for cmd in &self.mesh_tasks_indirect_commands {
+            extract_material_resources(&cmd.material, &mut usage, &mut seen);
+            seen.add_buffer(
+                &mut usage,
+                &cmd.indirect_buffer,
+                BufferAccessMode::IndirectRead,
+            );
         }
 
         // Diagnostic: a texture bound as a depth/stencil attachment AND sampled

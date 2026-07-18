@@ -95,9 +95,10 @@ pub use graph::{
     AccelerationStructureBuild, AccelerationStructureBuildPass, BufferCopyRegion,
     BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph, ComputePass,
     DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass, IndirectDrawCommand, LoadOp,
-    MeshTasksDrawCommand, Pass, PassHandle, QueuePreference, RenderGraph,
-    RenderGraphCompilationMode, RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation,
-    TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation, TransferPass,
+    MeshTasksDrawCommand, MeshTasksIndirectDrawCommand, Pass, PassHandle, QueuePreference,
+    RenderGraph, RenderGraphCompilationMode, RenderTarget, RenderTargetConfig, StoreOp,
+    TextureCopyLocation, TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation,
+    TransferPass,
     resource_usage::{PassResourceUsage, TextureAccessMode, TextureUsageDecl},
 };
 pub use instance::{
@@ -129,9 +130,9 @@ pub use shader::{
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
     AddressMode, BufferDescriptor, BufferUsage, ClearValue, CompareFunction, CompressionFamily,
-    CpuSampler, CpuTexture, DrawIndexedIndirectArgs, DrawIndirectArgs, Extent3d, FilterMode,
-    SamplerDescriptor, ScissorRect, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsage, Viewport,
+    CpuSampler, CpuTexture, DrawIndexedIndirectArgs, DrawIndirectArgs, DrawMeshTasksIndirectArgs,
+    Extent3d, FilterMode, SamplerDescriptor, ScissorRect, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsage, Viewport,
 };
 
 /// Graphics library version

@@ -831,6 +831,23 @@ pub fn device_capabilities(
             .get(plan.graphics_family as usize)
             .is_some_and(|f| f.timestamp_valid_bits > 0);
 
+    // Mesh-tasks work-group limits (#116): queried only when VK_EXT_mesh_shader
+    // is supported (the properties struct carries no meaning otherwise). Mesh-
+    // tasks draws validate their group count against these at encode time so an
+    // over-large `vkCmdDrawMeshTasksEXT` can't reach the driver as UB.
+    let (mesh_tasks_max_group_count, mesh_tasks_max_total_count) = if selected.optional.mesh_shading
+    {
+        let mut mesh_props = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut mesh_props);
+        unsafe { instance.get_physical_device_properties2(selected.physical_device, &mut props2) };
+        (
+            mesh_props.max_task_work_group_count,
+            mesh_props.max_task_work_group_total_count,
+        )
+    } else {
+        ([0; 3], 0)
+    };
+
     crate::device::DeviceCapabilities {
         // Selection passing the baseline filter IS the tier detection today;
         // higher rungs (bindless, ray tracing) will extend this when their
@@ -871,6 +888,9 @@ pub fn device_capabilities(
         // Mesh shading (#111): VK_EXT_mesh_shader verified during selection
         // and enabled on the logical device.
         mesh_shading: selected.optional.mesh_shading,
+        // Mesh-tasks work-group limits (#116); zero when mesh shading is off.
+        mesh_tasks_max_group_count,
+        mesh_tasks_max_total_count,
         // Bindless heap (#117): descriptor-indexing bits verified during
         // selection and enabled on the logical device.
         bindless: selected.optional.bindless,

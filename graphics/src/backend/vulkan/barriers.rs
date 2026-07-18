@@ -380,6 +380,7 @@ impl BarrierBatch {
             aspect_mask,
             old_layout.src_stage(),
             old_layout.src_access_mask(),
+            new_layout.dst_stage(),
         );
     }
 
@@ -410,11 +411,22 @@ impl BarrierBatch {
             aspect_mask,
             vk::PipelineStageFlags2::NONE,
             vk::AccessFlags2::NONE,
+            new_layout.dst_stage(),
         );
     }
 
+    /// Add an image layout transition with explicit source and destination
+    /// pipeline-stage scopes.
+    ///
+    /// `dst_stage` is passed in (rather than derived from `new_layout` here)
+    /// so the caller can widen a shader-stage scope with the task/mesh stages
+    /// when `VK_EXT_mesh_shader` is enabled (#114) — see
+    /// [`super::layout::TextureLayoutTracker::dst_stage`]. The public
+    /// [`add_image_barrier`](Self::add_image_barrier) wrappers pass the raw
+    /// `new_layout.dst_stage()`. Access masks are stage-agnostic, so they stay
+    /// derived from the layout.
     #[allow(clippy::too_many_arguments)]
-    fn add_image_barrier_with_src_scope(
+    pub(super) fn add_image_barrier_with_src_scope(
         &mut self,
         id: TextureId,
         image: vk::Image,
@@ -423,6 +435,7 @@ impl BarrierBatch {
         aspect_mask: vk::ImageAspectFlags,
         src_stage: vk::PipelineStageFlags2,
         src_access: vk::AccessFlags2,
+        dst_stage: vk::PipelineStageFlags2,
     ) {
         // Same read-only layout: no hazard, nothing to do.
         if old_layout == new_layout && !new_layout.is_write() {
@@ -438,7 +451,7 @@ impl BarrierBatch {
                 let info = occupied.get_mut();
                 info.new_layout = new_layout.to_vk();
                 info.src_stage_mask |= src_stage;
-                info.dst_stage_mask |= new_layout.dst_stage();
+                info.dst_stage_mask |= dst_stage;
                 info.src_access_mask |= src_access;
                 info.dst_access_mask |= new_layout.dst_access_mask();
             }
@@ -448,7 +461,7 @@ impl BarrierBatch {
                     old_layout: old_layout.to_vk(),
                     new_layout: new_layout.to_vk(),
                     src_stage_mask: src_stage,
-                    dst_stage_mask: new_layout.dst_stage(),
+                    dst_stage_mask: dst_stage,
                     src_access_mask: src_access,
                     dst_access_mask: new_layout.dst_access_mask(),
                     aspect_mask,

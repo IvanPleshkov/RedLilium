@@ -59,6 +59,9 @@ impl DummyBackend {
             // stages are accepted (no real GPU objects), but the capability
             // is not advertised.
             mesh_shading: false,
+            // No mesh shading (#116): no work-group limits to advertise.
+            mesh_tasks_max_group_count: [0; 3],
+            mesh_tasks_max_total_count: 0,
             // And for the bindless heap (#117): layouts naming the bindless
             // binding types are accepted headless, capability stays off.
             bindless: false,

@@ -171,6 +171,53 @@ impl DrawIndirectArgs {
     }
 }
 
+/// Arguments for an indirect mesh-tasks draw (#115).
+///
+/// Matches the GPU layout of `VkDrawMeshTasksIndirectCommandEXT`: three task/
+/// mesh work-group counts. The buffer containing these must have
+/// [`BufferUsage::INDIRECT`]. Unlike the classic draw-args structs there is no
+/// vertex/instance count — a mesh-tasks dispatch produces its own primitives.
+///
+/// # Memory Layout
+///
+/// The struct is `#[repr(C)]`: total size 12 bytes, alignment 4 bytes.
+///
+/// # Example
+///
+/// ```ignore
+/// // Dispatch `meshlet_count / 32` task workgroups for one instance.
+/// let args = DrawMeshTasksIndirectArgs::new([meshlet_count / 32, 1, 1]);
+/// ```
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct DrawMeshTasksIndirectArgs {
+    /// Task/mesh work-group count on X.
+    pub group_count_x: u32,
+    /// Task/mesh work-group count on Y.
+    pub group_count_y: u32,
+    /// Task/mesh work-group count on Z.
+    pub group_count_z: u32,
+}
+
+impl DrawMeshTasksIndirectArgs {
+    /// Size of the struct in bytes.
+    pub const SIZE: u64 = std::mem::size_of::<Self>() as u64;
+
+    /// Create new mesh-tasks indirect arguments from a `[x, y, z]` group count.
+    pub fn new(group_count: [u32; 3]) -> Self {
+        Self {
+            group_count_x: group_count[0],
+            group_count_y: group_count[1],
+            group_count_z: group_count[2],
+        }
+    }
+
+    /// Convert to bytes for uploading to a buffer.
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE as usize) }
+    }
+}
+
 /// Arguments for an indexed indirect draw call.
 ///
 /// This struct matches the GPU layout for `vkCmdDrawIndexedIndirect` / `wgpu::DrawIndexedIndirect`.

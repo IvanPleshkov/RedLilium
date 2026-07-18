@@ -859,8 +859,15 @@ impl VulkanBackend {
         // Load swapchain extension
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
-        // Create layout tracker for automatic barrier placement
-        let layout_tracker = Mutex::new(TextureLayoutTracker::new());
+        // Create layout tracker for automatic barrier placement. Mesh-shading
+        // augmentation (#114) mirrors the buffer tracker: shader-stage barrier
+        // scopes additionally cover the task/mesh stages when VK_EXT_mesh_shader
+        // is enabled, so a texture sampled from those stages is synchronized.
+        let layout_tracker = Mutex::new({
+            let mut tracker = TextureLayoutTracker::new();
+            tracker.set_mesh_shading(device_caps.mesh_shading);
+            tracker
+        });
 
         // D24_UNORM_S8_UINT is optional (commonly absent on AMD); the spec
         // only guarantees that one of D24S8/D32S8 supports depth-stencil
@@ -3250,21 +3257,34 @@ impl VulkanBackend {
             // `waits`, so the transition uses an empty source scope on this
             // queue — the previous layout's own stages may not even exist on
             // this queue's family (VUID 06461, caught on RDNA4 in #82).
+            // Destination scope is augmented with the task/mesh stages when
+            // mesh shading is on (#114), so a texture sampled from a task/mesh
+            // stage gets a wide-enough barrier. A cross-queue transition keeps
+            // an empty source scope on this queue (its availability comes from
+            // the timeline wait); a same-queue one uses the previous layout's
+            // augmented source scope.
+            let dst_stage = tracker.dst_stage(required_layout);
             if cross_queue_write {
-                batch.add_image_barrier_cross_queue(
+                batch.add_image_barrier_with_src_scope(
                     texture_id,
                     *image,
                     current_layout,
                     required_layout,
                     aspect_mask,
+                    vk::PipelineStageFlags2::NONE,
+                    vk::AccessFlags2::NONE,
+                    dst_stage,
                 );
             } else {
-                batch.add_image_barrier(
+                batch.add_image_barrier_with_src_scope(
                     texture_id,
                     *image,
                     current_layout,
                     required_layout,
                     aspect_mask,
+                    tracker.src_stage(current_layout),
+                    current_layout.src_access_mask(),
+                    dst_stage,
                 );
             }
         }
@@ -3762,6 +3782,16 @@ impl VulkanBackend {
             self.encode_mesh_tasks_command(cmd, draw_cmd, default_scissor, render_area.extent)?;
         }
 
+        // Encode indirect mesh-tasks draws (#115)
+        for draw_cmd in pass.mesh_tasks_indirect_commands() {
+            self.encode_mesh_tasks_indirect_command(
+                cmd,
+                draw_cmd,
+                default_scissor,
+                render_area.extent,
+            )?;
+        }
+
         // End dynamic rendering
         unsafe {
             self.device.cmd_end_rendering(cmd);
@@ -3984,7 +4014,119 @@ impl VulkanBackend {
             ));
         };
 
-        let material_arc = draw_cmd.material.material();
+        // #116: reject an over-large group count CPU-side (per-axis + total)
+        // before recording anything — the driver's behaviour past
+        // maxTaskWorkGroupCount / maxTaskWorkGroupTotalCount is undefined. The
+        // indirect variant cannot be checked here (counts live in a buffer).
+        validate_mesh_tasks_group_count(
+            draw_cmd.group_count,
+            self.device_caps.mesh_tasks_max_group_count,
+            self.device_caps.mesh_tasks_max_total_count,
+        )?;
+
+        let Some(custom_scissor) = self.bind_mesh_tasks_material(
+            cmd,
+            &draw_cmd.material,
+            &draw_cmd.dynamic_offsets,
+            draw_cmd.scissor_rect.as_ref(),
+            target_extent,
+        )?
+        else {
+            // Material has no Vulkan pipeline — already logged; skip the draw.
+            return Ok(());
+        };
+
+        let [x, y, z] = draw_cmd.group_count;
+        unsafe {
+            mesh_loader.cmd_draw_mesh_tasks(cmd, x, y, z);
+        }
+
+        if custom_scissor {
+            unsafe {
+                self.device.cmd_set_scissor(cmd, 0, &[pass_scissor]);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// GPU-driven mesh-tasks draw (#115): identical setup to
+    /// [`encode_mesh_tasks_command`](Self::encode_mesh_tasks_command) but the
+    /// task/mesh work-group counts come from an indirect buffer via
+    /// `vkCmdDrawMeshTasksIndirectEXT`. The #116 CPU-side group-count check does
+    /// not apply — the counts live in the buffer and are never seen here.
+    fn encode_mesh_tasks_indirect_command(
+        &self,
+        cmd: vk::CommandBuffer,
+        draw_cmd: &crate::graph::MeshTasksIndirectDrawCommand,
+        pass_scissor: vk::Rect2D,
+        target_extent: vk::Extent2D,
+    ) -> Result<(), GraphicsError> {
+        let Some(mesh_loader) = &self.mesh_loader else {
+            return Err(GraphicsError::FeatureNotSupported(
+                "mesh-tasks draws require DeviceCapabilities::mesh_shading \
+                 (VK_EXT_mesh_shader, #111)"
+                    .into(),
+            ));
+        };
+
+        let GpuBuffer::Vulkan {
+            buffer: indirect_buffer,
+            ..
+        } = draw_cmd.indirect_buffer.gpu_handle()
+        else {
+            return Err(GraphicsError::InvalidParameter(
+                "mesh-tasks indirect buffer is not a Vulkan buffer \
+                 (resource from a different backend)"
+                    .into(),
+            ));
+        };
+        let indirect_buffer = *indirect_buffer;
+
+        let Some(custom_scissor) = self.bind_mesh_tasks_material(
+            cmd,
+            &draw_cmd.material,
+            &draw_cmd.dynamic_offsets,
+            draw_cmd.scissor_rect.as_ref(),
+            target_extent,
+        )?
+        else {
+            return Ok(());
+        };
+
+        unsafe {
+            mesh_loader.cmd_draw_mesh_tasks_indirect(
+                cmd,
+                indirect_buffer,
+                draw_cmd.indirect_offset,
+                draw_cmd.draw_count,
+                draw_cmd.stride,
+            );
+        }
+
+        if custom_scissor {
+            unsafe {
+                self.device.cmd_set_scissor(cmd, 0, &[pass_scissor]);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Bind the pipeline, descriptor sets, and optional per-draw scissor shared
+    /// by direct (#111) and indirect (#115) mesh-tasks draws. Returns `Ok(None)`
+    /// when the material has no Vulkan pipeline (the caller skips the draw), else
+    /// `Ok(Some(custom_scissor))` — `true` when a per-draw scissor was set and
+    /// the caller must restore `pass_scissor` after dispatching.
+    fn bind_mesh_tasks_material(
+        &self,
+        cmd: vk::CommandBuffer,
+        material_instance: &Arc<crate::materials::MaterialInstance>,
+        dynamic_offsets: &[Vec<u32>],
+        scissor_rect: Option<&crate::types::ScissorRect>,
+        target_extent: vk::Extent2D,
+    ) -> Result<Option<bool>, GraphicsError> {
+        let material_arc = material_instance.material();
         let super::GpuPipeline::Vulkan {
             pipeline,
             pipeline_layout,
@@ -3993,7 +4135,7 @@ impl VulkanBackend {
         } = material_arc.gpu_handle()
         else {
             log::warn!("Material has no Vulkan pipeline");
-            return Ok(());
+            return Ok(None);
         };
         let pipeline = *pipeline;
         let pipeline_layout = *pipeline_layout;
@@ -4005,7 +4147,6 @@ impl VulkanBackend {
             ..
         } = scratch;
 
-        let material_instance = &draw_cmd.material;
         let binding_groups = material_instance.binding_groups();
         if binding_groups.len() != descriptor_set_layouts.len() {
             return Err(GraphicsError::InvalidParameter(format!(
@@ -4042,8 +4183,7 @@ impl VulkanBackend {
         }
 
         if !scratch_ds_sets.is_empty() {
-            let dynamic_offsets: Vec<u32> =
-                draw_cmd.dynamic_offsets.iter().flatten().copied().collect();
+            let dynamic_offsets: Vec<u32> = dynamic_offsets.iter().flatten().copied().collect();
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
@@ -4057,8 +4197,8 @@ impl VulkanBackend {
         }
 
         // Per-draw scissor, clamped like the classic draw path.
-        let custom_scissor = draw_cmd.scissor_rect.is_some();
-        if let Some(scissor) = &draw_cmd.scissor_rect {
+        let custom_scissor = scissor_rect.is_some();
+        if let Some(scissor) = scissor_rect {
             let c = scissor.clamped(target_extent.width, target_extent.height);
             let vk_scissor = vk::Rect2D {
                 offset: vk::Offset2D {
@@ -4075,18 +4215,7 @@ impl VulkanBackend {
             }
         }
 
-        let [x, y, z] = draw_cmd.group_count;
-        unsafe {
-            mesh_loader.cmd_draw_mesh_tasks(cmd, x, y, z);
-        }
-
-        if custom_scissor {
-            unsafe {
-                self.device.cmd_set_scissor(cmd, 0, &[pass_scissor]);
-            }
-        }
-
-        Ok(())
+        Ok(Some(custom_scissor))
     }
 
     fn encode_transfer_pass(
@@ -4567,12 +4696,79 @@ impl VulkanBackend {
     }
 }
 
+/// Validate a mesh-tasks draw's group count against the device's task work-
+/// group limits (#116): both per-axis (`maxTaskWorkGroupCount`) and the product
+/// of the three dimensions (`maxTaskWorkGroupTotalCount`). Pure so it is unit-
+/// testable without a device. The total is computed in `u64` because the
+/// product of three `u32`s can overflow. Limits are the task-stage bounds
+/// (the first stage `vkCmdDrawMeshTasksEXT` dispatches).
+fn validate_mesh_tasks_group_count(
+    group_count: [u32; 3],
+    max_per_axis: [u32; 3],
+    max_total: u32,
+) -> Result<(), GraphicsError> {
+    let [x, y, z] = group_count;
+    let [mx, my, mz] = max_per_axis;
+    if x > mx || y > my || z > mz {
+        return Err(GraphicsError::InvalidParameter(format!(
+            "mesh-tasks group count [{x}, {y}, {z}] exceeds the device's per-axis \
+             limit [{mx}, {my}, {mz}] (maxTaskWorkGroupCount, #116)"
+        )));
+    }
+    let total = x as u64 * y as u64 * z as u64;
+    if total > max_total as u64 {
+        return Err(GraphicsError::InvalidParameter(format!(
+            "mesh-tasks total group count {total} (= {x}×{y}×{z}) exceeds the \
+             device's limit {max_total} (maxTaskWorkGroupTotalCount, #116)"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::{
         AccelerationStructureBuildPass, ComputePass, GraphicsPass, Pass, TransferPass,
     };
+
+    #[test]
+    fn mesh_tasks_group_count_within_limits_ok() {
+        // At the limit on every axis, and total exactly equal, is accepted.
+        assert!(
+            validate_mesh_tasks_group_count([10, 20, 1], [10, 20, 1], 200).is_ok(),
+            "counts at the per-axis and total limits must pass"
+        );
+        assert!(validate_mesh_tasks_group_count([0, 0, 0], [65535, 65535, 65535], 0).is_ok());
+    }
+
+    #[test]
+    fn mesh_tasks_group_count_rejects_per_axis_overflow() {
+        // Each axis over its own limit is rejected, even when total would fit.
+        for count in [[11, 1, 1], [1, 21, 1], [1, 1, 2]] {
+            let err = validate_mesh_tasks_group_count(count, [10, 20, 1], u32::MAX)
+                .expect_err("per-axis overflow must be rejected");
+            assert!(matches!(err, GraphicsError::InvalidParameter(_)));
+        }
+    }
+
+    #[test]
+    fn mesh_tasks_group_count_rejects_total_overflow() {
+        // Within every axis limit but the product exceeds the total cap.
+        let err = validate_mesh_tasks_group_count([100, 100, 1], [1000, 1000, 1000], 5000)
+            .expect_err("total overflow must be rejected");
+        assert!(matches!(err, GraphicsError::InvalidParameter(_)));
+    }
+
+    #[test]
+    fn mesh_tasks_group_count_total_uses_u64() {
+        // A product that overflows u32 (but is within a large u64 total cap)
+        // must not wrap around and spuriously pass.
+        let big = [65_535, 65_535, 2]; // ~8.6e9, well past u32::MAX
+        let err = validate_mesh_tasks_group_count(big, [u32::MAX, u32::MAX, u32::MAX], u32::MAX)
+            .expect_err("u32-overflowing product must be rejected, not wrapped");
+        assert!(matches!(err, GraphicsError::InvalidParameter(_)));
+    }
 
     /// #123: each pass type gets a distinct, stable debug-label colour so
     /// RenderDoc regions are visually separable.

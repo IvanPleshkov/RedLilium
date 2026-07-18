@@ -288,6 +288,12 @@ struct MeshletDemo {
     pending_uploads: Vec<TransferOperation>,
     meshlet_count: u32,
     instance_count: u32,
+    /// GPU-driven dispatch mode (#115): task/mesh group counts are read from an
+    /// indirect buffer instead of supplied on the CPU. Toggled by
+    /// `REDLILIUM_MESHLET_INDIRECT=1`; the visual output is identical.
+    indirect: bool,
+    /// Indirect-args buffer, `Some` only in [`indirect`](Self::indirect) mode.
+    indirect_buffer: Option<Arc<redlilium_graphics::Buffer>>,
     /// Whether SPACE froze the cull camera; the capture itself happens in
     /// `on_update`, where the real aspect ratio is available.
     freeze_culling: bool,
@@ -307,6 +313,8 @@ impl MeshletDemo {
             pending_uploads: Vec::new(),
             meshlet_count: 0,
             instance_count: 0,
+            indirect: std::env::var("REDLILIUM_MESHLET_INDIRECT").as_deref() == Ok("1"),
+            indirect_buffer: None,
             freeze_culling: false,
             frozen_cull: None,
             supported: false,
@@ -419,6 +427,38 @@ impl MeshletDemo {
         self.material_instance = Some(Arc::new(
             MaterialInstance::new(material).with_binding_group(binding_group),
         ));
+
+        // #115: in indirect mode the task/mesh group counts come from a GPU
+        // buffer instead of the CPU. Build the args buffer and upload the same
+        // dispatch dimensions the direct path uses through the frame graph, so
+        // the visual output is identical.
+        if self.indirect {
+            let args = redlilium_graphics::DrawMeshTasksIndirectArgs::new([
+                self.meshlet_count.div_ceil(TASK_GROUP_SIZE),
+                self.instance_count,
+                1,
+            ]);
+            let buffer = device
+                .create_buffer(
+                    &BufferDescriptor::new(
+                        redlilium_graphics::DrawMeshTasksIndirectArgs::SIZE,
+                        BufferUsage::INDIRECT | BufferUsage::COPY_DST,
+                    )
+                    .with_label("meshlet indirect args"),
+                )
+                .expect("create meshlet indirect args buffer");
+            self.pending_uploads.push(TransferOperation::write_buffer(
+                buffer.clone(),
+                0,
+                args.as_bytes().to_vec().into(),
+            ));
+            self.indirect_buffer = Some(buffer);
+            log::info!(
+                "Meshlet indirect mode ON (REDLILIUM_MESHLET_INDIRECT=1): dispatch args via \
+                 frame-graph TransferPass"
+            );
+        }
+
         self.create_depth_texture(ctx);
 
         log::info!("Meshlet GPU resources created");
@@ -577,17 +617,30 @@ impl AppHandler for MeshletDemo {
                     .with_clear_depth(DepthConvention::default().clear_depth()),
                 ),
         );
-        render_pass.add_mesh_tasks_command(
-            redlilium_graphics::MeshTasksDrawCommand::new(
-                Arc::clone(self.material_instance.as_ref().unwrap()),
-                [
-                    self.meshlet_count.div_ceil(TASK_GROUP_SIZE),
-                    self.instance_count,
-                    1,
-                ],
-            )
-            .with_dynamic_offsets(vec![vec![self.uniform_offset]]),
-        );
+        let material = Arc::clone(self.material_instance.as_ref().unwrap());
+        let dynamic_offsets = vec![vec![self.uniform_offset]];
+        if let Some(indirect) = &self.indirect_buffer {
+            // #115: GPU-driven dispatch — group counts read from the buffer.
+            render_pass.add_mesh_tasks_indirect_command(
+                redlilium_graphics::MeshTasksIndirectDrawCommand::new(
+                    material,
+                    Arc::clone(indirect),
+                )
+                .with_dynamic_offsets(dynamic_offsets),
+            );
+        } else {
+            render_pass.add_mesh_tasks_command(
+                redlilium_graphics::MeshTasksDrawCommand::new(
+                    material,
+                    [
+                        self.meshlet_count.div_ceil(TASK_GROUP_SIZE),
+                        self.instance_count,
+                        1,
+                    ],
+                )
+                .with_dynamic_offsets(dynamic_offsets),
+            );
+        }
         let render_handle = graph.add_graphics_pass(render_pass);
         if let Some(upload) = upload_handle {
             graph.add_dependency(render_handle, upload);

@@ -532,6 +532,9 @@ impl WgpuBackend {
             // stages, and wgpu's experimental native support has no WGSL
             // front-end for them.
             mesh_shading: false,
+            // No mesh shading (#116): no work-group limits to advertise.
+            mesh_tasks_max_group_count: [0; 3],
+            mesh_tasks_max_total_count: 0,
             // The bindless heap is Vulkan-only (#117): WebGPU has no
             // runtime-sized update-after-bind descriptor arrays.
             bindless: false,

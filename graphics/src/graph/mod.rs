@@ -46,7 +46,8 @@ mod transfer;
 
 pub use pass::{
     AccelerationStructureBuild, AccelerationStructureBuildPass, ComputePass, DispatchCommand,
-    DrawCommand, GraphicsPass, IndirectDrawCommand, MeshTasksDrawCommand, Pass, TransferPass,
+    DrawCommand, GraphicsPass, IndirectDrawCommand, MeshTasksDrawCommand,
+    MeshTasksIndirectDrawCommand, Pass, TransferPass,
 };
 
 // Re-export compiler types for convenience
@@ -607,6 +608,134 @@ mod tests {
                     && d.access == BufferAccessMode::StorageRead),
             "meshlet storage buffer must be declared as a read"
         );
+    }
+
+    #[test]
+    fn mesh_tasks_indirect_draws_declare_buffers() {
+        use std::sync::Arc;
+
+        use crate::graph::resource_usage::BufferAccessMode;
+        use crate::materials::{
+            BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
+            MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
+        };
+        use crate::types::DrawMeshTasksIndirectArgs;
+
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+
+        let layout = Arc::new(BindingLayout::new().with_entry(BindingLayoutEntry::new(
+            0,
+            BindingType::StorageBufferReadOnly,
+        )));
+        let storage = device
+            .create_buffer(&BufferDescriptor::new(256, BufferUsage::STORAGE))
+            .unwrap();
+        let group = device
+            .create_binding_group(
+                layout.clone(),
+                BindingGroupDescriptor::new().with_buffer(0, storage.clone()),
+            )
+            .unwrap();
+
+        let descriptor = MaterialDescriptor::new()
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Mesh,
+                b"ms".to_vec(),
+                "ms_main",
+                vec![],
+            ))
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Fragment,
+                b"fs".to_vec(),
+                "fs_main",
+                vec![],
+            ))
+            .with_binding_layout(layout)
+            .with_label("meshlet indirect test material");
+        descriptor.validate_stage_combination().unwrap();
+        let material = Arc::new(crate::materials::Material::new(
+            device.clone(),
+            descriptor,
+            crate::backend::GpuPipeline::Dummy,
+        ));
+        let material_instance = Arc::new(MaterialInstance::new(material).with_binding_group(group));
+
+        let indirect = device
+            .create_buffer(&BufferDescriptor::new(
+                DrawMeshTasksIndirectArgs::SIZE,
+                BufferUsage::INDIRECT,
+            ))
+            .unwrap();
+
+        let mut pass = GraphicsPass::new("mesh tasks indirect".into());
+        assert!(!pass.has_draws());
+        pass.add_draw_mesh_tasks_indirect(material_instance, indirect.clone());
+        assert!(
+            pass.has_draws(),
+            "an indirect-mesh-tasks-only pass must report draws"
+        );
+        assert_eq!(pass.mesh_tasks_indirect_commands().len(), 1);
+
+        let usage = pass.infer_resource_usage();
+        assert!(
+            usage
+                .buffer_usages
+                .iter()
+                .any(|d| Arc::ptr_eq(&d.buffer, &storage)
+                    && d.access == BufferAccessMode::StorageRead),
+            "meshlet storage buffer must be declared as a read"
+        );
+        assert!(
+            usage
+                .buffer_usages
+                .iter()
+                .any(|d| Arc::ptr_eq(&d.buffer, &indirect)
+                    && d.access == BufferAccessMode::IndirectRead),
+            "the indirect argument buffer must be declared as IndirectRead"
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "BufferUsage::INDIRECT")]
+    fn mesh_tasks_indirect_requires_indirect_flag() {
+        use std::sync::Arc;
+
+        use crate::materials::{MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage};
+
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+
+        let descriptor = MaterialDescriptor::new()
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Mesh,
+                b"ms".to_vec(),
+                "ms_main",
+                vec![],
+            ))
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Fragment,
+                b"fs".to_vec(),
+                "fs_main",
+                vec![],
+            ))
+            .with_label("meshlet indirect flag test");
+        descriptor.validate_stage_combination().unwrap();
+        let material = Arc::new(crate::materials::Material::new(
+            device.clone(),
+            descriptor,
+            crate::backend::GpuPipeline::Dummy,
+        ));
+        let material_instance = Arc::new(MaterialInstance::new(material));
+
+        // A STORAGE-only buffer (no INDIRECT flag) must trip the debug check.
+        let not_indirect = device
+            .create_buffer(&BufferDescriptor::new(64, BufferUsage::STORAGE))
+            .unwrap();
+
+        let mut pass = GraphicsPass::new("bad indirect".into());
+        pass.add_draw_mesh_tasks_indirect(material_instance, not_indirect);
     }
 
     #[test]

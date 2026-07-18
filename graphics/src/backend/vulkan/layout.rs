@@ -489,6 +489,15 @@ pub struct TextureLayoutTracker {
     layouts: HashMap<TextureId, TrackedTexture>,
     /// Usage graph cache for sharing.
     usage_graph_cache: TextureUsageGraphCache,
+    /// Extra pipeline stages OR'd into every shader-stage layout scope (#114):
+    /// `TASK_SHADER_EXT | MESH_SHADER_EXT` when `VK_EXT_mesh_shader` is
+    /// enabled, empty otherwise. A texture sampled from a task/mesh stage
+    /// (e.g. a displacement heightmap) needs those stages in its barrier scope
+    /// just like vertex/fragment/compute; stage flags from a disabled
+    /// extension are invalid API use, so the bits are added only when the
+    /// backend actually enabled it. Mirrors the buffer-side augmentation in
+    /// [`super::barriers::BufferAccessTracker`].
+    shader_stage_augment: vk::PipelineStageFlags2,
 }
 
 /// Per-texture tracked state: the actual GPU-side layout plus queue-ownership
@@ -526,6 +535,45 @@ impl TextureLayoutTracker {
         Self {
             layouts: HashMap::new(),
             usage_graph_cache: TextureUsageGraphCache::new(),
+            shader_stage_augment: vk::PipelineStageFlags2::empty(),
+        }
+    }
+
+    /// Enable mesh-shading stage augmentation (#114): every shader-stage layout
+    /// scope (any scope containing `VERTEX_SHADER`) additionally covers the
+    /// task and mesh stages. Call once at backend creation, before any
+    /// tracking. Mirrors [`super::barriers::BufferAccessTracker::set_mesh_shading`].
+    pub fn set_mesh_shading(&mut self, enabled: bool) {
+        self.shader_stage_augment = if enabled {
+            vk::PipelineStageFlags2::TASK_SHADER_EXT | vk::PipelineStageFlags2::MESH_SHADER_EXT
+        } else {
+            vk::PipelineStageFlags2::empty()
+        };
+    }
+
+    /// Source pipeline-stage scope for `layout`, with task/mesh bits added to
+    /// shader-stage unions when mesh shading is enabled (#114). Use this — not
+    /// [`TextureLayout::src_stage`] directly — for any barrier the tracker
+    /// participates in, so the recorded and emitted scopes agree.
+    pub fn src_stage(&self, layout: TextureLayout) -> vk::PipelineStageFlags2 {
+        self.augment_shader_stage(layout.src_stage())
+    }
+
+    /// Destination pipeline-stage scope for `layout`, augmented like
+    /// [`src_stage`](Self::src_stage) (#114).
+    pub fn dst_stage(&self, layout: TextureLayout) -> vk::PipelineStageFlags2 {
+        self.augment_shader_stage(layout.dst_stage())
+    }
+
+    /// OR the task/mesh augmentation into a stage scope, but only when it is a
+    /// shader-stage union — identified by `VERTEX_SHADER`, since fixed-function
+    /// scopes (`COLOR_ATTACHMENT_OUTPUT`, `ALL_TRANSFER`, `ALL_COMMANDS`, …)
+    /// never contain it and must stay untouched.
+    fn augment_shader_stage(&self, stage: vk::PipelineStageFlags2) -> vk::PipelineStageFlags2 {
+        if stage.contains(vk::PipelineStageFlags2::VERTEX_SHADER) {
+            stage | self.shader_stage_augment
+        } else {
+            stage
         }
     }
 
@@ -829,5 +877,70 @@ mod tests {
 
         tracker.set_layout(id, TextureLayout::ShaderReadOnly);
         assert_eq!(tracker.get_layout(id), TextureLayout::ShaderReadOnly);
+    }
+
+    #[test]
+    fn mesh_shading_augments_only_shader_stage_scopes() {
+        let task_mesh =
+            vk::PipelineStageFlags2::TASK_SHADER_EXT | vk::PipelineStageFlags2::MESH_SHADER_EXT;
+
+        let mut tracker = TextureLayoutTracker::new();
+        tracker.set_mesh_shading(true);
+
+        // Shader-sampled layouts gain the task/mesh stages on both scopes,
+        // without dropping any of the raw shader stages.
+        for layout in [
+            TextureLayout::ShaderReadOnly,
+            TextureLayout::General,
+            TextureLayout::DepthStencilReadOnly,
+        ] {
+            assert!(
+                tracker.src_stage(layout).contains(task_mesh),
+                "{layout:?} src_stage should include task/mesh"
+            );
+            assert!(
+                tracker.dst_stage(layout).contains(task_mesh),
+                "{layout:?} dst_stage should include task/mesh"
+            );
+            assert!(tracker.src_stage(layout).contains(layout.src_stage()));
+            assert!(tracker.dst_stage(layout).contains(layout.dst_stage()));
+        }
+
+        // Fixed-function layouts (attachment / transfer / present) are left
+        // exactly as the raw layout scope — no task/mesh bits.
+        for layout in [
+            TextureLayout::ColorAttachment,
+            TextureLayout::DepthStencilAttachment,
+            TextureLayout::TransferSrc,
+            TextureLayout::TransferDst,
+            TextureLayout::PresentSrc,
+        ] {
+            assert!(
+                !tracker.src_stage(layout).intersects(task_mesh),
+                "{layout:?} src_stage must not include task/mesh"
+            );
+            assert!(
+                !tracker.dst_stage(layout).intersects(task_mesh),
+                "{layout:?} dst_stage must not include task/mesh"
+            );
+            assert_eq!(tracker.src_stage(layout), layout.src_stage());
+            assert_eq!(tracker.dst_stage(layout), layout.dst_stage());
+        }
+    }
+
+    #[test]
+    fn no_mesh_shading_leaves_scopes_raw() {
+        // A default tracker (mesh shading off) never augments any scope.
+        let tracker = TextureLayoutTracker::new();
+        for layout in [
+            TextureLayout::ShaderReadOnly,
+            TextureLayout::General,
+            TextureLayout::DepthStencilReadOnly,
+            TextureLayout::ColorAttachment,
+            TextureLayout::TransferDst,
+        ] {
+            assert_eq!(tracker.src_stage(layout), layout.src_stage());
+            assert_eq!(tracker.dst_stage(layout), layout.dst_stage());
+        }
     }
 }
