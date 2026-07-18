@@ -14,6 +14,7 @@
 pub mod attachment;
 pub mod bezier;
 mod draw;
+pub mod graph;
 pub mod junction;
 mod tool;
 
@@ -55,9 +56,12 @@ pub struct RoadSegment {
     pub a: Entity,
     /// End cross-section entity (must carry [`RoadNode`]).
     pub b: Entity,
-    /// Tangent length at `a`, meters — how far the patch keeps `a`'s heading.
+    /// Tangent length at `a`, meters — how far the patch keeps `a`'s
+    /// heading. **`≤ 0` means auto**: `|chord| / 3` for a lone segment,
+    /// Catmull-Rom (`|far_next − far_prev| / 6`, equal on both sides — C1)
+    /// at a two-segment chain joint. See [`graph::segment_tangents`].
     pub tangent_a: f32,
-    /// Tangent length at `b`, meters — how far the patch keeps `b`'s heading.
+    /// Tangent length at `b`, meters — same rules as `tangent_a`.
     pub tangent_b: f32,
 }
 
@@ -66,8 +70,8 @@ impl Default for RoadSegment {
         Self {
             a: Entity::DANGLING,
             b: Entity::DANGLING,
-            tangent_a: 4.0,
-            tangent_b: 4.0,
+            tangent_a: 0.0, // auto
+            tangent_b: 0.0, // auto
         }
     }
 }

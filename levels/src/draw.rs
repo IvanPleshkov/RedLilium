@@ -80,24 +80,13 @@ impl System for DrawLevelGraph {
             }
 
             if let Ok(segments) = world.read_all::<RoadSegment>() {
-                for (_, seg) in segments.iter() {
-                    let ends = (
-                        world.get::<GlobalTransform>(seg.a),
-                        world.get::<RoadNode>(seg.a),
-                        world.get::<GlobalTransform>(seg.b),
-                        world.get::<RoadNode>(seg.b),
-                    );
-                    let (Some(gta), Some(na), Some(gtb), Some(nb)) = ends else {
+                for (index, _) in segments.iter() {
+                    let Some(road) = world.entity_at_index(index) else {
                         continue;
                     };
-                    let patch = bezier::patch_from_nodes(
-                        &gta.0,
-                        na.half_width,
-                        seg.tangent_a,
-                        &gtb.0,
-                        nb.half_width,
-                        seg.tangent_b,
-                    );
+                    let Some(patch) = crate::graph::road_patch(world, road) else {
+                        continue;
+                    };
                     draw_patch(&mut draw, &patch);
                 }
             }

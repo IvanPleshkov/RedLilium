@@ -207,7 +207,6 @@ impl ConnectRoadsTool {
         let Some((a_mat, a_half)) = node_shape(ctx.world, anchor) else {
             return;
         };
-        let seg = RoadSegment::default();
         let end = hovered
             .and_then(|node| node_shape(ctx.world, node))
             .or_else(|| {
@@ -217,8 +216,13 @@ impl ConnectRoadsTool {
                 })
             });
         let Some((b_mat, b_half)) = end else { return };
-        let patch =
-            bezier::patch_from_nodes(&a_mat, a_half, seg.tangent_a, &b_mat, b_half, seg.tangent_b);
+        // Auto-tangent preview: chord/3, like a lone segment resolves.
+        let chord = {
+            let a = Vec3::new(a_mat[(0, 3)], a_mat[(1, 3)], a_mat[(2, 3)]);
+            let b = Vec3::new(b_mat[(0, 3)], b_mat[(1, 3)], b_mat[(2, 3)]);
+            ((b - a).norm() / 3.0).max(0.1)
+        };
+        let patch = bezier::patch_from_nodes(&a_mat, a_half, chord, &b_mat, b_half, chord);
         draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);
     }
 }
@@ -386,11 +390,19 @@ impl EditAction<World> for AddRoadAction {
 /// Undoable "spawn a road node at a point" — with an optional road from an
 /// existing anchor node. The `report` hands the created node back to the
 /// tool (actions apply a frame after they are pushed).
+///
+/// When the anchor becomes an *interior chain node* (exactly two roads, not
+/// a junction connector or attachment socket), the same click re-aims its
+/// +Z at the Catmull-Rom direction `prev → new` — without this, a chained
+/// node keeps the first chord's heading forever and laid chains "snake"
+/// (each span departs along the previous chord, then has to bend back).
 pub struct AddNodeAction {
     anchor: Option<Entity>,
     transform: Transform,
     created_node: Option<Entity>,
     created_road: Option<Entity>,
+    /// The anchor's pre-reorientation transform, for undo.
+    reoriented: Option<(Entity, Transform)>,
     pub report: Arc<Mutex<Option<Entity>>>,
 }
 
@@ -401,9 +413,50 @@ impl AddNodeAction {
             transform,
             created_node: None,
             created_road: None,
+            reoriented: None,
             report: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+/// Whether `node` may be auto-reoriented by chain authoring: a plain
+/// interior chain node — exactly two roads, no junction or attachment
+/// claims it (sockets keep their authored heading). Returns the far end of
+/// its *other* road (the chain-previous node), skipping `exclude`.
+fn reorientable(world: &World, node: Entity, exclude: Entity) -> Option<Entity> {
+    let mut prev = None;
+    let mut roads = 0;
+    let segments = world.read_all::<RoadSegment>().ok()?;
+    for (_, seg) in segments.iter() {
+        let far = if seg.a == node {
+            Some(seg.b)
+        } else if seg.b == node {
+            Some(seg.a)
+        } else {
+            None
+        };
+        if let Some(far) = far {
+            roads += 1;
+            if far != exclude {
+                prev = Some(far);
+            }
+        }
+    }
+    drop(segments);
+    if roads != 2 {
+        return None;
+    }
+    if let Ok(junctions) = world.read_all::<crate::Junction>()
+        && junctions.iter().any(|(_, j)| j.connectors.contains(&node))
+    {
+        return None;
+    }
+    if let Ok(attachments) = world.read_all::<EdgeAttachment>()
+        && attachments.iter().any(|(_, a)| a.node == node)
+    {
+        return None;
+    }
+    prev
 }
 
 impl std::fmt::Debug for AddNodeAction {
@@ -448,6 +501,31 @@ impl EditAction<World> for AddNodeAction {
             }
             self.created_road = Some(road);
         }
+
+        // Chain smoothing: re-aim an interior anchor at prev → new.
+        self.reoriented = None;
+        if let (Some(anchor), Some(_)) = (self.anchor, self.created_road)
+            && let Some(prev) = reorientable(world, anchor, node)
+            && let (Some(prev_c), Some(new_c)) = (
+                crate::graph::node_center(world, prev),
+                crate::graph::node_center(world, node),
+            )
+        {
+            let dir = new_c - prev_c;
+            if dir.norm() > 1e-4
+                && let Some(old_t) = world.get::<Transform>(anchor).copied()
+            {
+                let new_t = Transform::new(
+                    old_t.translation,
+                    quat_from_rotation_y(dir.x.atan2(dir.z)),
+                    old_t.scale,
+                );
+                let _ = world.insert(anchor, new_t);
+                let _ = world.insert(anchor, GlobalTransform(new_t.to_matrix()));
+                self.reoriented = Some((anchor, old_t));
+            }
+        }
+
         self.created_node = Some(node);
         *self.report.lock().expect("anchor report") = Some(node);
         Ok(())
@@ -459,6 +537,12 @@ impl EditAction<World> for AddNodeAction {
         }
         if let Some(node) = self.created_node.take() {
             world.despawn(node);
+        }
+        if let Some((anchor, old_t)) = self.reoriented.take()
+            && world.is_alive(anchor)
+        {
+            let _ = world.insert(anchor, old_t);
+            let _ = world.insert(anchor, GlobalTransform(old_t.to_matrix()));
         }
         *self.report.lock().expect("anchor report") = None;
         Ok(())
@@ -522,6 +606,45 @@ mod tests {
         action.undo(&mut world).unwrap();
         let roads = world.read_all::<RoadSegment>().unwrap().iter().count();
         assert_eq!(roads, 0);
+    }
+
+    #[test]
+    fn chained_ground_clicks_reorient_interior_node() {
+        let mut world = World::new();
+        redlilium_ecs::register_std_components(&mut world);
+        world.register_inspector_default::<RoadNode>();
+        world.register_inspector_default::<RoadSegment>();
+        world.register_inspector_default::<crate::Junction>();
+        world.register_inspector_default::<EdgeAttachment>();
+
+        // Click 1: lone node at origin. Click 2: node at (0, 20) — chord +Z.
+        let mut a1 =
+            AddNodeAction::new(None, node_transform(None, Vec3::new(0.0, 0.0, 0.0), &world));
+        a1.apply(&mut world).unwrap();
+        let n1 = a1.report.lock().unwrap().unwrap();
+        let t2 = node_transform(Some(n1), Vec3::new(0.0, 0.0, 20.0), &world);
+        let mut a2 = AddNodeAction::new(Some(n1), t2);
+        a2.apply(&mut world).unwrap();
+        let n2 = a2.report.lock().unwrap().unwrap();
+        let heading_before = bezier::heading(&world.get::<GlobalTransform>(n2).unwrap().0);
+        assert!((heading_before - Vec3::new(0.0, 0.0, 1.0)).norm() < 1e-4);
+
+        // Click 3: sharp right turn to (20, 20). n2 must re-aim at the
+        // Catmull-Rom direction n1 → n3 (diagonal), not keep the old chord.
+        let t3 = node_transform(Some(n2), Vec3::new(20.0, 0.0, 20.0), &world);
+        let mut a3 = AddNodeAction::new(Some(n2), t3);
+        a3.apply(&mut world).unwrap();
+        let heading_after = bezier::heading(&world.get::<GlobalTransform>(n2).unwrap().0);
+        let expected = Vec3::new(20.0, 0.0, 20.0).normalize();
+        assert!(
+            (heading_after - expected).norm() < 1e-3,
+            "interior node re-aims along prev→new, got {heading_after:?}"
+        );
+
+        // Undo click 3: n2's heading reverts to the old chord.
+        a3.undo(&mut world).unwrap();
+        let reverted = bezier::heading(&world.get::<GlobalTransform>(n2).unwrap().0);
+        assert!((reverted - heading_before).norm() < 1e-4);
     }
 
     #[test]

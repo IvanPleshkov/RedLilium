@@ -34,9 +34,10 @@ pub struct EdgeAttachment {
     pub u_min: f32,
     pub u_max: f32,
     /// Tangent length at the road edge, meters (along `∂P/∂v`, outward).
+    /// **`≤ 0` means auto** (a third of the landing-to-node span).
     pub tangent_edge: f32,
     /// Tangent length at the outer node, meters (along its +Z, toward the
-    /// road).
+    /// road). **`≤ 0` means auto**.
     pub tangent_node: f32,
 }
 
@@ -48,33 +49,13 @@ impl Default for EdgeAttachment {
             right_edge: true,
             u_min: 0.4,
             u_max: 0.6,
-            tangent_edge: 2.0,
-            tangent_node: 2.0,
+            tangent_edge: 0.0, // auto
+            tangent_node: 0.0, // auto
         }
     }
 }
 
-/// Rebuild the parent road's patch from the world. `None` when the road or
-/// its nodes are gone.
-pub fn road_patch(world: &World, road: Entity) -> Option<Patch> {
-    let seg = world.get::<RoadSegment>(road)?;
-    let (a_gt, a_node) = (
-        world.get::<GlobalTransform>(seg.a)?,
-        world.get::<RoadNode>(seg.a)?,
-    );
-    let (b_gt, b_node) = (
-        world.get::<GlobalTransform>(seg.b)?,
-        world.get::<RoadNode>(seg.b)?,
-    );
-    Some(bezier::patch_from_nodes(
-        &a_gt.0,
-        a_node.half_width,
-        seg.tangent_a,
-        &b_gt.0,
-        b_node.half_width,
-        seg.tangent_b,
-    ))
-}
+pub use crate::graph::road_patch;
 
 /// Derive the attachment's own patch. Row 0 lies on the road's edge curve;
 /// row 3 is the outer node's cross-section (uncrossed if needed).
@@ -86,6 +67,27 @@ pub fn attachment_patch(world: &World, att: &EdgeAttachment) -> Option<Patch> {
     let v_edge = if att.right_edge { 1.0 } else { 0.0 };
     let (u_min, u_max) = (att.u_min.min(att.u_max), att.u_min.max(att.u_max));
     let row0 = bezier::sample_edge_row(&road, v_edge, u_min, u_max);
+
+    let mut row3 = bezier::cross_section(&node_gt.0, node.half_width);
+    let straight = (row3[0] - row0[0]).norm() + (row3[3] - row0[3]).norm();
+    let crossed = (row3[3] - row0[0]).norm() + (row3[0] - row0[3]).norm();
+    if crossed < straight {
+        row3.reverse();
+    }
+
+    // Auto tangents (≤ 0): a third of the landing-to-node span.
+    let span = ((row3[0] + row3[3]) * 0.5 - (row0[0] + row0[3]) * 0.5).norm();
+    let auto = (span / 3.0).max(0.1);
+    let tangent_edge = if att.tangent_edge > 0.0 {
+        att.tangent_edge
+    } else {
+        auto
+    };
+    let tangent_node = if att.tangent_node > 0.0 {
+        att.tangent_node
+    } else {
+        auto
+    };
 
     // Leave the edge continuing the road's cross-slope: ∂P/∂v, flipped on
     // the v = 0 side so the tangent always points outward.
@@ -99,19 +101,13 @@ pub fn attachment_patch(world: &World, att: &EdgeAttachment) -> Option<Patch> {
         } else {
             Vec3::zeros()
         };
-        row0[i] + out * att.tangent_edge
+        row0[i] + out * tangent_edge
     });
 
-    let mut row3 = bezier::cross_section(&node_gt.0, node.half_width);
-    let straight = (row3[0] - row0[0]).norm() + (row3[3] - row0[3]).norm();
-    let crossed = (row3[3] - row0[0]).norm() + (row3[0] - row0[3]).norm();
-    if crossed < straight {
-        row3.reverse();
-    }
     // The node's +Z faces the road (socket convention): the control row
     // extends from the node toward the road, like a road leaving its `a`.
     let toward_road = bezier::heading(&node_gt.0);
-    let row2 = row3.map(|p| p + toward_road * att.tangent_node);
+    let row2 = row3.map(|p| p + toward_road * tangent_node);
 
     Some([row0, row1, row2, row3])
 }
