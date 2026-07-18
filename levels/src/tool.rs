@@ -15,7 +15,7 @@ use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::ui::{ToolFlow, ViewportRay, ViewportTool, ViewportToolCtx};
 use redlilium_ecs::{Entity, GlobalTransform, Transform, World};
 
-use crate::attachment::{self, AttachToEdgeAction, EdgeAttachment, EdgeHit};
+use crate::anchor::{self, AnchorNodeAction, EdgeAnchor, EdgeHit};
 use crate::{RoadNode, RoadSegment, bezier};
 
 /// Stable tool label — menu ops request activation by this name.
@@ -45,7 +45,7 @@ impl ViewportTool for ConnectRoadsTool {
     }
 
     fn status_hint(&self) -> &str {
-        "click a node to anchor · click ground to place · click a road edge to attach · Esc: drop anchor / exit"
+        "click a node or road edge to anchor · click ground to place · Esc: drop anchor / exit"
     }
 
     fn update(&mut self, ctx: &mut ViewportToolCtx<'_>) -> ToolFlow {
@@ -75,12 +75,13 @@ impl ViewportTool for ConnectRoadsTool {
             return ToolFlow::Continue;
         };
         let hovered = node_under_cursor(ctx.world, &ray);
-        // Edge hover only matters with an anchor and when no node is hit
-        // (nodes win: they sit at road ends where edges also pass close).
-        let edge = (self.anchor.is_some() && hovered.is_none())
-            .then(|| attachment::edge_under_cursor(ctx.world, &ray, EDGE_PICK_RADIUS))
+        // Edge hover matters only when no node is hit (nodes win: they sit
+        // at road ends where edges also pass close).
+        let edge = hovered
+            .is_none()
+            .then(|| anchor::edge_under_cursor(ctx.world, &ray, EDGE_PICK_RADIUS))
             .flatten()
-            // The anchor's own roads' edges are not attachment targets.
+            // The anchor's own roads' edges are not landing targets.
             .filter(|hit| !road_touches(ctx.world, hit.road, self.anchor));
 
         let ground = ground_hit(&ray);
@@ -102,31 +103,35 @@ impl ViewportTool for ConnectRoadsTool {
                         self.anchor = Some(node);
                     }
                 }
-                // Click a road edge: hang an attachment from the anchor
-                // onto it. A driveway terminates — the anchor drops.
-                (Some(anchor), None, Some(hit)) => {
-                    let half_width = ctx
-                        .world
-                        .get::<RoadNode>(anchor)
-                        .map(|n| n.half_width)
-                        .unwrap_or(3.0);
-                    let (u_min, u_max) = attachment::interval_around(ctx.world, &hit, half_width);
-                    ctx.actions
-                        .push(Box::new(AttachToEdgeAction::new(EdgeAttachment {
-                            road: hit.road,
-                            node: anchor,
+                // Click a road edge: spawn a node glued to it. With an
+                // anchor, a road arrives at it from outside and the gesture
+                // terminates (a driveway INTO the edge). Without one, the
+                // fresh anchored node becomes the anchor — a road chain
+                // grows OUT of the edge.
+                (anchor, None, Some(hit)) => {
+                    let half_width = anchor
+                        .and_then(|a| ctx.world.get::<RoadNode>(a).map(|n| n.half_width))
+                        .unwrap_or_else(|| RoadNode::default().half_width);
+                    let (u_min, u_max) = anchor::interval_around(ctx.world, &hit, half_width);
+                    let action = AnchorNodeAction::new(
+                        EdgeAnchor {
+                            parent_road: hit.road,
                             right_edge: hit.right_edge,
                             u_min,
                             u_max,
-                            ..EdgeAttachment::default()
-                        })));
-                    self.anchor = None;
+                        },
+                        anchor,
+                    );
+                    if anchor.is_none() {
+                        self.pending_anchor = Some(action.report.clone());
+                    } else {
+                        self.anchor = None;
+                    }
+                    ctx.actions.push(Box::new(action));
                 }
                 // Click empty ground: spawn a node there (and a road from
                 // the anchor, when one is set). The report chains the anchor.
-                // (`edge` is only computed with an anchor, so the remaining
-                // pattern is anchor-less-with-edge — treat it as ground.)
-                (anchor, None, _) => {
+                (anchor, None, None) => {
                     if let Some(point) = ground {
                         let action =
                             AddNodeAction::new(anchor, node_transform(anchor, point, ctx.world));
@@ -176,9 +181,9 @@ impl ConnectRoadsTool {
             );
         }
 
-        let Some(anchor) = self.anchor else { return };
-
-        // Preview an attachment onto the hovered road edge.
+        // Preview the would-be edge-anchored node on the hovered edge: its
+        // chord cross-section, plus the road arriving from the anchor when
+        // one is set.
         if let Some(hit) = edge {
             draw.draw_circle(
                 pt(&hit.point),
@@ -187,25 +192,36 @@ impl ConnectRoadsTool {
                 [0.0, 0.0, 1.0],
                 HOVER_COLOR,
             );
-            let half_width = ctx
-                .world
-                .get::<RoadNode>(anchor)
-                .map(|n| n.half_width)
-                .unwrap_or(3.0);
-            let (u_min, u_max) = attachment::interval_around(ctx.world, &hit, half_width);
-            let preview = EdgeAttachment {
-                road: hit.road,
-                node: anchor,
+            let half_width = self
+                .anchor
+                .and_then(|a| ctx.world.get::<RoadNode>(a).map(|n| n.half_width))
+                .unwrap_or_else(|| RoadNode::default().half_width);
+            let (u_min, u_max) = anchor::interval_around(ctx.world, &hit, half_width);
+            let preview = EdgeAnchor {
+                parent_road: hit.road,
                 right_edge: hit.right_edge,
                 u_min,
                 u_max,
-                ..EdgeAttachment::default()
             };
-            if let Some(patch) = attachment::attachment_patch(ctx.world, &preview) {
-                draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);
+            if let Some((t, hw)) = anchor::derive_anchor_state(ctx.world, &preview) {
+                let mat = t.to_matrix();
+                let section = bezier::cross_section(&mat, hw);
+                draw.draw_line(pt(&section[0]), pt(&section[3]), HOVER_COLOR);
+                let center = (section[0] + section[3]) * 0.5;
+                let out = bezier::heading(&mat);
+                draw.draw_line(pt(&center), pt(&(center + out * 1.5)), HOVER_COLOR);
+                if let Some((a_mat, a_half)) = self.anchor.and_then(|a| node_shape(ctx.world, a)) {
+                    let a_c = Vec3::new(a_mat[(0, 3)], a_mat[(1, 3)], a_mat[(2, 3)]);
+                    let chord = ((t.translation - a_c).norm() / 3.0).max(0.1);
+                    let patch =
+                        bezier::patch_from_nodes(&a_mat, a_half, chord, &mat, hw, chord, true);
+                    draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);
+                }
             }
             return;
         }
+
+        let Some(anchor) = self.anchor else { return };
 
         // Preview patch from the anchor to the hovered node / ground cursor.
         let Some((a_mat, a_half)) = node_shape(ctx.world, anchor) else {
@@ -259,17 +275,15 @@ fn road_touches(world: &World, road: Entity, node: Option<Entity>) -> bool {
         .is_some_and(|seg| seg.a == node || seg.b == node)
 }
 
-/// Whether `node` is a socket — a junction connector or an attachment's
-/// outer node. Sockets keep +Z toward the road network, so a road arriving
-/// AT one must meet it from the front (`RoadSegment::b_from_front`).
+/// Whether `node` is a socket — a junction connector or an edge-anchored
+/// node. Sockets keep +Z toward the road network, so a road arriving AT
+/// one must meet it from the front (`RoadSegment::b_from_front`).
 fn is_socket(world: &World, node: Entity) -> bool {
-    if let Ok(junctions) = world.read_all::<crate::Junction>()
-        && junctions.iter().any(|(_, j)| j.connectors.contains(&node))
-    {
+    if world.get::<EdgeAnchor>(node).is_some() {
         return true;
     }
-    if let Ok(attachments) = world.read_all::<EdgeAttachment>()
-        && attachments.iter().any(|(_, a)| a.node == node)
+    if let Ok(junctions) = world.read_all::<crate::Junction>()
+        && junctions.iter().any(|(_, j)| j.connectors.contains(&node))
     {
         return true;
     }
@@ -476,13 +490,11 @@ fn reorientable(world: &World, node: Entity, exclude: Entity) -> Option<Entity> 
     if roads != 2 {
         return None;
     }
-    if let Ok(junctions) = world.read_all::<crate::Junction>()
-        && junctions.iter().any(|(_, j)| j.connectors.contains(&node))
-    {
+    if world.get::<EdgeAnchor>(node).is_some() {
         return None;
     }
-    if let Ok(attachments) = world.read_all::<EdgeAttachment>()
-        && attachments.iter().any(|(_, a)| a.node == node)
+    if let Ok(junctions) = world.read_all::<crate::Junction>()
+        && junctions.iter().any(|(_, j)| j.connectors.contains(&node))
     {
         return None;
     }
@@ -645,7 +657,7 @@ mod tests {
         world.register_inspector_default::<RoadNode>();
         world.register_inspector_default::<RoadSegment>();
         world.register_inspector_default::<crate::Junction>();
-        world.register_inspector_default::<EdgeAttachment>();
+        world.register_inspector_default::<EdgeAnchor>();
 
         // Click 1: lone node at origin. Click 2: node at (0, 20) — chord +Z.
         let mut a1 =

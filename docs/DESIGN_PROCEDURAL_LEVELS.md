@@ -108,29 +108,33 @@ the entities mean.
   `TerrainControlPoint`. Terrain fills the regions *between* roads (faces of
   the planar road graph, projected to ground plane); control points bend the
   interpolated surface where plain filling is too flat.
-- **Edge attachment** (P5) — the third connection type in the graph, next to
-  node–node roads: a connection that lands on **part of a road's boundary
-  curve** rather than on a node. The canonical case: a driveway/building
-  exit crossing the sidewalk to meet the road. Authored with the connect
-  tool (anchor a node, click a road edge); stored as
-  `EdgeAttachment { road, node, right_edge, u_min, u_max, tangents }` — an
-  explicit, editable entity. The attached patch samples its road-side row
-  directly from the road's boundary curve on that interval — the seam is
-  **watertight by construction**, and because the interval is *parametric*,
-  it stays watertight as the road's nodes move. The patch leaves the edge
-  along the surface's cross derivative (`∂P/∂v` — continuing the road's
-  cross-slope) and ends at the outer node. **Unified socket convention**
-  (same as junction connectors): the outer node's **+Z faces the road
-  network** — the driveway departs it along +Z exactly like a road departs
-  its `a` node — and the owning structure fills the −Z side behind it; a
-  building assembly graph will later attach there (phase 3's entry point).
-  One rule everywhere: *a socket node is an `a`-end; +Z points into the
-  road network; the structure behind it owns −Z.* The
-  attachment is passed to the road's generator in its `PieceDesc`, and the
-  generator resolves the junction itself (curb break, sidewalk ramp, …).
+- **Edge anchor** (P5) — the way a connection lands on **part of a road's
+  boundary curve** rather than on a node. The canonical case: a
+  driveway/building exit crossing the sidewalk to meet the road. Not a
+  separate patch kind: `EdgeAnchor { parent_road, right_edge, u_min, u_max }`
+  is a component on an ordinary `RoadNode`, gluing it to the parent's edge.
+  The node's `Transform` and `half_width` are **derived data** (like
+  `GlobalTransform`, recomputed by a bounded fixed-point pass each frame):
+  position/orientation come from the **chord** between the edge points at
+  `u_min`/`u_max` — local X along the chord, +Z outward from the road —
+  and `half_width` is half the chord. The seam is that *straight* chord,
+  not the curved edge: **a road piece's geometry is always the span between
+  two straight segments**, and closing the sliver between chord and true
+  edge curve is the mesh generator's job — it receives the parametric
+  interval in the `PieceDesc`, the same division of labor as cut profiles.
+  Because the interval is parametric, the anchored node follows every
+  parent-road edit. The driveway itself is then an **ordinary
+  `RoadSegment`** out of the anchored node — its own edges are pickable
+  and anchorable like any road's, so chains (road → driveway → parking
+  lot) need no special support. **Unified socket convention** (same as
+  junction connectors): the anchored node's **+Z faces outward, into the
+  road network** — a chain grows out of it as its `a` end; a road arriving
+  at it from the field meets it from the front (`b_from_front`). One rule
+  everywhere: *a socket node is an `a`-end; +Z points into the road
+  network; the structure behind it owns −Z.*
 - **Intersections are hand-managed.** The author places nodes and owns the
   result. A validator flags *unsanctioned* crossings — two roads
-  intersecting in projection with neither a shared node nor an attachment —
+  intersecting in projection with neither a shared node nor an edge anchor —
   as authoring errors; it never tries to auto-resolve them.
 - **Building** — entity with `Transform` + a reference to an **assembly
   graph asset** (a reusable recipe: one "землянка" recipe, ten placements).
@@ -221,13 +225,13 @@ generator libraries can be generic over it without linking the ECS.
 - `PieceDesc` carries the resolved inputs: the 16 patch points for a road,
   region boundary + control points for terrain, assembly graph for a
   building, plus neighbor stitching info. Per P5 it also carries the piece's
-  **boundary attachments** (driveways landing on this road's edge, with
-  their u-intervals and cross-sections) and **through-features** for
+  **edge anchors** (driveways landing on this road's edge, with their
+  u-intervals and chord cross-sections) and **through-features** for
   intersections (e.g. tram tracks crossing the junction: a feature curve
   with its own profile and params — data, not code). A procedural
   intersection with tram tracks is therefore a *rich descriptor handed to
   tyroxine*, not junction code in this crate.
-- Roads normally stay one piece per graph edge, with attachments described
+- Roads normally stay one piece per graph edge, with edge anchors described
   in the descriptor. When semantic granularity genuinely requires splitting
   a road into parts (different params per stretch), the tool subdivides the
   Bézier patch via **de Casteljau** — subdivision of a Bézier patch at a
@@ -282,7 +286,7 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
 - Terrain region extraction: exact algorithm for faces of the planar road
   graph. Unsanctioned crossings are validator errors (§3), which bounds the
   problem; still a phase 2 decision.
-- **Interior trims** — an attachment landing in the *interior* of a surface
+- **Interior trims** — a connection landing in the *interior* of a surface
   (a trim loop inside the (u,v) domain) rather than on its boundary curve.
   Deliberately deferred until a real need appears; edges and cross-sections
   cover everything described so far.
@@ -291,7 +295,7 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
 - ~~Road attachment side~~ — **resolved** (2026-07-18): `RoadSegment` grew
   `b_from_front` — the road meets `b` on its +Z side instead of the default
   −Z. The connect tool sets it automatically when the clicked target is a
-  socket (junction connector / attachment outer node), which also makes
+  socket (junction connector / edge-anchored node), which also makes
   socket↔socket roads representable: depart `a` along +Z, enter `b` from
   the front. The `a` end needs no flag — an anchor socket departs along
   its +Z by construction.

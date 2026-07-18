@@ -4,7 +4,7 @@ use redlilium_core::math::{Mat4, Vec3, Vec4};
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerContext};
 use redlilium_ecs::{GlobalTransform, Res, System, SystemContext, SystemError};
 
-use crate::attachment::{self, EdgeAttachment};
+use crate::anchor::EdgeAnchor;
 use crate::bezier::{self, Patch};
 use crate::junction::{self, Junction};
 use crate::{RoadNode, RoadSegment};
@@ -46,25 +46,22 @@ impl System for DrawLevelGraph {
                 }
             }
 
-            if let Ok(attachments) = world.read_all::<EdgeAttachment>() {
-                for (_, att) in attachments.iter() {
-                    let Some(patch) = attachment::attachment_patch(world, att) else {
+            if let Ok(anchors) = world.read_all::<EdgeAnchor>() {
+                for (_, anchor) in anchors.iter() {
+                    // Interval ticks: mark where the anchored node's chord
+                    // cuts the parent edge (the future curb break).
+                    let Some(road) = crate::graph::road_patch(world, anchor.parent_road) else {
                         continue;
                     };
-                    draw_patch(&mut draw, &patch);
-                    // Interval ticks: mark where the landing cuts the
-                    // parent edge (the future curb break).
-                    if let Some(road) = attachment::road_patch(world, att.road) {
-                        let v_edge = if att.right_edge { 1.0 } else { 0.0 };
-                        for u in [att.u_min, att.u_max] {
-                            let p = bezier::eval(&road, u, v_edge);
-                            let dv = bezier::eval_dv(&road, u, v_edge);
-                            let out = dv * if att.right_edge { 1.0 } else { -1.0 };
-                            if out.norm() > 1e-6 {
-                                let out = out.normalize() * 0.5;
-                                let pt = |v: &redlilium_core::math::Vec3| [v.x, v.y, v.z];
-                                draw.draw_line(pt(&(p - out)), pt(&(p + out)), NODE_COLOR);
-                            }
+                    let v_edge = if anchor.right_edge { 1.0 } else { 0.0 };
+                    for u in [anchor.u_min, anchor.u_max] {
+                        let p = bezier::eval(&road, u, v_edge);
+                        let dv = bezier::eval_dv(&road, u, v_edge);
+                        let out = dv * if anchor.right_edge { 1.0 } else { -1.0 };
+                        if out.norm() > 1e-6 {
+                            let out = out.normalize() * 0.5;
+                            let pt = |v: &redlilium_core::math::Vec3| [v.x, v.y, v.z];
+                            draw.draw_line(pt(&(p - out)), pt(&(p + out)), NODE_COLOR);
                         }
                     }
                 }

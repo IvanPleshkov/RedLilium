@@ -11,19 +11,19 @@
 //! read-only preview system via `build_editing_view` — both generic
 //! extension points.
 
-pub mod attachment;
+pub mod anchor;
 pub mod bezier;
 mod draw;
 pub mod graph;
 pub mod junction;
 mod tool;
 
-pub use attachment::{AttachToEdgeAction, EdgeAttachment};
+pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_anchors};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
-use redlilium_ecs::{Component, Entity, Update, World};
+use redlilium_ecs::{Component, Entity, PostUpdate, Update, UpdateGlobalTransforms, World};
 
 /// A road cross-section ("срез"): a straight segment along the entity's
 /// **local X axis**, centered at the origin, `2 * half_width` long. The
@@ -64,7 +64,7 @@ pub struct RoadSegment {
     /// Tangent length at `b`, meters — same rules as `tangent_a`.
     pub tangent_b: f32,
     /// The road meets `b` on its **+Z (front) side** instead of the default
-    /// −Z. Set when `b` is a socket (junction connector, attachment outer
+    /// −Z. Set when `b` is a socket (junction connector, edge-anchored
     /// node): sockets keep +Z toward the road network, so a road arriving
     /// *at* one must approach from the front — and a road between two
     /// sockets departs `a` along +Z and enters `b` from the front.
@@ -93,13 +93,23 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<RoadNode>();
         world.register_inspector_default::<RoadSegment>();
         world.register_inspector_default::<Junction>();
-        world.register_inspector_default::<EdgeAttachment>();
+        world.register_inspector_default::<EdgeAnchor>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
 
     fn build_editing_view(&self, view: &mut redlilium_runtime::EditingView<'_>) {
         view.schedules.get_mut::<Update>().add(DrawLevelGraph);
+        // Derived data (anchored-node placements) writes the world, so it
+        // cannot live in `Update` — the editor marks that schedule read-only
+        // to structurally enforce the EditAction invariant. It goes in
+        // `PostUpdate` next to `UpdateGlobalTransforms`, ordered before it
+        // so a re-derived node's children (future buildings) propagate the
+        // same frame.
+        let post = view.schedules.get_mut::<PostUpdate>();
+        post.add(DeriveEdgeAnchors);
+        post.add_edge::<DeriveEdgeAnchors, UpdateGlobalTransforms>()
+            .expect("derive → propagate is acyclic");
         view.tools.add(Box::new(ConnectRoadsTool::default()));
         // "Add road" arms the connect tool: clicks then place/connect nodes
         // until Escape. The op itself edits nothing.

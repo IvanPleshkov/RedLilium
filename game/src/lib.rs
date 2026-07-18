@@ -613,21 +613,33 @@ pub fn spawn_levels_playground(world: &mut World) {
     road(world, n2, n3);
     road(world, n3, n4);
 
-    // A driveway (EdgeAttachment): an outer node east of the first road,
-    // landing on part of its right edge. Socket convention: the node's +Z
-    // faces the road; the future building fills the −Z side behind it.
+    // A driveway: a node glued to part of the first road's right edge (its
+    // transform is derived from the parent edge — see
+    // `redlilium_levels::EdgeAnchor`) plus an ordinary road from it to an
+    // outer exit node. Socket convention: the exit's +Z faces the road; the
+    // future building fills the −Z side behind it.
+    let glued = node(world, 0.0, 0.0, 0.0);
+    world
+        .insert(
+            glued,
+            redlilium_levels::EdgeAnchor {
+                parent_road: r1,
+                right_edge: true,
+                u_min: 0.35,
+                u_max: 0.65,
+            },
+        )
+        .unwrap();
     let exit = node(world, 9.0, 5.5, -std::f32::consts::FRAC_PI_2);
     let driveway = world.spawn();
     world
         .insert(
             driveway,
-            redlilium_levels::EdgeAttachment {
-                road: r1,
-                node: exit,
-                right_edge: true,
-                u_min: 0.35,
-                u_max: 0.65,
-                ..redlilium_levels::EdgeAttachment::default()
+            RoadSegment {
+                a: glued,
+                b: exit,
+                b_from_front: true,
+                ..RoadSegment::default()
             },
         )
         .unwrap();
@@ -687,6 +699,10 @@ pub fn spawn_levels_playground(world: &mut World) {
             },
         )
         .unwrap();
+
+    // Bake the edge-anchored nodes' derived transforms so the scene ships
+    // settled — the editor's derive system then has nothing to rewrite.
+    redlilium_levels::settle_edge_anchors(world);
 }
 
 fn spawn_box(
