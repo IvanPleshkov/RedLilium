@@ -318,6 +318,64 @@ fn node_under_cursor(world: &World, ray: &ViewportRay) -> Option<Entity> {
     best.map(|(_, e)| e)
 }
 
+/// Pick radius of a road's selection-handle cube (matches its drawn size,
+/// with a little slack).
+const ROAD_HANDLE_PICK_RADIUS: f32 = crate::draw::HANDLE_HALF * 2.0;
+
+/// CPU selection pick for the editor's click-select: graph entities carry
+/// no mesh, so the GPU entity-index pass cannot see them. The candidate is
+/// chosen by cursor proximity between road nodes (their cross-section
+/// segments) and road handle cubes (patch midpoints — the proxy for the
+/// road entity); the claim is then depth-checked against the editor's own
+/// scene hit — a mesh in front of the control keeps the editor's pick.
+pub(crate) fn selection_pick(
+    world: &World,
+    query: &redlilium_ecs::ui::ViewportPickQuery,
+) -> Option<redlilium_ecs::ui::ViewportPickHit> {
+    let ray = &query.ray;
+    // (perpendicular distance, t along ray, entity).
+    let mut best: Option<(f32, f32, Entity)> = None;
+    let mut consider = |dist: f32, limit: f32, t: f32, entity: Entity| {
+        if dist <= limit && best.is_none_or(|(d, _, _)| dist < d) {
+            best = Some((dist, t, entity));
+        }
+    };
+    if let Ok(nodes) = world.read_all::<RoadNode>() {
+        for (index, node) in nodes.iter() {
+            let Some(entity) = world.entity_at_index(index) else {
+                continue;
+            };
+            let Some(gt) = world.get::<GlobalTransform>(entity) else {
+                continue;
+            };
+            let section = bezier::cross_section(&gt.0, node.half_width);
+            let (dist, _, t) = ray_segment_closest(ray, section[0], section[3]);
+            consider(dist, PICK_RADIUS, t, entity);
+        }
+    }
+    if let Ok(segments) = world.read_all::<RoadSegment>() {
+        for (index, _) in segments.iter() {
+            let Some(road) = world.entity_at_index(index) else {
+                continue;
+            };
+            let Some(patch) = crate::graph::road_patch(world, road) else {
+                continue;
+            };
+            let mid = bezier::eval(&patch, 0.5, 0.5);
+            let (dist, _, t) = ray_segment_closest(ray, mid, mid);
+            consider(dist, ROAD_HANDLE_PICK_RADIUS, t, road);
+        }
+    }
+    let (_, t, entity) = best?;
+    if let Some(point) = query.scene_point {
+        let t_scene = (point - ray.origin).dot(&ray.dir) / ray.dir.dot(&ray.dir).max(1e-8);
+        if t_scene < t {
+            return None; // the scene mesh is in front — editor's pick stands
+        }
+    }
+    Some(redlilium_ecs::ui::ViewportPickHit { entity, t })
+}
+
 /// Intersection of the cursor ray with the ground plane (y = 0), when the
 /// ray points at it. Also serves the menu ops that place things at the
 /// click point.
@@ -334,9 +392,10 @@ fn ray_segment_distance(ray: &ViewportRay, p0: Vec3, p1: Vec3) -> f32 {
     ray_segment_closest(ray, p0, p1).0
 }
 
-/// Closest approach between a ray and a segment: `(distance, s)` where `s`
-/// is the segment parameter of the closest point. Shared with edge picking.
-pub(crate) fn ray_segment_closest(ray: &ViewportRay, p0: Vec3, p1: Vec3) -> (f32, f32) {
+/// Closest approach between a ray and a segment: `(distance, s, t)` where
+/// `s` is the segment parameter of the closest point and `t` the ray
+/// parameter (depth along the ray). Shared with edge and selection picking.
+pub(crate) fn ray_segment_closest(ray: &ViewportRay, p0: Vec3, p1: Vec3) -> (f32, f32, f32) {
     let u = ray.dir;
     let v = p1 - p0;
     let w = ray.origin - p0;
@@ -354,7 +413,7 @@ pub(crate) fn ray_segment_closest(ray: &ViewportRay, p0: Vec3, p1: Vec3) -> (f32
     let on_segment = p0 + v * s;
     let t = ((on_segment - ray.origin).dot(&u) / a).max(0.0);
     let on_ray = ray.origin + u * t;
-    ((on_ray - on_segment).norm(), s)
+    ((on_ray - on_segment).norm(), s, t)
 }
 
 /// Transform for a ground-spawned node at `point`: oriented so its +Z (the
@@ -623,6 +682,41 @@ mod tests {
         assert!(ground_hit(&ray([0.0, 5.0, 0.0], [0.0, -1.0, 0.0])).is_some());
         assert!(ground_hit(&ray([0.0, 5.0, 0.0], [0.0, 1.0, 0.0])).is_none());
         assert!(ground_hit(&ray([0.0, 5.0, 0.0], [1.0, 0.0, 0.0])).is_none());
+    }
+
+    #[test]
+    fn selection_pick_defers_to_a_nearer_scene_hit() {
+        let mut world = World::new();
+        redlilium_ecs::register_std_components(&mut world);
+        world.register_inspector_default::<RoadNode>();
+        world.register_inspector_default::<RoadSegment>();
+
+        let node = world.spawn();
+        let t = Transform::default();
+        world.insert(node, t).unwrap();
+        world.insert(node, GlobalTransform(t.to_matrix())).unwrap();
+        world.insert(node, RoadNode::default()).unwrap();
+
+        // Ray straight down onto the node (t = 10 at the hit).
+        let ray = ViewportRay {
+            origin: Vec3::new(0.0, 10.0, 0.0),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        let query = |scene_point| redlilium_ecs::ui::ViewportPickQuery {
+            ray,
+            scene_entity: None,
+            scene_point,
+        };
+
+        // Empty space under the click: the node is claimed.
+        let hit = selection_pick(&world, &query(None)).expect("claim");
+        assert_eq!(hit.entity, node);
+        assert!((hit.t - 10.0).abs() < 1e-3);
+        // A scene mesh in FRONT of the control (t = 5): defer to the editor.
+        assert!(selection_pick(&world, &query(Some(Vec3::new(0.0, 5.0, 0.0)))).is_none());
+        // A scene mesh BEHIND the control (t = 15): the control wins.
+        let hit = selection_pick(&world, &query(Some(Vec3::new(0.0, -5.0, 0.0)))).expect("wins");
+        assert_eq!(hit.entity, node);
     }
 
     #[test]

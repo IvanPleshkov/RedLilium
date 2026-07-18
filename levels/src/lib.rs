@@ -107,9 +107,13 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         // so a re-derived node's children (future buildings) propagate the
         // same frame.
         let post = view.schedules.get_mut::<PostUpdate>();
-        post.add(DeriveEdgeAnchors);
+        post.add(DeriveEdgeAnchors::default());
         post.add_edge::<DeriveEdgeAnchors, UpdateGlobalTransforms>()
             .expect("derive → propagate is acyclic");
+        // Click-select fallback: graph entities are meshless, so the GPU
+        // entity-index pass cannot see them — nodes pick by cross-section,
+        // roads by their midpoint handle cube.
+        view.pickers.add(Box::new(tool::selection_pick));
         view.tools.add(Box::new(ConnectRoadsTool::default()));
         // "Add road" arms the connect tool: clicks then place/connect nodes
         // until Escape. The op itself edits nothing.

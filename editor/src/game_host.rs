@@ -307,12 +307,16 @@ impl GameHost {
         ew.world = world;
         let mut ops = ew.world.resource_mut::<redlilium_ecs::ui::ViewportOps>();
         let mut tools = ew.world.resource_mut::<redlilium_ecs::ui::ViewportTools>();
+        let mut pickers = ew
+            .world
+            .resource_mut::<redlilium_ecs::ui::ViewportPickers>();
         module
             .plugin()
             .build_editing_view(&mut redlilium_runtime::EditingView {
                 schedules: &mut ew.schedules,
                 ops: &mut ops,
                 tools: &mut tools,
+                pickers: &mut pickers,
             });
     }
 

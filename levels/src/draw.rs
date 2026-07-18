@@ -85,6 +85,14 @@ impl System for DrawLevelGraph {
                         continue;
                     };
                     draw_patch(&mut draw, &patch);
+                    // Selection handle: the clickable proxy for the road
+                    // entity (see the levels CPU picker).
+                    draw_handle_cube(
+                        &mut draw,
+                        bezier::eval(&patch, 0.5, 0.5),
+                        HANDLE_HALF,
+                        EDGE_COLOR,
+                    );
                 }
             }
         });
@@ -134,6 +142,26 @@ fn draw_junction(draw: &mut DebugDrawerContext<'_>, lp: &junction::JunctionLoop)
     for connector in &lp.connectors {
         let mid = (connector.section[0] + connector.section[3]) * 0.5;
         draw.draw_line(pt(&lp.centroid), pt(&mid), GRID_COLOR);
+    }
+}
+
+/// Half-extent of a road's selection-handle cube, world units. Matches the
+/// pick radius in `tool::selection_pick`.
+pub(crate) const HANDLE_HALF: f32 = 0.3;
+
+/// Small wireframe cube — the visual for a meshless entity's pick proxy.
+fn draw_handle_cube(draw: &mut DebugDrawerContext<'_>, center: Vec3, half: f32, color: [f32; 4]) {
+    let corner = |sx: f32, sy: f32, sz: f32| center + Vec3::new(sx, sy, sz) * half;
+    let ring = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+    for sy in [-1.0f32, 1.0] {
+        for i in 0..4 {
+            let (ax, az) = ring[i];
+            let (bx, bz) = ring[(i + 1) % 4];
+            draw.draw_line(pt(&corner(ax, sy, az)), pt(&corner(bx, sy, bz)), color);
+        }
+    }
+    for (sx, sz) in ring {
+        draw.draw_line(pt(&corner(sx, -1.0, sz)), pt(&corner(sx, 1.0, sz)), color);
     }
 }
 

@@ -255,6 +255,70 @@ impl ViewportTools {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Viewport pickers
+// ---------------------------------------------------------------------------
+
+/// What the editor resolved under a select click, handed to the plugins'
+/// pickers: the cursor ray, the scene entity the GPU entity-index pass
+/// found (a mesh), and an approximate world-space point of that hit (ray ∩
+/// the entity's bounds) so a picker can compare depth.
+pub struct ViewportPickQuery {
+    pub ray: ViewportRay,
+    /// The scene entity under the cursor per the GPU pass, if any.
+    pub scene_entity: Option<Entity>,
+    /// Approximate world-space hit point on `scene_entity`; `None` when
+    /// nothing was hit or the entity has no bounds.
+    pub scene_point: Option<Vec3>,
+}
+
+/// A picker's answer: the entity it claims, and the hit's distance along
+/// the ray (`origin + dir * t`) — comparable against other pickers' hits.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewportPickHit {
+    pub entity: Entity,
+    pub t: f32,
+}
+
+/// Signature of a registered CPU picker.
+pub type ViewportPicker =
+    Box<dyn Fn(&World, &ViewportPickQuery) -> Option<ViewportPickHit> + Send + Sync>;
+
+/// CPU pick overrides for viewport click-selection (a world resource).
+///
+/// The editor's click-select resolves through the GPU entity-index pass,
+/// which only sees mesh renderers. Entities that draw as overlay lines
+/// (road nodes, graph handles, …) register a picker here. Each picker sees
+/// the editor's own resolution ([`ViewportPickQuery`]) and decides: return
+/// a hit to override it — overlay controls may legitimately sit in front
+/// of scene meshes — or `None` to leave the editor's result alone (e.g.
+/// when the scene hit is closer to the camera than the control).
+#[derive(Default)]
+pub struct ViewportPickers {
+    pickers: Vec<ViewportPicker>,
+}
+
+impl ViewportPickers {
+    pub fn add(&mut self, picker: ViewportPicker) {
+        self.pickers.push(picker);
+    }
+
+    /// Final click resolution: the nearest plugin hit (along the ray) wins;
+    /// with no plugin hits the editor's scene entity stands.
+    pub fn resolve(&self, world: &World, query: &ViewportPickQuery) -> Option<Entity> {
+        self.pickers
+            .iter()
+            .filter_map(|p| p(world, query))
+            .min_by(|a, b| a.t.total_cmp(&b.t))
+            .map(|hit| hit.entity)
+            .or(query.scene_entity)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pickers.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +349,50 @@ mod tests {
 
     fn ctx_world() -> (World, ActionQueue<World>) {
         (World::new(), ActionQueue::new())
+    }
+
+    #[test]
+    fn pickers_override_or_keep_the_scene_hit() {
+        let mut world = World::new();
+        let scene = world.spawn();
+        let control = world.spawn();
+        let near_control = world.spawn();
+        let query = |scene_entity| ViewportPickQuery {
+            ray: ViewportRay {
+                origin: Vec3::new(0.0, 10.0, 0.0),
+                dir: Vec3::new(0.0, -1.0, 0.0),
+            },
+            scene_entity,
+            scene_point: None,
+        };
+
+        // No pickers: the editor's resolution stands.
+        let mut pickers = ViewportPickers::default();
+        assert_eq!(pickers.resolve(&world, &query(Some(scene))), Some(scene));
+        assert_eq!(pickers.resolve(&world, &query(None)), None);
+
+        // A declining picker leaves the scene hit alone.
+        pickers.add(Box::new(|_, _| None));
+        assert_eq!(pickers.resolve(&world, &query(Some(scene))), Some(scene));
+
+        // A claiming picker overrides; the nearest claim wins.
+        pickers.add(Box::new(move |_, _| {
+            Some(ViewportPickHit {
+                entity: control,
+                t: 5.0,
+            })
+        }));
+        assert_eq!(pickers.resolve(&world, &query(Some(scene))), Some(control));
+        pickers.add(Box::new(move |_, _| {
+            Some(ViewportPickHit {
+                entity: near_control,
+                t: 2.0,
+            })
+        }));
+        assert_eq!(
+            pickers.resolve(&world, &query(Some(scene))),
+            Some(near_control)
+        );
     }
 
     #[test]

@@ -40,8 +40,9 @@ pub use component_inspector::{
 };
 pub use gizmo_anchors::{AnchorCtx, AnchorEdit, GizmoAnchor, GizmoAnchors, GizmoCaps};
 pub use viewport::{
-    ToolFlow, ViewportOp, ViewportOpCtx, ViewportOps, ViewportRay, ViewportTool, ViewportToolCtx,
-    ViewportToolInput, ViewportTools,
+    ToolFlow, ViewportOp, ViewportOpCtx, ViewportOps, ViewportPickHit, ViewportPickQuery,
+    ViewportPicker, ViewportPickers, ViewportRay, ViewportTool, ViewportToolCtx, ViewportToolInput,
+    ViewportTools,
 };
 pub use world_inspector::{
     DeleteEntityAction, ReparentAction, SpawnEntityAction, SpawnPrefabAction, SpawnReport,

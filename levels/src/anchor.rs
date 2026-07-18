@@ -92,9 +92,64 @@ pub fn derive_anchor_state(world: &World, anchor: &EdgeAnchor) -> Option<(Transf
     Some((transform, (length * 0.5).max(0.1)))
 }
 
-/// One derivation pass: every anchored node whose derived placement differs
-/// from its current one, with the new values. Empty means settled.
-fn anchor_updates(world: &World) -> Vec<(Entity, Transform, f32)> {
+/// Project a world position onto the parent edge: the interval (of fixed
+/// `width`) whose chord midpoint is closest to `pos`. Coarse scan + ternary
+/// refinement — deterministic, ~1e-6 in `u`.
+fn project_onto_edge(
+    patch: &crate::bezier::Patch,
+    v_edge: f32,
+    width: f32,
+    pos: Vec3,
+) -> (f32, f32) {
+    let half = (width * 0.5).min(0.5);
+    let (lo, hi) = (half, 1.0 - half);
+    if hi <= lo {
+        return (0.0, 1.0);
+    }
+    let mid = |c: f32| {
+        (bezier::eval(patch, c - half, v_edge) + bezier::eval(patch, c + half, v_edge)) * 0.5
+    };
+    const COARSE: usize = 64;
+    let mut best = lo;
+    let mut best_d = f32::MAX;
+    for i in 0..=COARSE {
+        let c = lo + (hi - lo) * (i as f32 / COARSE as f32);
+        let d = (mid(c) - pos).norm_squared();
+        if d < best_d {
+            best_d = d;
+            best = c;
+        }
+    }
+    let step = (hi - lo) / COARSE as f32;
+    let (mut a, mut b) = ((best - step).max(lo), (best + step).min(hi));
+    for _ in 0..40 {
+        let m1 = a + (b - a) / 3.0;
+        let m2 = b - (b - a) / 3.0;
+        if (mid(m1) - pos).norm_squared() < (mid(m2) - pos).norm_squared() {
+            b = m2;
+        } else {
+            a = m1;
+        }
+    }
+    let c = (a + b) * 0.5;
+    (c - half, c + half)
+}
+
+/// One planned write: derived placement, plus the shifted interval when the
+/// node is *sliding* (its transform was authored away from the derived one).
+type AnchorUpdate = (Entity, Transform, f32, Option<(f32, f32)>);
+
+/// One derivation pass. `cache` remembers each anchored node's last settled
+/// transform: a node that differs from BOTH the cache and the derived state
+/// was moved by the author (gizmo/inspector) → project it onto the parent
+/// edge and shift the interval (sliding). A node equal to the cache whose
+/// derived state moved away follows the edge (parametric follow). Settled
+/// nodes are recorded into the cache. Empty result means settled.
+fn anchor_updates(
+    world: &World,
+    cache: &mut std::collections::HashMap<Entity, Transform>,
+    slide: bool,
+) -> Vec<AnchorUpdate> {
     let Ok(anchors) = world.read_all::<EdgeAnchor>() else {
         return Vec::new();
     };
@@ -103,21 +158,56 @@ fn anchor_updates(world: &World) -> Vec<(Entity, Transform, f32)> {
         let Some(entity) = world.entity_at_index(index) else {
             continue;
         };
-        let Some((transform, half_width)) = derive_anchor_state(world, anchor) else {
+        let Some((derived_t, derived_hw)) = derive_anchor_state(world, anchor) else {
             continue;
         };
-        let current_t = world.get::<Transform>(entity);
-        let current_n = world.get::<RoadNode>(entity);
-        let changed = match (current_t, current_n) {
-            (Some(t), Some(n)) => {
-                (t.to_matrix() - transform.to_matrix()).norm() > 1e-4
-                    || (n.half_width - half_width).abs() > 1e-4
-            }
-            _ => true,
+        let (current_t, current_n) = (
+            world.get::<Transform>(entity),
+            world.get::<RoadNode>(entity),
+        );
+        let (Some(t), Some(n)) = (current_t, current_n) else {
+            updates.push((entity, derived_t, derived_hw, None));
+            continue;
         };
-        if changed {
-            updates.push((entity, transform, half_width));
+        let settled = (t.to_matrix() - derived_t.to_matrix()).norm() <= 1e-4
+            && (n.half_width - derived_hw).abs() <= 1e-4;
+        if settled {
+            cache.insert(entity, *t);
+            continue;
         }
+        let moved = slide
+            && cache
+                .get(&entity)
+                .is_some_and(|prev| (prev.to_matrix() - t.to_matrix()).norm() > 1e-4);
+        if moved {
+            // Sliding: keep the interval width, move its center to the
+            // closest edge point to where the author dragged the node.
+            let slid = (|| {
+                let patch = road_patch(world, anchor.parent_road)?;
+                let v_edge = if anchor.right_edge { 1.0 } else { 0.0 };
+                let (u_min, u_max) = (
+                    anchor.u_min.min(anchor.u_max),
+                    anchor.u_min.max(anchor.u_max),
+                );
+                let (new_min, new_max) =
+                    project_onto_edge(&patch, v_edge, u_max - u_min, t.translation);
+                if (new_min - u_min).abs() < 1e-5 && (new_max - u_max).abs() < 1e-5 {
+                    return None; // landed where it already was — just snap
+                }
+                let slid = EdgeAnchor {
+                    u_min: new_min,
+                    u_max: new_max,
+                    ..anchor.clone()
+                };
+                let (slid_t, slid_hw) = derive_anchor_state(world, &slid)?;
+                Some((entity, slid_t, slid_hw, Some((new_min, new_max))))
+            })();
+            if let Some(update) = slid {
+                updates.push(update);
+                continue;
+            }
+        }
+        updates.push((entity, derived_t, derived_hw, None));
     }
     updates
 }
@@ -127,35 +217,64 @@ fn anchor_updates(world: &World) -> Vec<(Entity, Transform, f32)> {
 const MAX_PASSES: usize = 8;
 
 /// Settle every edge anchor in place — the `&mut World` variant used by
-/// scene baking and tests. The frame-loop variant is [`DeriveEdgeAnchors`].
+/// scene baking and tests. Follow-only (no sliding: baking has no notion
+/// of "the author just moved this node"). The frame-loop variant is
+/// [`DeriveEdgeAnchors`].
 pub fn settle_edge_anchors(world: &mut World) {
+    let mut cache = std::collections::HashMap::new();
     for _ in 0..MAX_PASSES {
-        let updates = anchor_updates(world);
+        let updates = anchor_updates(world, &mut cache, false);
         if updates.is_empty() {
             return;
         }
-        for (entity, transform, half_width) in updates {
-            let _ = world.insert(entity, transform);
-            let _ = world.insert(entity, GlobalTransform(transform.to_matrix()));
-            if let Some(mut node) = world.get::<RoadNode>(entity).cloned() {
-                node.half_width = half_width;
-                let _ = world.insert(entity, node);
-            }
+        apply_updates(world, &updates);
+    }
+}
+
+/// Apply planned writes through `&mut World` (baking/tests path).
+fn apply_updates(world: &mut World, updates: &[AnchorUpdate]) {
+    for (entity, transform, half_width, interval) in updates {
+        let _ = world.insert(*entity, *transform);
+        let _ = world.insert(*entity, GlobalTransform(transform.to_matrix()));
+        if let Some(mut node) = world.get::<RoadNode>(*entity).cloned() {
+            node.half_width = *half_width;
+            let _ = world.insert(*entity, node);
+        }
+        if let Some((u_min, u_max)) = interval
+            && let Some(mut anchor) = world.get::<EdgeAnchor>(*entity).cloned()
+        {
+            anchor.u_min = *u_min;
+            anchor.u_max = *u_max;
+            let _ = world.insert(*entity, anchor);
         }
     }
 }
 
 /// Editing-view system: re-derives anchored nodes' placements from their
-/// parent edges. Writes only when a placement actually changed, so a
-/// settled graph stays untouched (no change-tick churn).
-pub struct DeriveEdgeAnchors;
+/// parent edges, and converts authored moves of an anchored node (gizmo or
+/// inspector Transform edits) into interval shifts — the node *slides*
+/// along the parent edge. Writes only when a placement actually changed,
+/// so a settled graph stays untouched (no change-tick churn).
+///
+/// The interval write is derived-data maintenance, not an edit action of
+/// its own: undo of the authoring Transform action restores the node's
+/// on-edge position, and the projection recovers the old interval from it.
+#[derive(Default)]
+pub struct DeriveEdgeAnchors {
+    /// Last settled transform per anchored node — how an authored move
+    /// (differs from cache AND derived) is told apart from a parent-edge
+    /// move (matches cache, derived went away).
+    cache: std::sync::Mutex<std::collections::HashMap<Entity, Transform>>,
+}
 
 impl System for DeriveEdgeAnchors {
     type Result = ();
 
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+        let mut cache = self.cache.lock().expect("anchor cache");
+        cache.retain(|entity, _| ctx.raw_world().is_alive(*entity));
         for _ in 0..MAX_PASSES {
-            let updates = anchor_updates(ctx.raw_world());
+            let updates = anchor_updates(ctx.raw_world(), &mut cache, true);
             if updates.is_empty() {
                 break;
             }
@@ -163,9 +282,10 @@ impl System for DeriveEdgeAnchors {
                 WriteAll<Transform>,
                 WriteAll<GlobalTransform>,
                 WriteAll<RoadNode>,
+                WriteAll<EdgeAnchor>,
             )>()
-            .execute(|(mut transforms, mut globals, mut nodes)| {
-                for (entity, transform, half_width) in &updates {
+            .execute(|(mut transforms, mut globals, mut nodes, mut anchors)| {
+                for (entity, transform, half_width, interval) in &updates {
                     if let Some(mut slot) = transforms.get_mut(entity.index()) {
                         *slot = *transform;
                     }
@@ -175,8 +295,17 @@ impl System for DeriveEdgeAnchors {
                     if let Some(mut node) = nodes.get_mut(entity.index()) {
                         node.half_width = *half_width;
                     }
+                    if let Some((u_min, u_max)) = interval
+                        && let Some(mut anchor) = anchors.get_mut(entity.index())
+                    {
+                        anchor.u_min = *u_min;
+                        anchor.u_max = *u_max;
+                    }
                 }
             });
+            for (entity, transform, _, _) in &updates {
+                cache.insert(*entity, *transform);
+            }
         }
         Ok(())
     }
@@ -216,7 +345,7 @@ pub fn edge_under_cursor(
             for step in 1..=PICK_STEPS {
                 let u1 = step as f32 / PICK_STEPS as f32;
                 let next = bezier::eval(&patch, u1, v_edge);
-                let (dist, s) = crate::tool::ray_segment_closest(ray, prev, next);
+                let (dist, s, _) = crate::tool::ray_segment_closest(ray, prev, next);
                 if dist <= radius && best.is_none_or(|(d, _)| dist < d) {
                     let u0 = (step - 1) as f32 / PICK_STEPS as f32;
                     let u = u0 + (u1 - u0) * s;
@@ -456,7 +585,7 @@ mod tests {
         assert!((after - before).norm() > 0.1, "anchor follows the edge");
 
         // Settled: a second pass writes nothing.
-        assert!(anchor_updates(&world).is_empty());
+        assert!(anchor_updates(&world, &mut Default::default(), false).is_empty());
     }
 
     #[test]
@@ -524,9 +653,116 @@ mod tests {
         settle_edge_anchors(&mut world);
         // Both levels settled: no pending updates, and the second-level node
         // actually left the origin (it derived through the first level).
-        assert!(anchor_updates(&world).is_empty());
+        assert!(anchor_updates(&world, &mut Default::default(), false).is_empty());
         let second_pos = world.get::<Transform>(second).unwrap().translation;
         assert!(second_pos.norm() > 1.0, "chained anchor derived");
+    }
+
+    #[test]
+    fn authored_move_slides_the_interval_and_undo_recovers_it() {
+        let (mut world, road) = setup();
+        let anchored = world.spawn();
+        world.insert(anchored, Transform::default()).unwrap();
+        world
+            .insert(anchored, GlobalTransform(Transform::default().to_matrix()))
+            .unwrap();
+        world.insert(anchored, RoadNode::default()).unwrap();
+        world
+            .insert(
+                anchored,
+                EdgeAnchor {
+                    parent_road: road,
+                    right_edge: true,
+                    u_min: 0.4,
+                    u_max: 0.6,
+                },
+            )
+            .unwrap();
+
+        // Settle with sliding enabled, priming the cache (system behavior).
+        let mut cache = std::collections::HashMap::new();
+        let settle = |world: &mut World, cache: &mut std::collections::HashMap<_, _>| {
+            for _ in 0..MAX_PASSES {
+                let updates = anchor_updates(world, cache, true);
+                if updates.is_empty() {
+                    break;
+                }
+                apply_updates(world, &updates);
+                for (entity, transform, _, _) in &updates {
+                    cache.insert(*entity, *transform);
+                }
+            }
+        };
+        settle(&mut world, &mut cache);
+        let home_t = *world.get::<Transform>(anchored).unwrap();
+        assert!((home_t.translation - Vec3::new(3.0, 0.0, 10.0)).norm() < 1e-3);
+
+        // Author drags the node up the road (gizmo writes Transform): the
+        // interval slides to the projection, the node snaps to the edge.
+        let dragged = Transform::new(
+            Vec3::new(4.5, 0.0, 16.0),
+            home_t.rotation,
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(anchored, dragged).unwrap();
+        world
+            .insert(anchored, GlobalTransform(dragged.to_matrix()))
+            .unwrap();
+        settle(&mut world, &mut cache);
+        let slid = world.get::<EdgeAnchor>(anchored).unwrap().clone();
+        let slid_t = *world.get::<Transform>(anchored).unwrap();
+        let center = (slid.u_min + slid.u_max) * 0.5;
+        assert!((center - 0.8).abs() < 1e-3, "slid to u≈0.8, got {center}");
+        assert!(
+            ((slid.u_max - slid.u_min) - 0.2).abs() < 1e-4,
+            "interval width preserved"
+        );
+        assert!(
+            (slid_t.translation - Vec3::new(3.0, 0.0, 16.0)).norm() < 1e-3,
+            "snapped back onto the edge, got {:?}",
+            slid_t.translation
+        );
+
+        // Parent-road edits must NOT slide: move the road's far node — the
+        // anchored node follows parametrically, interval unchanged.
+        let seg_b = world.get::<RoadSegment>(road).unwrap().b;
+        let t = Transform::new(
+            Vec3::new(6.0, 0.0, 20.0),
+            quat_from_rotation_y(0.3),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(seg_b, t).unwrap();
+        world.insert(seg_b, GlobalTransform(t.to_matrix())).unwrap();
+        settle(&mut world, &mut cache);
+        let after_follow = world.get::<EdgeAnchor>(anchored).unwrap().clone();
+        assert!((after_follow.u_min - slid.u_min).abs() < 1e-6, "no drift");
+        assert!((after_follow.u_max - slid.u_max).abs() < 1e-6, "no drift");
+        // Restore the road for the undo half of the test.
+        let back = Transform::new(
+            Vec3::new(0.0, 0.0, 20.0),
+            quat_from_rotation_y(0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(seg_b, back).unwrap();
+        world
+            .insert(seg_b, GlobalTransform(back.to_matrix()))
+            .unwrap();
+        settle(&mut world, &mut cache);
+
+        // Undo of the drag restores the node's old on-edge transform; the
+        // projection recovers the original interval from it.
+        world.insert(anchored, home_t).unwrap();
+        world
+            .insert(anchored, GlobalTransform(home_t.to_matrix()))
+            .unwrap();
+        settle(&mut world, &mut cache);
+        let reverted = world.get::<EdgeAnchor>(anchored).unwrap().clone();
+        assert!(
+            (reverted.u_min - 0.4).abs() < 1e-3 && (reverted.u_max - 0.6).abs() < 1e-3,
+            "projection recovered the original interval, got [{}, {}]",
+            reverted.u_min,
+            reverted.u_max
+        );
     }
 
     #[test]

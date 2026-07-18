@@ -111,6 +111,9 @@ pub struct Editor {
     // Scene view interaction
     /// Scene view rect in physical pixels (x, y, w, h).
     scene_view_rect_phys: Option<[f32; 4]>,
+    /// Window-space position of the click that requested the in-flight GPU
+    /// pick — kept so a miss can fall back to the CPU pickers' ray test.
+    pending_cpu_pick: Option<[f32; 2]>,
     /// Open viewport context menu: anchor position in window physical pixels.
     /// Set by a clean RMB click over the scene view, cleared on op/close.
     viewport_menu: Option<[f32; 2]>,
@@ -241,6 +244,7 @@ impl Editor {
             egui_wants_pointer: false,
             egui_wants_keyboard: false,
             scene_view_rect_phys: None,
+            pending_cpu_pick: None,
             viewport_menu: None,
             viewport_menu_fresh: false,
             gestures: crate::gestures::SceneGestures::default(),
@@ -256,6 +260,53 @@ impl Editor {
         }
     }
 
+    /// Distance along `ray` to the entry point of `entity`'s world-space
+    /// AABB — the pick query's approximate scene hit for depth comparison.
+    /// Conservative: the AABB face is at or in front of the mesh surface.
+    fn ray_entity_bounds_entry(
+        world: &World,
+        entity: Entity,
+        ray: &redlilium_ecs::ui::ViewportRay,
+    ) -> Option<f32> {
+        let aabb = world.entity_aabb(entity)?;
+        let gt = world.get::<redlilium_ecs::GlobalTransform>(entity)?;
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for i in 0..8 {
+            let corner = redlilium_core::math::Vec4::new(
+                if i & 1 == 0 { aabb.min[0] } else { aabb.max[0] },
+                if i & 2 == 0 { aabb.min[1] } else { aabb.max[1] },
+                if i & 4 == 0 { aabb.min[2] } else { aabb.max[2] },
+                1.0,
+            );
+            let p = gt.0 * corner;
+            for (k, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                min[k] = min[k].min(v);
+                max[k] = max[k].max(v);
+            }
+        }
+        let origin = [ray.origin.x, ray.origin.y, ray.origin.z];
+        let dir = [ray.dir.x, ray.dir.y, ray.dir.z];
+        let (mut t_near, mut t_far) = (0.0f32, f32::MAX);
+        for k in 0..3 {
+            if dir[k].abs() < 1e-9 {
+                if origin[k] < min[k] || origin[k] > max[k] {
+                    return None;
+                }
+                continue;
+            }
+            let a = (min[k] - origin[k]) / dir[k];
+            let b = (max[k] - origin[k]) / dir[k];
+            let (near, far) = if a < b { (a, b) } else { (b, a) };
+            t_near = t_near.max(near);
+            t_far = t_far.min(far);
+            if t_near > t_far {
+                return None;
+            }
+        }
+        Some(t_near)
+    }
+
     /// Resolve last frame's GPU pick / rect-pick readbacks into the entity
     /// selection (or into a pending remote pick response).
     fn resolve_pick_readbacks(&mut self) {
@@ -263,6 +314,8 @@ impl Editor {
         if let Some(scene_view) = &mut self.scene_view
             && let Some(hit) = scene_view.resolve_pick()
         {
+            let cpu_pos = self.pending_cpu_pick.take();
+            let rect = self.scene_view_rect_phys;
             let ew = self.world.as_mut().unwrap();
             // A remote `pick` owns this readback — answer it, don't select.
             if self
@@ -283,6 +336,35 @@ impl Editor {
                 // Reconstruct full Entity from world (need spawn_tick etc.)
                 let target_entity =
                     target.and_then(|entity_index| ew.world.entity_at_index(entity_index));
+                // Plugin pickers may override the click: each one sees the
+                // editor's resolution — the scene entity and an approximate
+                // world-space hit point on it — and decides whether its
+                // overlay control (in front? behind?) wins the click.
+                let target_entity = (|| {
+                    let pos = cpu_pos?;
+                    let [rx, ry, rw, rh] = rect?;
+                    let cam = crate::gizmo_system::gizmo_camera(&ew.world, (rw, rh))?;
+                    let ray = cam.ray_from_screen((pos[0] - rx, pos[1] - ry))?;
+                    let ray = redlilium_ecs::ui::ViewportRay {
+                        origin: ray.origin,
+                        dir: ray.dir,
+                    };
+                    let scene_point = target_entity.and_then(|entity| {
+                        let t = Self::ray_entity_bounds_entry(&ew.world, entity, &ray)?;
+                        Some(ray.origin + ray.dir * t)
+                    });
+                    let query = redlilium_ecs::ui::ViewportPickQuery {
+                        ray,
+                        scene_entity: target_entity,
+                        scene_point,
+                    };
+                    Some(
+                        ew.world
+                            .resource::<redlilium_ecs::ui::ViewportPickers>()
+                            .resolve(&ew.world, &query),
+                    )
+                })()
+                .unwrap_or(target_entity);
                 let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
                     if let Some(entity) = target_entity {
                         Box::new(SelectAction::single(entity))
@@ -2211,6 +2293,7 @@ impl AppHandler for Editor {
                         ReleaseAction::ClickPick { x, y } => {
                             if let Some(scene_view) = &mut self.scene_view {
                                 scene_view.request_pick(x, y);
+                                self.pending_cpu_pick = Some([x as f32, y as f32]);
                             }
                         }
                         ReleaseAction::ToolClick { .. } => {

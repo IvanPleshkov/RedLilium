@@ -271,6 +271,7 @@ pub fn create_editor_world_base(
     // interactive viewport tools.
     world.insert_resource(redlilium_ecs::ui::ViewportOps::with_builtins());
     world.insert_resource(redlilium_ecs::ui::ViewportTools::default());
+    world.insert_resource(redlilium_ecs::ui::ViewportPickers::default());
 
     // Translate gizmo (#85): interaction state + focus/dots + the scene-rect
     // mapping the shells publish each frame. The GPU renderer resource is

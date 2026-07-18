@@ -159,6 +159,8 @@ pub struct EditingView<'a> {
     pub ops: &'a mut redlilium_ecs::ui::ViewportOps,
     /// Interactive viewport tools (activated from ops or the shell).
     pub tools: &'a mut redlilium_ecs::ui::ViewportTools,
+    /// CPU pick fallback for click-selection of meshless entities.
+    pub pickers: &'a mut redlilium_ecs::ui::ViewportPickers,
 }
 
 /// One embedded asset pack: `(pack-relative path, verbatim bytes)` for every
