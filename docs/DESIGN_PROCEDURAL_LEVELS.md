@@ -100,14 +100,23 @@ the entities mean.
 - **Edge attachment** (P5) — the third connection type in the graph, next to
   node–node roads: a connection that lands on **part of a road's boundary
   curve** rather than on a node. The canonical case: a driveway/building
-  exit crossing the sidewalk to meet the road. Authored by snapping the
-  exit's cross-section to a road edge; the tool projects it and stores
-  `Attachment { road: Entity, side, u_interval: [u0, u1], params }` as an
-  explicit, editable object. The attached patch samples its end row directly
-  from the road's boundary curve on that interval — the seam is **watertight
-  by construction** (shared curve, not two meshes stitched after the fact).
-  The attachment is passed to the road's generator in its `PieceDesc`, and
-  the generator resolves the junction itself (curb break, sidewalk ramp, …).
+  exit crossing the sidewalk to meet the road. Authored with the connect
+  tool (anchor a node, click a road edge); stored as
+  `EdgeAttachment { road, node, right_edge, u_min, u_max, tangents }` — an
+  explicit, editable entity. The attached patch samples its road-side row
+  directly from the road's boundary curve on that interval — the seam is
+  **watertight by construction**, and because the interval is *parametric*,
+  it stays watertight as the road's nodes move. The patch leaves the edge
+  along the surface's cross derivative (`∂P/∂v` — continuing the road's
+  cross-slope) and ends at the outer node. **Unified socket convention**
+  (same as junction connectors): the outer node's **+Z faces the road
+  network** — the driveway departs it along +Z exactly like a road departs
+  its `a` node — and the owning structure fills the −Z side behind it; a
+  building assembly graph will later attach there (phase 3's entry point).
+  One rule everywhere: *a socket node is an `a`-end; +Z points into the
+  road network; the structure behind it owns −Z.* The
+  attachment is passed to the road's generator in its `PieceDesc`, and the
+  generator resolves the junction itself (curb break, sidewalk ramp, …).
 - **Intersections are hand-managed.** The author places nodes and owns the
   result. A validator flags *unsanctioned* crossings — two roads
   intersecting in projection with neither a shared node nor an attachment —

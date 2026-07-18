@@ -11,11 +11,13 @@
 //! read-only preview system via `build_editing_view` — both generic
 //! extension points.
 
+pub mod attachment;
 pub mod bezier;
 mod draw;
 pub mod junction;
 mod tool;
 
+pub use attachment::{AttachToEdgeAction, EdgeAttachment};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
@@ -80,6 +82,7 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<RoadNode>();
         world.register_inspector_default::<RoadSegment>();
         world.register_inspector_default::<Junction>();
+        world.register_inspector_default::<EdgeAttachment>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}

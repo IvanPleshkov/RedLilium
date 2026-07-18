@@ -15,6 +15,7 @@ use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::ui::{ToolFlow, ViewportRay, ViewportTool, ViewportToolCtx};
 use redlilium_ecs::{Entity, GlobalTransform, Transform, World};
 
+use crate::attachment::{self, AttachToEdgeAction, EdgeAttachment, EdgeHit};
 use crate::{RoadNode, RoadSegment, bezier};
 
 /// Stable tool label — menu ops request activation by this name.
@@ -22,6 +23,8 @@ pub const CONNECT_TOOL: &str = "Connect roads";
 
 /// Cursor-to-node pick distance, world units.
 const PICK_RADIUS: f32 = 1.5;
+/// Cursor-to-road-edge pick distance, world units.
+const EDGE_PICK_RADIUS: f32 = 1.0;
 /// Highlight/preview colors.
 const HOVER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const ANCHOR_COLOR: [f32; 4] = [1.0, 0.4, 0.1, 1.0];
@@ -42,7 +45,7 @@ impl ViewportTool for ConnectRoadsTool {
     }
 
     fn status_hint(&self) -> &str {
-        "click a node to anchor · click ground to place · Esc: drop anchor / exit"
+        "click a node to anchor · click ground to place · click a road edge to attach · Esc: drop anchor / exit"
     }
 
     fn update(&mut self, ctx: &mut ViewportToolCtx<'_>) -> ToolFlow {
@@ -72,24 +75,54 @@ impl ViewportTool for ConnectRoadsTool {
             return ToolFlow::Continue;
         };
         let hovered = node_under_cursor(ctx.world, &ray);
+        // Edge hover only matters with an anchor and when no node is hit
+        // (nodes win: they sit at road ends where edges also pass close).
+        let edge = (self.anchor.is_some() && hovered.is_none())
+            .then(|| attachment::edge_under_cursor(ctx.world, &ray, EDGE_PICK_RADIUS))
+            .flatten()
+            // The anchor's own roads' edges are not attachment targets.
+            .filter(|hit| !road_touches(ctx.world, hit.road, self.anchor));
+
         let ground = ground_hit(&ray);
 
-        self.draw_feedback(ctx, hovered, ground);
+        self.draw_feedback(ctx, hovered, edge, ground);
 
         if ctx.input.clicked {
-            match (self.anchor, hovered) {
+            match (self.anchor, hovered, edge) {
                 // First click on a node: anchor there.
-                (None, Some(node)) => self.anchor = Some(node),
+                (None, Some(node), _) => self.anchor = Some(node),
                 // Click a second node: connect, chain from it.
-                (Some(anchor), Some(node)) => {
+                (Some(anchor), Some(node), _) => {
                     if node != anchor {
                         ctx.actions.push(Box::new(AddRoadAction::new(anchor, node)));
                         self.anchor = Some(node);
                     }
                 }
+                // Click a road edge: hang an attachment from the anchor
+                // onto it. A driveway terminates — the anchor drops.
+                (Some(anchor), None, Some(hit)) => {
+                    let half_width = ctx
+                        .world
+                        .get::<RoadNode>(anchor)
+                        .map(|n| n.half_width)
+                        .unwrap_or(3.0);
+                    let (u_min, u_max) = attachment::interval_around(ctx.world, &hit, half_width);
+                    ctx.actions
+                        .push(Box::new(AttachToEdgeAction::new(EdgeAttachment {
+                            road: hit.road,
+                            node: anchor,
+                            right_edge: hit.right_edge,
+                            u_min,
+                            u_max,
+                            ..EdgeAttachment::default()
+                        })));
+                    self.anchor = None;
+                }
                 // Click empty ground: spawn a node there (and a road from
                 // the anchor, when one is set). The report chains the anchor.
-                (anchor, None) => {
+                // (`edge` is only computed with an anchor, so the remaining
+                // pattern is anchor-less-with-edge — treat it as ground.)
+                (anchor, None, _) => {
                     if let Some(point) = ground {
                         let action =
                             AddNodeAction::new(anchor, node_transform(anchor, point, ctx.world));
@@ -113,6 +146,7 @@ impl ConnectRoadsTool {
         &self,
         ctx: &ViewportToolCtx<'_>,
         hovered: Option<Entity>,
+        edge: Option<EdgeHit>,
         ground: Option<Vec3>,
     ) {
         if !ctx.world.has_resource::<DebugDrawer>() {
@@ -138,8 +172,38 @@ impl ConnectRoadsTool {
             );
         }
 
-        // Preview patch from the anchor to the hovered node / ground cursor.
         let Some(anchor) = self.anchor else { return };
+
+        // Preview an attachment onto the hovered road edge.
+        if let Some(hit) = edge {
+            draw.draw_circle(
+                pt(&hit.point),
+                0.6,
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                HOVER_COLOR,
+            );
+            let half_width = ctx
+                .world
+                .get::<RoadNode>(anchor)
+                .map(|n| n.half_width)
+                .unwrap_or(3.0);
+            let (u_min, u_max) = attachment::interval_around(ctx.world, &hit, half_width);
+            let preview = EdgeAttachment {
+                road: hit.road,
+                node: anchor,
+                right_edge: hit.right_edge,
+                u_min,
+                u_max,
+                ..EdgeAttachment::default()
+            };
+            if let Some(patch) = attachment::attachment_patch(ctx.world, &preview) {
+                draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);
+            }
+            return;
+        }
+
+        // Preview patch from the anchor to the hovered node / ground cursor.
         let Some((a_mat, a_half)) = node_shape(ctx.world, anchor) else {
             return;
         };
@@ -155,15 +219,34 @@ impl ConnectRoadsTool {
         let Some((b_mat, b_half)) = end else { return };
         let patch =
             bezier::patch_from_nodes(&a_mat, a_half, seg.tangent_a, &b_mat, b_half, seg.tangent_b);
-        for v in [0.0, 0.5, 1.0] {
-            let mut prev = bezier::eval(&patch, 0.0, v);
-            for step in 1..=12 {
-                let next = bezier::eval(&patch, step as f32 / 12.0, v);
-                draw.draw_line(pt(&prev), pt(&next), PREVIEW_COLOR);
-                prev = next;
-            }
+        draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);
+    }
+}
+
+/// Coarse patch preview: three longitudinal curves (edges + centerline).
+fn draw_patch_outline(
+    draw: &mut redlilium_debug_drawer::DebugDrawerContext<'_>,
+    patch: &crate::bezier::Patch,
+    color: [f32; 4],
+) {
+    let pt = |v: &Vec3| [v.x, v.y, v.z];
+    for v in [0.0, 0.5, 1.0] {
+        let mut prev = bezier::eval(patch, 0.0, v);
+        for step in 1..=12 {
+            let next = bezier::eval(patch, step as f32 / 12.0, v);
+            draw.draw_line(pt(&prev), pt(&next), color);
+            prev = next;
         }
     }
+}
+
+/// Whether `road`'s segment starts or ends at `node` — the anchor's own
+/// roads are not attachment targets (a driveway onto itself).
+fn road_touches(world: &World, road: Entity, node: Option<Entity>) -> bool {
+    let Some(node) = node else { return false };
+    world
+        .get::<RoadSegment>(road)
+        .is_some_and(|seg| seg.a == node || seg.b == node)
 }
 
 /// A node's world matrix + half width, when it is a live road node.
@@ -207,6 +290,12 @@ pub(crate) fn ground_hit(ray: &ViewportRay) -> Option<Vec3> {
 
 /// Closest distance between a ray and a segment.
 fn ray_segment_distance(ray: &ViewportRay, p0: Vec3, p1: Vec3) -> f32 {
+    ray_segment_closest(ray, p0, p1).0
+}
+
+/// Closest approach between a ray and a segment: `(distance, s)` where `s`
+/// is the segment parameter of the closest point. Shared with edge picking.
+pub(crate) fn ray_segment_closest(ray: &ViewportRay, p0: Vec3, p1: Vec3) -> (f32, f32) {
     let u = ray.dir;
     let v = p1 - p0;
     let w = ray.origin - p0;
@@ -224,7 +313,7 @@ fn ray_segment_distance(ray: &ViewportRay, p0: Vec3, p1: Vec3) -> f32 {
     let on_segment = p0 + v * s;
     let t = ((on_segment - ray.origin).dot(&u) / a).max(0.0);
     let on_ray = ray.origin + u * t;
-    (on_ray - on_segment).norm()
+    ((on_ray - on_segment).norm(), s)
 }
 
 /// Transform for a ground-spawned node at `point`: oriented so its +Z (the

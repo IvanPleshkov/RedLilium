@@ -607,10 +607,30 @@ pub fn spawn_levels_playground(world: &mut World) {
                 },
             )
             .unwrap();
+        road
     };
-    road(world, n1, n2);
+    let r1 = road(world, n1, n2);
     road(world, n2, n3);
     road(world, n3, n4);
+
+    // A driveway (EdgeAttachment): an outer node east of the first road,
+    // landing on part of its right edge. Socket convention: the node's +Z
+    // faces the road; the future building fills the −Z side behind it.
+    let exit = node(world, 9.0, 5.5, -std::f32::consts::FRAC_PI_2);
+    let driveway = world.spawn();
+    world
+        .insert(
+            driveway,
+            redlilium_levels::EdgeAttachment {
+                road: r1,
+                node: exit,
+                right_edge: true,
+                u_min: 0.35,
+                u_max: 0.65,
+                ..redlilium_levels::EdgeAttachment::default()
+            },
+        )
+        .unwrap();
 
     // Junction examples (docs/DESIGN_PROCEDURAL_LEVELS.md): connectors are
     // ordinary nodes with +Z outward; the loop re-derives on every edit.

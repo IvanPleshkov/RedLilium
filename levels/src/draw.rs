@@ -4,6 +4,7 @@ use redlilium_core::math::{Mat4, Vec3, Vec4};
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerContext};
 use redlilium_ecs::{GlobalTransform, Res, System, SystemContext, SystemError};
 
+use crate::attachment::{self, EdgeAttachment};
 use crate::bezier::{self, Patch};
 use crate::junction::{self, Junction};
 use crate::{RoadNode, RoadSegment};
@@ -42,6 +43,30 @@ impl System for DrawLevelGraph {
                         continue;
                     };
                     draw_node(&mut draw, &gt.0, node.half_width);
+                }
+            }
+
+            if let Ok(attachments) = world.read_all::<EdgeAttachment>() {
+                for (_, att) in attachments.iter() {
+                    let Some(patch) = attachment::attachment_patch(world, att) else {
+                        continue;
+                    };
+                    draw_patch(&mut draw, &patch);
+                    // Interval ticks: mark where the landing cuts the
+                    // parent edge (the future curb break).
+                    if let Some(road) = attachment::road_patch(world, att.road) {
+                        let v_edge = if att.right_edge { 1.0 } else { 0.0 };
+                        for u in [att.u_min, att.u_max] {
+                            let p = bezier::eval(&road, u, v_edge);
+                            let dv = bezier::eval_dv(&road, u, v_edge);
+                            let out = dv * if att.right_edge { 1.0 } else { -1.0 };
+                            if out.norm() > 1e-6 {
+                                let out = out.normalize() * 0.5;
+                                let pt = |v: &redlilium_core::math::Vec3| [v.x, v.y, v.z];
+                                draw.draw_line(pt(&(p - out)), pt(&(p + out)), NODE_COLOR);
+                            }
+                        }
+                    }
                 }
             }
 

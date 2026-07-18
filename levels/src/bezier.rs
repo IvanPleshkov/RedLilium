@@ -75,6 +75,39 @@ pub fn eval(patch: &Patch, u: f32, v: f32) -> Vec3 {
     p
 }
 
+/// Derivative of the cubic Bernstein basis at `t`.
+fn bernstein_dt(t: f32) -> [f32; 4] {
+    let s = 1.0 - t;
+    [
+        -3.0 * s * s,
+        3.0 * s * s - 6.0 * t * s,
+        6.0 * t * s - 3.0 * t * t,
+        3.0 * t * t,
+    ]
+}
+
+/// Surface derivative across the road, `∂P/∂v` at `(u, v)`. This is the
+/// direction the surface leaves its side edge in — edge attachments use it
+/// so a driveway continues the road's cross-slope (G1 off the edge).
+pub fn eval_dv(patch: &Patch, u: f32, v: f32) -> Vec3 {
+    let bu = bernstein(u);
+    let bv = bernstein_dt(v);
+    let mut d = Vec3::zeros();
+    for (i, bi) in bu.iter().enumerate() {
+        for (j, bj) in bv.iter().enumerate() {
+            d += patch[i][j] * (bi * bj);
+        }
+    }
+    d
+}
+
+/// Four points uniformly spanning `[u_min, u_max]` on a side edge of the
+/// patch (`v = 0` or `v = 1`). Sampled directly from the surface — an
+/// attachment's boundary row lies exactly on the road's edge curve.
+pub fn sample_edge_row(patch: &Patch, v_edge: f32, u_min: f32, u_max: f32) -> [Vec3; 4] {
+    [0.0f32, 1.0 / 3.0, 2.0 / 3.0, 1.0].map(|f| eval(patch, u_min + (u_max - u_min) * f, v_edge))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +149,41 @@ mod tests {
         // Edge rows sit on the node segments.
         assert!((patch[0][0] - Vec3::new(-3.0, 0.0, 0.0)).norm() < 1e-5);
         assert!((patch[3][3] - Vec3::new(3.0, 0.0, 12.0)).norm() < 1e-5);
+    }
+
+    #[test]
+    fn dv_matches_finite_difference() {
+        let patch = patch_from_nodes(
+            &translation(0.0, 0.0, 0.0),
+            3.0,
+            4.0,
+            &(translation(4.0, 1.0, 12.0)
+                * Mat4::from_axis_angle(&redlilium_core::math::nalgebra::Vector3::y_axis(), 0.7)),
+            2.0,
+            5.0,
+        );
+        let (u, v) = (0.37, 0.62);
+        let h = 1e-3;
+        let numeric = (eval(&patch, u, v + h) - eval(&patch, u, v - h)) / (2.0 * h);
+        let analytic = eval_dv(&patch, u, v);
+        assert!((numeric - analytic).norm() < 1e-2, "dv mismatch");
+    }
+
+    #[test]
+    fn edge_row_lies_on_the_surface_edge() {
+        let patch = patch_from_nodes(
+            &translation(0.0, 0.0, 0.0),
+            3.0,
+            4.0,
+            &translation(0.0, 0.0, 12.0),
+            3.0,
+            4.0,
+        );
+        let row = sample_edge_row(&patch, 1.0, 0.25, 0.75);
+        for (i, p) in row.iter().enumerate() {
+            let u = 0.25 + 0.5 * (i as f32 / 3.0);
+            assert!((p - eval(&patch, u, 1.0)).norm() < 1e-5);
+        }
     }
 
     #[test]
