@@ -8,19 +8,12 @@
 // `light_counts`. Without lights the image is IBL-only. Shadows arrive
 // with #130; spot lights are not consumed yet.
 //
-// Output-transform axes, selected by the pipeline from the camera target's
-// format (same scheme as the egui shader):
-//   HDR_OUTPUT       - raw linear for a linear-HDR target (1.0 = SDR white)
-//   SRGB_FRAMEBUFFER - tonemapped linear for an sRGB-typed target (the
-//                      hardware applies the linear->sRGB encode on write;
-//                      encoding manually would double-gamma the image)
-//   (both off)       - tonemap + manual gamma encode for a non-sRGB SDR target
-//#pragma variant_system HDR_OUTPUT
-//#pragma variant_system SRGB_FRAMEBUFFER
+// Output is scene-referred linear radiance (1.0 = SDR white) into the
+// `scene_color` intermediate (#142) — exposure, tonemap, and display
+// encoding all live in display_output.slang.
 
 import math;
 import brdf;
-import color;
 
 // =============================================================================
 // Vertex Shader
@@ -180,24 +173,6 @@ float4 fs_main(VsOutput input) : SV_Target {
     // lights are shadowed by real shadows (#130), not baked occlusion.
     float3 ambient = (kd_ibl * diffuse_ibl + specular_ibl) * ao;
 
-    float3 result_color = ambient + lo;
-
-#ifdef HDR_OUTPUT
-    // Linear-HDR target: pass radiance through (encoding here would be
-    // decoded a second time by the display).
-    result_color = clamp(result_color, float3(0.0), float3(10.0));
-#else
-    // SDR target: tonemap (Khronos PBR Neutral — hue-preserving, so
-    // saturated albedos don't wash toward white); gamma-encode manually only
-    // when the target is not sRGB-typed (an sRGB texture encodes on write by
-    // itself).
-    result_color = tonemap_pbr_neutral(result_color);
-#ifndef SRGB_FRAMEBUFFER
-    // Exact sRGB OETF — the same transfer the hardware applies on sRGB
-    // targets, so both SDR paths encode identically.
-    result_color = linear_to_srgb(result_color);
-#endif
-#endif
-
-    return float4(result_color, 1.0);
+    // Scene-referred linear out — display transform happens downstream.
+    return float4(ambient + lo, 1.0);
 }

@@ -3,16 +3,21 @@
 //! [`DeferredPipeline`] is the engine's second built-in
 //! [`CameraRenderPipeline`], registered under
 //! [`DEFERRED_PIPELINE`](super::DEFERRED_PIPELINE). Per camera it records
-//! three passes:
+//! four passes:
 //!
 //! 1. `gbuffer` — MRT (albedo, normal+metallic, position+roughness) + the
 //!    camera's depth, drawing every visible `pbr`-model primitive via the
 //!    shared [`SceneDrawer`];
-//! 2. `skybox` — the environment cubemap as background, straight into the
-//!    camera's color target;
+//! 2. `skybox` — the environment cubemap as background into the
+//!    scene-referred [`SCENE_COLOR`] intermediate;
 //! 3. `deferred_resolve` — a fullscreen pass reading the G-buffer + IBL set,
-//!    compositing lit geometry over the background (returned as the camera's
-//!    main pass — the [`ScenePass`](super::ScenePass) contract).
+//!    compositing lit geometry over the background, still scene-referred
+//!    linear;
+//! 4. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
+//!    tonemap, and display encoding from [`SCENE_COLOR`] into the camera's
+//!    color target (returned as the camera's main pass — the
+//!    [`ScenePass`](super::ScenePass) contract). The scene/UI white-point
+//!    contract on EDR surfaces is 1.0 = SDR white, shared with egui.
 //!
 //! The G-buffer textures live in the camera's
 //! [`PipelineTargets`](super::PipelineTargets), re-derived on resize by
@@ -56,6 +61,8 @@ use super::{
 const RESOLVE_SHADER_SLANG: &str =
     include_str!("../../../../std-assets/shaders/deferred_resolve.slang");
 const SKYBOX_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/skybox.slang");
+const DISPLAY_SHADER_SLANG: &str =
+    include_str!("../../../../std-assets/shaders/display_output.slang");
 
 // Baked IBL set (#137) — embedded stopgap until #145 loads it through the
 // asset system.
@@ -70,6 +77,15 @@ const SKY_KTX2: &[u8] = include_bytes!("../../../../std-assets/textures/ibl/sky_
 pub const GBUFFER_ALBEDO: &str = "gbuffer_albedo";
 pub const GBUFFER_NORMAL_METALLIC: &str = "gbuffer_normal_metallic";
 pub const GBUFFER_POSITION_ROUGHNESS: &str = "gbuffer_position_roughness";
+
+/// [`PipelineTargets`] key of the scene-referred linear intermediate (#142):
+/// skybox + resolve render here; the display-output pass reads it. Future
+/// post effects (TAA, bloom) slot in between.
+pub const SCENE_COLOR: &str = "scene_color";
+
+/// Format of the [`SCENE_COLOR`] intermediate — linear f16 radiance,
+/// 1.0 = SDR white.
+const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 /// G-buffer attachment formats, in attachment order (must match
 /// `deferred_gbuffer.slang`'s `FsOutput`).
@@ -204,6 +220,14 @@ fn gather_lights(world: &World) -> ResolveUniforms {
     uniforms
 }
 
+/// Uniforms of the display-output pass (must match `display_output.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DisplayOutputUniforms {
+    /// x = linear exposure multiplier ([`CameraExposure`]), yzw unused.
+    exposure: [f32; 4],
+}
+
 /// Uniforms of the skybox pass (must match `skybox.slang`). The WGSL uniform
 /// layout aligns the shader's trailing `float3 _pad` to 16 bytes, rounding
 /// the cbuffer to 112 — the extra `_pad1` matches that (a 96-byte buffer
@@ -247,16 +271,20 @@ struct SharedResources {
     pending_uploads: Vec<TransferOperation>,
 }
 
-/// One camera's resolve/skybox materials and the identities they were built
+/// One camera's fullscreen-pass materials and the identities they were built
 /// against.
 struct CameraResources {
     resolve: Arc<MaterialInstance>,
     skybox: Arc<MaterialInstance>,
+    /// The display-output pass (#142): scene-referred `scene_color` →
+    /// exposure → tonemap/encode into the camera's color target.
+    display: Arc<MaterialInstance>,
     /// `Arc::as_ptr` of the G-buffer albedo the binding groups reference —
-    /// resize re-derives the G-buffer, invalidating these materials.
+    /// resize re-derives the G-buffer (and `scene_color` with it),
+    /// invalidating these materials.
     albedo_ptr: usize,
-    /// The color-target format the materials were specialized for (drives
-    /// the `HDR_OUTPUT` variant and the pipelines' color state).
+    /// The color-target format the display material was specialized for
+    /// (drives the `HDR_OUTPUT` variant and its pipeline's color state).
     color_format: TextureFormat,
 }
 
@@ -382,7 +410,7 @@ fn create_ibl_texture(
     texture
 }
 
-/// Select a fullscreen shader's output-transform variant from the
+/// Select the display-output shader's transform variant from the
 /// color-target format (the egui renderer's scheme): linear-HDR targets get
 /// raw linear (`HDR_OUTPUT`), sRGB-typed targets get tonemapped linear and
 /// let the hardware encode (`SRGB_FRAMEBUFFER` — a manual encode would
@@ -402,14 +430,14 @@ impl CameraResources {
         device: &Arc<GraphicsDevice>,
         shared: &SharedResources,
         gbuffer: [&Arc<Texture>; 3],
+        scene_color: &Arc<Texture>,
         color_format: TextureFormat,
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
         profile_scope!("DeferredPipeline::camera_create");
         use redlilium_graphics::BindingGroupDescriptor;
 
-        // --- Resolve material ---
-        let variant = output_variant(RESOLVE_SHADER_SLANG, color_format)?;
+        // --- Resolve material (scene-referred: always targets scene_color) ---
         let resolve_material = device
             .create_material(
                 &MaterialDescriptor::new()
@@ -425,8 +453,7 @@ impl CameraResources {
                         "fs_main",
                         vec![],
                     ))
-                    .with_variant(variant)
-                    .with_color_format(color_format)
+                    .with_color_format(SCENE_COLOR_FORMAT)
                     .with_dynamic_uniform(0, 0)
                     .with_label("deferred_resolve"),
             )
@@ -471,8 +498,7 @@ impl CameraResources {
                 .with_binding_group(ibl_group),
         );
 
-        // --- Skybox material ---
-        let variant = output_variant(SKYBOX_SHADER_SLANG, color_format)?;
+        // --- Skybox material (scene-referred: always targets scene_color) ---
         let skybox_material = device
             .create_material(
                 &MaterialDescriptor::new()
@@ -488,8 +514,7 @@ impl CameraResources {
                         "fs_main",
                         vec![],
                     ))
-                    .with_variant(variant)
-                    .with_color_format(color_format)
+                    .with_color_format(SCENE_COLOR_FORMAT)
                     .with_dynamic_uniform(0, 0)
                     .with_label("deferred_skybox"),
             )
@@ -512,9 +537,51 @@ impl CameraResources {
         let skybox =
             Arc::new(MaterialInstance::new(skybox_material).with_binding_group(skybox_group));
 
+        // --- Display-output material (#142): the only format-variant pass ---
+        let variant = output_variant(DISPLAY_SHADER_SLANG, color_format)?;
+        let display_material = device
+            .create_material(
+                &MaterialDescriptor::new()
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Vertex,
+                        DISPLAY_SHADER_SLANG.as_bytes().to_vec(),
+                        "vs_main",
+                        vec![],
+                    ))
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Fragment,
+                        DISPLAY_SHADER_SLANG.as_bytes().to_vec(),
+                        "fs_main",
+                        vec![],
+                    ))
+                    .with_variant(variant)
+                    .with_color_format(color_format)
+                    .with_dynamic_uniform(0, 0)
+                    .with_label("deferred_display_output"),
+            )
+            .inspect_err(|e| log::error!("deferred: display-output material failed: {e}"))
+            .ok()?;
+        let display_group = device
+            .create_binding_group(
+                display_material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new()
+                    .with_buffer_range(
+                        0,
+                        ring_buffer.clone(),
+                        0,
+                        std::mem::size_of::<DisplayOutputUniforms>() as u64,
+                    )
+                    .with_texture(1, scene_color.clone())
+                    .with_sampler(2, shared.gbuffer_sampler.clone()),
+            )
+            .ok()?;
+        let display =
+            Arc::new(MaterialInstance::new(display_material).with_binding_group(display_group));
+
         Some(Self {
             resolve,
             skybox,
+            display,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
             color_format,
         })
@@ -545,7 +612,7 @@ impl CameraRenderPipeline for DeferredPipeline {
         let shared =
             shared_slot.get_or_insert_with(|| SharedResources::create(&device, &ring_buffer));
 
-        // (Re-)derive the G-buffer at the camera target's size.
+        // (Re-)derive the G-buffer + scene_color at the camera target's size.
         let mut targets = world
             .get::<PipelineTargets>(camera)
             .cloned()
@@ -553,14 +620,22 @@ impl CameraRenderPipeline for DeferredPipeline {
         let stale = targets
             .get(GBUFFER_ALBEDO)
             .map(|t| t.size().width != width || t.size().height != height)
-            .unwrap_or(true);
+            .unwrap_or(true)
+            || targets.get(SCENE_COLOR).is_none();
         if stale {
             let names = [
                 GBUFFER_ALBEDO,
                 GBUFFER_NORMAL_METALLIC,
                 GBUFFER_POSITION_ROUGHNESS,
+                SCENE_COLOR,
             ];
-            for (&name, format) in names.iter().zip(GBUFFER_FORMATS) {
+            let formats = [
+                GBUFFER_FORMATS[0],
+                GBUFFER_FORMATS[1],
+                GBUFFER_FORMATS[2],
+                SCENE_COLOR_FORMAT,
+            ];
+            for (&name, format) in names.iter().zip(formats) {
                 let texture = device
                     .create_texture(
                         &TextureDescriptor::new_2d(
@@ -577,12 +652,13 @@ impl CameraRenderPipeline for DeferredPipeline {
             let _ = world.insert(camera, targets.clone());
         }
 
-        // (Re-)build the camera's materials when the G-buffer or the color
+        // (Re-)build the camera's materials when the targets or the color
         // format changed.
-        let (Some(albedo), Some(normal), Some(position)) = (
+        let (Some(albedo), Some(normal), Some(position), Some(scene_color)) = (
             targets.get(GBUFFER_ALBEDO),
             targets.get(GBUFFER_NORMAL_METALLIC),
             targets.get(GBUFFER_POSITION_ROUGHNESS),
+            targets.get(SCENE_COLOR),
         ) else {
             return;
         };
@@ -597,6 +673,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 &device,
                 shared,
                 [albedo, normal, position],
+                scene_color,
                 color_format,
                 &ring_buffer,
             ) {
@@ -627,10 +704,11 @@ impl CameraRenderPipeline for DeferredPipeline {
         let cameras = self.cameras.lock().expect("deferred camera map poisoned");
         let camera_resources = cameras.get(&view.entity)?;
         let targets = world.get::<PipelineTargets>(view.entity)?;
-        let (Some(albedo), Some(normal), Some(position)) = (
+        let (Some(albedo), Some(normal), Some(position), Some(scene_color)) = (
             targets.get(GBUFFER_ALBEDO),
             targets.get(GBUFFER_NORMAL_METALLIC),
             targets.get(GBUFFER_POSITION_ROUGHNESS),
+            targets.get(SCENE_COLOR),
         ) else {
             return None;
         };
@@ -658,8 +736,14 @@ impl CameraRenderPipeline for DeferredPipeline {
         let mut resolve_uniforms = gather_lights(world);
         resolve_uniforms.camera_pos = [camera_pos[0], camera_pos[1], camera_pos[2], 1.0];
 
+        // Manual exposure (#142): the camera's CameraExposure, neutral when
+        // absent.
+        let exposure = world
+            .get::<super::CameraExposure>(view.entity)
+            .map_or(1.0, |e| e.exposure);
+
         // Push this view's uniform slots into the frame ring.
-        let (camera_offset, skybox_offset, resolve_offset, ring_buffer) = {
+        let (camera_offset, skybox_offset, resolve_offset, display_offset, ring_buffer) = {
             let mut ring = world.resource_mut::<FrameRing>();
             let camera_offset = ring.push(bytemuck::bytes_of(&shaders::CameraUniforms {
                 view_projection: view.view_projection,
@@ -672,10 +756,14 @@ impl CameraRenderPipeline for DeferredPipeline {
                 _pad1: [0.0; 4],
             }));
             let resolve_offset = ring.push(bytemuck::bytes_of(&resolve_uniforms));
+            let display_offset = ring.push(bytemuck::bytes_of(&DisplayOutputUniforms {
+                exposure: [exposure, 0.0, 0.0, 0.0],
+            }));
             (
                 camera_offset,
                 skybox_offset,
                 resolve_offset,
+                display_offset,
                 ring.buffer().clone(),
             )
         };
@@ -725,12 +813,12 @@ impl CameraRenderPipeline for DeferredPipeline {
         }
         graph.add_graphics_pass(gbuffer_pass);
 
-        // --- 2. Skybox background into the camera's color target ---
+        // --- 2. Skybox background into the scene-referred intermediate ---
         let clear = view.target.clear_color;
         let mut skybox_pass = GraphicsPass::new("skybox".into());
         skybox_pass.set_render_targets(
             RenderTargetConfig::new().with_color(
-                ColorAttachment::from_texture(view.target.color.clone())
+                ColorAttachment::from_texture(scene_color.clone())
                     .with_clear_color(clear[0], clear[1], clear[2], clear[3]),
             ),
         );
@@ -746,7 +834,7 @@ impl CameraRenderPipeline for DeferredPipeline {
         // --- 3. Resolve: lit geometry composited over the background ---
         let mut resolve_pass = GraphicsPass::new("deferred_resolve".into());
         resolve_pass.set_render_targets(RenderTargetConfig::new().with_color(
-            ColorAttachment::from_texture(view.target.color.clone()).with_load_op(LoadOp::Load),
+            ColorAttachment::from_texture(scene_color.clone()).with_load_op(LoadOp::Load),
         ));
         resolve_pass.add_draw_command(
             DrawCommand::new(
@@ -757,10 +845,31 @@ impl CameraRenderPipeline for DeferredPipeline {
         );
         let resolve_handle = graph.add_graphics_pass(resolve_pass);
 
-        // Skybox and resolve both write the color target with no read-based
+        // Skybox and resolve both write scene_color with no read-based
         // direction — order them explicitly (background first).
         graph.add_dependency(resolve_handle, skybox_handle);
 
-        Some(resolve_handle)
+        // --- 4. Display output (#142): scene-referred -> the camera target ---
+        let mut display_pass = GraphicsPass::new("display_output".into());
+        display_pass.set_render_targets(
+            RenderTargetConfig::new().with_color(
+                ColorAttachment::from_texture(view.target.color.clone())
+                    .with_clear_color(0.0, 0.0, 0.0, 1.0),
+            ),
+        );
+        display_pass.add_draw_command(
+            DrawCommand::new(
+                shared.fullscreen_mesh.clone(),
+                camera_resources.display.clone(),
+            )
+            .with_dynamic_offsets(vec![vec![display_offset]]),
+        );
+        let display_handle = graph.add_graphics_pass(display_pass);
+        // scene_color has two writers above; anchor the read explicitly on
+        // the last of them (the graph would otherwise derive an order against
+        // *a* writer, not necessarily the resolve).
+        graph.add_dependency(display_handle, resolve_handle);
+
+        Some(display_handle)
     }
 }

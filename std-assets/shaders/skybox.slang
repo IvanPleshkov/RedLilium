@@ -2,16 +2,9 @@
 // scene background, before the deferred resolve composites lit geometry
 // over it.
 //
-// Output-transform axes exactly like deferred_resolve.slang:
-//   HDR_OUTPUT       - raw linear for a linear-HDR target (1.0 = SDR white)
-//   SRGB_FRAMEBUFFER - tonemapped linear for an sRGB-typed target (the
-//                      hardware encodes on write; a manual encode would
-//                      double-gamma and wash the background out)
-//   (both off)       - tonemap + manual gamma for a non-sRGB SDR target
-//#pragma variant_system HDR_OUTPUT
-//#pragma variant_system SRGB_FRAMEBUFFER
-
-import color;
+// Output is scene-referred linear radiance (1.0 = SDR white) into the
+// `scene_color` intermediate (#142) — exposure, tonemap, and display
+// encoding all live in display_output.slang.
 
 // =============================================================================
 // Bindings
@@ -65,22 +58,7 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
+    // Scene-referred linear out — display transform happens downstream.
     float3 color = env_map.SampleLevel(env_sampler, input.view_dir, mip_level).rgb;
-
-#ifdef HDR_OUTPUT
-    // Linear-HDR target: pass radiance through (same clamp as the resolve).
-    float3 result = clamp(color, float3(0.0), float3(10.0));
-#else
-    // SDR target: tonemap (Khronos PBR Neutral — matches the resolve, so the
-    // background and lit geometry share one transform); manual gamma only for
-    // non-sRGB targets (an sRGB texture encodes on write by itself).
-    float3 result = tonemap_pbr_neutral(color);
-#ifndef SRGB_FRAMEBUFFER
-    // Exact sRGB OETF — matches the hardware encode of sRGB targets (and the
-    // resolve pass), so both SDR paths produce identical bytes.
-    result = linear_to_srgb(result);
-#endif
-#endif
-
-    return float4(result, 1.0);
+    return float4(color, 1.0);
 }

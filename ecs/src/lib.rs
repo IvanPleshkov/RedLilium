@@ -192,18 +192,18 @@ pub use self::std::scene::{
 pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 #[cfg(feature = "rendering")]
 pub use rendering::{
-    AssetDragPayload, AssetRef, AssetRefSource, CameraOutput, CameraRender, CameraRenderPipeline,
-    CameraTarget, CameraTargetSpec, CameraView, ChangedAssets, DEFERRED_PIPELINE, DebugRender,
-    DeferredPipeline, DirtyMounts, DrawArgs, EguiRender, EnsureCameraTargets, FORWARD_PIPELINE,
-    FlushUploads, ForwardPipeline, FrameRing, FrameTarget, HotReload, MainViewport,
-    MaterialAssetManager, MaterialInstanceData, MaterialInstanceLoad, MaterialInstanceLoader,
-    MaterialInstanceManager, MaterialInstanceSource, MaterialLoader, MeshLoad, MeshManager,
-    MeshRenderer, NewAssetSpec, OutputFormat, PipelineCache, PipelineRegistry, PipelineTargets,
-    Primitive, PropValue, RecordCtx, RenderPath, RenderPhase, RenderSchedule, SceneDrawer,
-    ScenePass, SetAssetReferenceAction, SetAssetSettingsAction, Shader, ShaderLoader,
-    ShaderManager, ShaderSource, ShadingRegistry, SizePolicy, TextureManager, VisibleScene,
-    asset_drop_target, inspect_asset_settings, new_asset_spec, reference_accepted_kind,
-    register_rendering_components, shaders,
+    AssetDragPayload, AssetRef, AssetRefSource, CameraExposure, CameraOutput, CameraRender,
+    CameraRenderPipeline, CameraTarget, CameraTargetSpec, CameraView, ChangedAssets,
+    DEFERRED_PIPELINE, DebugRender, DeferredPipeline, DirtyMounts, DrawArgs, EguiRender,
+    EnsureCameraTargets, FORWARD_PIPELINE, FlushUploads, ForwardPipeline, FrameRing, FrameTarget,
+    HotReload, MainViewport, MaterialAssetManager, MaterialInstanceData, MaterialInstanceLoad,
+    MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource, MaterialLoader,
+    MeshLoad, MeshManager, MeshRenderer, NewAssetSpec, OutputFormat, PipelineCache,
+    PipelineRegistry, PipelineTargets, Primitive, PropValue, RecordCtx, RenderPath, RenderPhase,
+    RenderSchedule, SceneDrawer, ScenePass, SetAssetReferenceAction, SetAssetSettingsAction,
+    Shader, ShaderLoader, ShaderManager, ShaderSource, ShadingRegistry, SizePolicy, TextureManager,
+    VisibleScene, asset_drop_target, inspect_asset_settings, new_asset_spec,
+    reference_accepted_kind, register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.

@@ -106,6 +106,12 @@ const REGISTRY: &[ShaderSpec] = &[
         "std-assets/shaders/deferred_resolve.slang",
     ),
     vs_fs_spec("std_skybox", "std-assets/shaders/skybox.slang"),
+    // Display-output pass (#142): scene-referred -> display-referred
+    // (exposure + tonemap + encode variants).
+    vs_fs_spec(
+        "std_display_output",
+        "std-assets/shaders/display_output.slang",
+    ),
     // Demo shaders — baked so the demos render on the default Slang-off build
     // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
     // the std deferred path now.)
