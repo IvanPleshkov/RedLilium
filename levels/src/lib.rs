@@ -24,7 +24,7 @@ pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_an
 pub use building::{Building, PlaceBuildingAction};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
-pub use parcel::{AddParcelAction, Parcel, ParcelGate, ParcelVertex, parcel_loop};
+pub use parcel::{AddGateAction, AddParcelAction, Parcel, ParcelGate, ParcelVertex, parcel_loop};
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
 use redlilium_ecs::{Component, Entity, PostUpdate, Update, UpdateGlobalTransforms, World};
@@ -152,14 +152,60 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                     .push(Box::new(CreateJunctionAction::new(connectors)));
             },
         );
-        // "Add parcel": stamp a default rectangular boundary at the ground
-        // click point; drag the vertex handles into shape afterwards.
+        // "Add parcel": stamp a default rectangular boundary — glued to
+        // the road edge under the cursor (the frontage dictates the edge
+        // interval; slide it with the gizmo), or free-standing at the
+        // ground click point. Drag the vertex handles into shape after.
         view.ops.add(
             "Add parcel",
-            |ctx| ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some(),
             |ctx| {
-                if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
+                ctx.cursor_ray.as_ref().is_some_and(|ray| {
+                    anchor::edge_under_cursor(ctx.world, ray, 1.0).is_some()
+                        || tool::ground_hit(ray).is_some()
+                })
+            },
+            |ctx| {
+                let Some(ray) = ctx.cursor_ray.as_ref() else {
+                    return;
+                };
+                if let Some(hit) = anchor::edge_under_cursor(ctx.world, ray, 1.0) {
+                    ctx.actions
+                        .push(Box::new(AddParcelAction::on_edge(EdgeAnchor {
+                            parent_road: hit.road,
+                            right_edge: hit.right_edge,
+                            u_min: hit.u,
+                            u_max: hit.u,
+                        })));
+                } else if let Some(point) = tool::ground_hit(ray) {
                     ctx.actions.push(Box::new(AddParcelAction::at_point(point)));
+                }
+            },
+        );
+        // "Add gate": drop a connection socket onto the selected parcel's
+        // boundary at the point under the cursor (+Z outward). Roads then
+        // connect to it from either side with the connect tool.
+        view.ops.add(
+            "Add gate",
+            |ctx| {
+                ctx.cursor_ray.as_ref().is_some_and(|ray| {
+                    ctx.selection.iter().any(|&e| {
+                        ctx.world.get::<Parcel>(e).is_some()
+                            && parcel::gate_spot(ctx.world, e, ray).is_some()
+                    })
+                })
+            },
+            |ctx| {
+                let Some(ray) = ctx.cursor_ray.as_ref() else {
+                    return;
+                };
+                for &entity in ctx.selection.iter() {
+                    if ctx.world.get::<Parcel>(entity).is_some()
+                        && let Some(local) = parcel::gate_spot(ctx.world, entity, ray)
+                    {
+                        ctx.actions
+                            .push(Box::new(parcel::AddGateAction::new(entity, local)));
+                        break;
+                    }
                 }
             },
         );

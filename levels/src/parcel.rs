@@ -137,16 +137,97 @@ pub fn parcel_loop(world: &World, parcel: &Parcel) -> Option<Vec<Vec3>> {
 /// local space, front edge along +X at z = 0, interior extending to −Z.
 const DEFAULT_BOUNDARY: [[f32; 2]; 4] = [[-4.0, 0.0], [4.0, 0.0], [4.0, -8.0], [-4.0, -8.0]];
 
+/// The parcel's frontage length: the **local** distance between its first
+/// two boundary vertices — the edge that glues to a road when the parcel
+/// is edge-anchored. The rigid prefab dictates this length; the road-edge
+/// interval width derives from it (see `anchor::derive_parcel_anchor`).
+pub(crate) fn parcel_frontage(world: &World, parcel: &Parcel) -> Option<f32> {
+    let mut locals = parcel.boundary.iter().filter_map(|&v| {
+        world.get::<ParcelVertex>(v)?;
+        world.get::<Transform>(v).map(|t| t.translation)
+    });
+    let a = locals.next()?;
+    let b = locals.next()?;
+    let d = (b - a).norm();
+    (d > 1e-3).then_some(d)
+}
+
+/// Cursor reach for dropping a gate onto a parcel boundary, world units.
+const GATE_DROP_RADIUS: f32 = 2.0;
+
+/// Where an "Add gate" click lands on a parcel's boundary: the parcel-local
+/// transform for a gate at the closest boundary point — positioned on the
+/// (tessellated) loop, +Z along the outward normal (away from the loop
+/// centroid). `None` when the cursor is too far from the boundary or the
+/// parcel has no usable transform.
+pub(crate) fn gate_spot(
+    world: &World,
+    parcel_entity: Entity,
+    ray: &redlilium_ecs::ui::ViewportRay,
+) -> Option<Transform> {
+    let parcel = world.get::<Parcel>(parcel_entity)?;
+    let lp = parcel_loop(world, parcel)?;
+    let mut best: Option<(f32, Vec3, Vec3)> = None;
+    for i in 0..lp.len() {
+        let (a, b) = (lp[i], lp[(i + 1) % lp.len()]);
+        let (dist, s, _) = crate::tool::ray_segment_closest(ray, a, b);
+        if best.is_none_or(|(d, _, _)| dist < d) {
+            best = Some((dist, a + (b - a) * s, b - a));
+        }
+    }
+    let (dist, point, along) = best?;
+    if dist > GATE_DROP_RADIUS {
+        return None;
+    }
+    let along = Vec3::new(along.x, 0.0, along.z);
+    if along.norm() < 1e-4 {
+        return None;
+    }
+    let along = along.normalize();
+    let centroid = lp.iter().fold(Vec3::zeros(), |a, p| a + p) / lp.len() as f32;
+    let n = Vec3::new(-along.z, 0.0, along.x);
+    let outward = if (point - centroid).dot(&n) >= 0.0 {
+        n
+    } else {
+        -n
+    };
+
+    // World gate pose → parcel-local (gates are children).
+    let parent = world.get::<GlobalTransform>(parcel_entity)?.0;
+    let inv = parent.try_inverse()?;
+    let local_point = {
+        let p = inv * redlilium_core::math::Vec4::new(point.x, point.y, point.z, 1.0);
+        Vec3::new(p.x, p.y, p.z)
+    };
+    let local_out = {
+        let d = inv * redlilium_core::math::Vec4::new(outward.x, outward.y, outward.z, 0.0);
+        Vec3::new(d.x, 0.0, d.z)
+    };
+    if local_out.norm() < 1e-4 {
+        return None;
+    }
+    let local_out = local_out.normalize();
+    Some(Transform::new(
+        local_point,
+        quat_from_rotation_y(local_out.x.atan2(local_out.z)),
+        Vec3::new(1.0, 1.0, 1.0),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Edit action
 // ---------------------------------------------------------------------------
 
-/// Undoable "stamp a parcel at a point": the container entity plus a
-/// default rectangular boundary of vertex children — drag the vertices
-/// into shape afterwards.
+/// Undoable "stamp a parcel": the container entity plus a default
+/// rectangular boundary of vertex children — drag the vertices into shape
+/// afterwards. Free-standing at a point, or glued to a road edge (the
+/// anchored variant derives its placement from the edge and dictates the
+/// interval width through its frontage; slide it along the road with the
+/// gizmo afterwards).
 #[derive(Debug)]
 pub struct AddParcelAction {
     transform: Transform,
+    anchor: Option<crate::anchor::EdgeAnchor>,
     created: Vec<Entity>,
 }
 
@@ -154,6 +235,17 @@ impl AddParcelAction {
     pub fn at_point(point: Vec3) -> Self {
         Self {
             transform: Transform::new(point, quat_from_rotation_y(0.0), Vec3::new(1.0, 1.0, 1.0)),
+            anchor: None,
+            created: Vec::new(),
+        }
+    }
+
+    /// Glue to a road edge; only the interval's center matters — the width
+    /// derives from the parcel's frontage at apply time.
+    pub fn on_edge(anchor: crate::anchor::EdgeAnchor) -> Self {
+        Self {
+            transform: Transform::default(),
+            anchor: Some(anchor),
             created: Vec::new(),
         }
     }
@@ -206,6 +298,41 @@ impl EditAction<World> for AddParcelAction {
             undo_partial(world, &mut self.created);
             return Err(EditActionError::Custom(e.to_string()));
         }
+
+        // Anchored variant: derive the on-edge placement now that the
+        // boundary (and with it the frontage) exists, and store the derived
+        // interval so the graph ships settled.
+        if let Some(anchor) = &self.anchor {
+            let Some((t, (u_min, u_max))) =
+                crate::anchor::derive_parcel_anchor(world, parcel, anchor)
+            else {
+                undo_partial(world, &mut self.created);
+                return Err(EditActionError::TargetNotFound(
+                    "parcel anchor road missing or degenerate".into(),
+                ));
+            };
+            let settled = crate::anchor::EdgeAnchor {
+                u_min,
+                u_max,
+                ..anchor.clone()
+            };
+            let inserted = world
+                .insert(parcel, t)
+                .and_then(|_| world.insert(parcel, GlobalTransform(t.to_matrix())))
+                .and_then(|_| world.insert(parcel, settled));
+            if let Err(e) = inserted {
+                undo_partial(world, &mut self.created);
+                return Err(EditActionError::Custom(e.to_string()));
+            }
+            // Children were placed against the pre-derive transform —
+            // refresh their world matrices under the new one.
+            let vertices: Vec<Entity> = world.get::<Parcel>(parcel).unwrap().boundary.clone();
+            for v in vertices {
+                if let Some(local) = world.get::<Transform>(v).copied() {
+                    let _ = world.insert(v, GlobalTransform(t.to_matrix() * local.to_matrix()));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -220,6 +347,65 @@ impl EditAction<World> for AddParcelAction {
 
     fn description(&self) -> &str {
         "Add parcel"
+    }
+}
+
+/// Undoable "add a gate to a parcel": spawns a child `RoadNode` +
+/// [`ParcelGate`] at a parcel-local transform (typically produced by
+/// [`gate_spot`] — on the boundary, +Z outward).
+#[derive(Debug)]
+pub struct AddGateAction {
+    parcel: Entity,
+    local: Transform,
+    created: Option<Entity>,
+}
+
+impl AddGateAction {
+    pub fn new(parcel: Entity, local: Transform) -> Self {
+        Self {
+            parcel,
+            local,
+            created: None,
+        }
+    }
+}
+
+impl EditAction<World> for AddGateAction {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        if world.get::<Parcel>(self.parcel).is_none() {
+            return Err(EditActionError::TargetNotFound(
+                "gate target is not a parcel".into(),
+            ));
+        }
+        let parent_m = world
+            .get::<GlobalTransform>(self.parcel)
+            .map(|gt| gt.0)
+            .ok_or_else(|| EditActionError::TargetNotFound("parcel has no transform".into()))?;
+        let gate = world.spawn();
+        let inserted = world
+            .insert(gate, self.local)
+            .and_then(|_| world.insert(gate, GlobalTransform(parent_m * self.local.to_matrix())))
+            .and_then(|_| world.insert(gate, crate::RoadNode { half_width: 1.5 }))
+            .and_then(|_| world.insert(gate, ParcelGate));
+        if let Err(e) = inserted {
+            world.despawn(gate);
+            return Err(EditActionError::Custom(e.to_string()));
+        }
+        set_parent(world, gate, self.parcel);
+        self.created = Some(gate);
+        Ok(())
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        if let Some(gate) = self.created.take() {
+            remove_parent(world, gate);
+            world.despawn(gate);
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "Add gate"
     }
 }
 
@@ -407,6 +593,204 @@ mod tests {
         let dir = (h_out - p).normalize();
         // Local (0,0,−2.5) under yaw +90° → world −X.
         assert!((dir - Vec3::new(-1.0, 0.0, 0.0)).norm() < 1e-3);
+    }
+
+    fn world_with_road() -> (World, Entity) {
+        let mut world = world();
+        world.register_inspector_default::<crate::RoadNode>();
+        world.register_inspector_default::<crate::RoadSegment>();
+        world.register_inspector_default::<crate::anchor::EdgeAnchor>();
+        let node = |world: &mut World, x: f32, z: f32| {
+            let e = world.spawn();
+            let t = Transform::new(
+                Vec3::new(x, 0.0, z),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            );
+            world.insert(e, t).unwrap();
+            world.insert(e, GlobalTransform(t.to_matrix())).unwrap();
+            world.insert(e, crate::RoadNode::default()).unwrap();
+            e
+        };
+        // Straight road along +Z from origin to (0, 0, 20).
+        let a = node(&mut world, 0.0, 0.0);
+        let b = node(&mut world, 0.0, 20.0);
+        let road = world.spawn();
+        world
+            .insert(
+                road,
+                crate::RoadSegment {
+                    a,
+                    b,
+                    ..crate::RoadSegment::default()
+                },
+            )
+            .unwrap();
+        (world, road)
+    }
+
+    fn spawned_parcel(world: &World) -> (Entity, Parcel) {
+        world
+            .read_all::<Parcel>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, p)| Some((world.entity_at_index(index)?, p.clone())))
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn anchored_parcel_dictates_the_interval_and_follows_frontage_edits() {
+        let (mut world, road) = world_with_road();
+        AddParcelAction::on_edge(crate::anchor::EdgeAnchor {
+            parent_road: road,
+            right_edge: true,
+            u_min: 0.5,
+            u_max: 0.5,
+        })
+        .apply(&mut world)
+        .unwrap();
+        let (parcel, component) = spawned_parcel(&world);
+
+        // The default frontage is 8 m; on a 20 m straight edge that is a
+        // derived u half-width of 0.2 around the authored center 0.5.
+        let anchor = world
+            .get::<crate::anchor::EdgeAnchor>(parcel)
+            .unwrap()
+            .clone();
+        assert!((anchor.u_min - 0.3).abs() < 1e-3, "got {}", anchor.u_min);
+        assert!((anchor.u_max - 0.7).abs() < 1e-3, "got {}", anchor.u_max);
+        // Sits on the right edge (x = +3), frontage FACING the road: +Z
+        // points into it (−X), interior extends outward (+X).
+        let t = *world.get::<Transform>(parcel).unwrap();
+        assert!((t.translation - Vec3::new(3.0, 0.0, 10.0)).norm() < 1e-3);
+        let heading = crate::bezier::heading(&t.to_matrix());
+        assert!((heading - Vec3::new(-1.0, 0.0, 0.0)).norm() < 1e-3);
+        // Ships settled.
+        assert!(crate::anchor::anchor_updates(&world, &mut Default::default(), false).is_empty());
+
+        // The parcel dictates: widen the frontage (move the second vertex
+        // out) and the edge interval follows, center preserved.
+        let v1 = component.boundary[1];
+        let wider = Transform::new(
+            Vec3::new(6.0, 0.0, 0.0),
+            quat_from_rotation_y(0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(v1, wider).unwrap();
+        crate::settle_edge_anchors(&mut world);
+        let anchor = world
+            .get::<crate::anchor::EdgeAnchor>(parcel)
+            .unwrap()
+            .clone();
+        // Frontage 10 m → half-width 0.25.
+        assert!((anchor.u_min - 0.25).abs() < 1e-3, "got {}", anchor.u_min);
+        assert!((anchor.u_max - 0.75).abs() < 1e-3, "got {}", anchor.u_max);
+    }
+
+    #[test]
+    fn anchored_parcel_slides_keeping_its_derived_width() {
+        let (mut world, road) = world_with_road();
+        AddParcelAction::on_edge(crate::anchor::EdgeAnchor {
+            parent_road: road,
+            right_edge: true,
+            u_min: 0.5,
+            u_max: 0.5,
+        })
+        .apply(&mut world)
+        .unwrap();
+        let (parcel, _) = spawned_parcel(&world);
+
+        // Prime the settled cache, then drag the parcel up the road.
+        let mut cache = std::collections::HashMap::new();
+        let settle = |world: &mut World, cache: &mut std::collections::HashMap<_, _>| {
+            for _ in 0..8 {
+                let updates = crate::anchor::anchor_updates(world, cache, true);
+                if updates.is_empty() {
+                    break;
+                }
+                for (entity, transform, _, interval) in &updates {
+                    let _ = world.insert(*entity, *transform);
+                    let _ = world.insert(*entity, GlobalTransform(transform.to_matrix()));
+                    if let Some((u_min, u_max)) = interval
+                        && let Some(mut a) =
+                            world.get::<crate::anchor::EdgeAnchor>(*entity).cloned()
+                    {
+                        a.u_min = *u_min;
+                        a.u_max = *u_max;
+                        let _ = world.insert(*entity, a);
+                    }
+                    cache.insert(*entity, *transform);
+                }
+            }
+        };
+        settle(&mut world, &mut cache);
+        let home = *world.get::<Transform>(parcel).unwrap();
+
+        let dragged = Transform::new(
+            home.translation + Vec3::new(1.0, 0.0, 4.0),
+            home.rotation,
+            home.scale,
+        );
+        world.insert(parcel, dragged).unwrap();
+        world
+            .insert(parcel, GlobalTransform(dragged.to_matrix()))
+            .unwrap();
+        settle(&mut world, &mut cache);
+
+        let anchor = world
+            .get::<crate::anchor::EdgeAnchor>(parcel)
+            .unwrap()
+            .clone();
+        let center = (anchor.u_min + anchor.u_max) * 0.5;
+        assert!((center - 0.7).abs() < 1e-2, "slid to u≈0.7, got {center}");
+        assert!(
+            ((anchor.u_max - anchor.u_min) - 0.4).abs() < 1e-3,
+            "width stays frontage-derived"
+        );
+        // Snapped back onto the edge.
+        let t = *world.get::<Transform>(parcel).unwrap();
+        assert!((t.translation.x - 3.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn gate_spot_and_add_gate_roundtrip() {
+        let mut world = world();
+        AddParcelAction::at_point(Vec3::new(10.0, 0.0, 5.0))
+            .apply(&mut world)
+            .unwrap();
+        let (parcel, _) = spawned_parcel(&world);
+        world.register_inspector_default::<crate::RoadNode>();
+
+        // Ray straight down at the middle of the front edge (world
+        // (10, 0, 5); front edge spans x 6..14 at z = 5).
+        let ray = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(10.0, 10.0, 5.0),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        let local = gate_spot(&world, parcel, &ray).expect("spot on the boundary");
+        assert!(local.translation.norm() < 1e-3, "front-edge midpoint");
+        // Outward of the front edge is +Z (interior extends to −Z).
+        let out = crate::bezier::heading(&local.to_matrix());
+        assert!((out - Vec3::new(0.0, 0.0, 1.0)).norm() < 1e-3);
+
+        let mut action = AddGateAction::new(parcel, local);
+        action.apply(&mut world).unwrap();
+        let gate = world
+            .read_all::<ParcelGate>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, _)| world.entity_at_index(index))
+            .next()
+            .expect("gate spawned");
+        assert!(world.get::<crate::RoadNode>(gate).is_some());
+        assert_eq!(world.get::<redlilium_ecs::Parent>(gate).unwrap().0, parcel);
+        let gt = world.get::<GlobalTransform>(gate).unwrap().0;
+        let pos = Vec3::new(gt[(0, 3)], gt[(1, 3)], gt[(2, 3)]);
+        assert!((pos - Vec3::new(10.0, 0.0, 5.0)).norm() < 1e-3);
+
+        action.undo(&mut world).unwrap();
+        assert!(!world.is_alive(gate));
     }
 
     #[test]

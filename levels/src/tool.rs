@@ -93,11 +93,12 @@ impl ViewportTool for ConnectRoadsTool {
                 // First click on a node: anchor there.
                 (None, Some(node), _) => self.anchor = Some(node),
                 // Click a second node: connect, chain from it. A socket
-                // target is met from its front (+Z) side — its −Z belongs
-                // to the junction fill / future building.
+                // target is met from its front (+Z) side — except a parcel
+                // gate approached from inside the parcel, which accepts the
+                // internal road from behind.
                 (Some(anchor), Some(node), _) => {
                     if node != anchor {
-                        let from_front = is_socket(ctx.world, node);
+                        let from_front = socket_meets_front(ctx.world, node, anchor);
                         ctx.actions
                             .push(Box::new(AddRoadAction::new(anchor, node, from_front)));
                         self.anchor = Some(node);
@@ -242,7 +243,7 @@ impl ConnectRoadsTool {
             let b = Vec3::new(b_mat[(0, 3)], b_mat[(1, 3)], b_mat[(2, 3)]);
             ((b - a).norm() / 3.0).max(0.1)
         };
-        let from_front = hovered.is_some_and(|node| is_socket(ctx.world, node));
+        let from_front = hovered.is_some_and(|node| socket_meets_front(ctx.world, node, anchor));
         let patch =
             bezier::patch_from_nodes(&a_mat, a_half, chord, &b_mat, b_half, chord, from_front);
         draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);
@@ -273,6 +274,30 @@ fn road_touches(world: &World, road: Entity, node: Option<Entity>) -> bool {
     world
         .get::<RoadSegment>(road)
         .is_some_and(|seg| seg.a == node || seg.b == node)
+}
+
+/// Which side a road drawn from `from` meets socket `node` on. Junction
+/// connectors and edge-anchored nodes only ever accept their front (+Z) —
+/// the back side is junction fill / the parent road. A **parcel gate is
+/// two-sided**: a network road (anchor on the gate's front side) arrives
+/// from the front, an internal road (anchor behind — inside the parcel)
+/// connects from behind. Non-sockets always take the default −Z arrival.
+fn socket_meets_front(world: &World, node: Entity, from: Entity) -> bool {
+    if !is_socket(world, node) {
+        return false;
+    }
+    if world.get::<crate::parcel::ParcelGate>(node).is_some()
+        && let (Some((gate_m, _)), Some((from_m, _))) =
+            (node_shape(world, node), node_shape(world, from))
+    {
+        let center = |m: &redlilium_core::math::Mat4| {
+            let c = m * redlilium_core::math::Vec4::new(0.0, 0.0, 0.0, 1.0);
+            Vec3::new(c.x, c.y, c.z)
+        };
+        let out = bezier::heading(&gate_m);
+        return (center(&from_m) - center(&gate_m)).dot(&out) >= 0.0;
+    }
+    true
 }
 
 /// Whether `node` is a socket — a junction connector, an edge-anchored
@@ -767,6 +792,43 @@ mod tests {
         // A scene mesh BEHIND the control (t = 15): the control wins.
         let hit = selection_pick(&world, &query(Some(Vec3::new(0.0, -5.0, 0.0)))).expect("wins");
         assert_eq!(hit.entity, node);
+    }
+
+    #[test]
+    fn gates_are_met_from_the_side_the_road_comes_from() {
+        let mut world = World::new();
+        redlilium_ecs::register_std_components(&mut world);
+        world.register_inspector_default::<RoadNode>();
+        world.register_inspector_default::<crate::Junction>();
+        world.register_inspector_default::<EdgeAnchor>();
+        world.register_inspector_default::<crate::parcel::ParcelGate>();
+
+        let spawn = |world: &mut World, x: f32, yaw: f32| {
+            let e = world.spawn();
+            let t = Transform::new(
+                Vec3::new(x, 0.0, 0.0),
+                quat_from_rotation_y(yaw),
+                Vec3::new(1.0, 1.0, 1.0),
+            );
+            world.insert(e, t).unwrap();
+            world.insert(e, GlobalTransform(t.to_matrix())).unwrap();
+            world.insert(e, RoadNode::default()).unwrap();
+            e
+        };
+        // Gate at the origin facing +X (its parcel is to the west).
+        let gate = spawn(&mut world, 0.0, std::f32::consts::FRAC_PI_2);
+        world.insert(gate, crate::parcel::ParcelGate).unwrap();
+        let outside = spawn(&mut world, 5.0, 0.0);
+        let inside = spawn(&mut world, -5.0, 0.0);
+
+        // Network road from outside → meets the gate's front; internal
+        // road from inside the parcel → meets it from behind.
+        assert!(socket_meets_front(&world, gate, outside));
+        assert!(!socket_meets_front(&world, gate, inside));
+        // Other sockets stay front-only regardless of approach side.
+        let anchored = spawn(&mut world, 3.0, 0.0);
+        world.insert(anchored, EdgeAnchor::default()).unwrap();
+        assert!(socket_meets_front(&world, anchored, inside));
     }
 
     #[test]

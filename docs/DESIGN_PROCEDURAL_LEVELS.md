@@ -147,11 +147,16 @@ the entities mean.
   **Parcel-as-prefab is the point**: content lives in the parcel's local
   space as its subtree, so "parcel with a villa" or "parcel with a whole
   factory" is one reusable prefab.
-  Planned (slice 3): an optional single `EdgeAnchor` re-attaching a parcel
-  to a road edge with **inverted derivation** — the rigid prefab dictates
-  its frontage length, the edge interval's width derives from it (center
-  still slides); two anchors would over-constrain a rigid prefab and are
-  rejected.
+  A parcel may carry an optional single `EdgeAnchor` gluing it to a road
+  edge with **inverted derivation**: the rigid prefab dictates its
+  frontage length (the local distance between its first two boundary
+  vertices), the edge interval's *width* derives from it, and only the
+  interval's center is authored — it slides along the road under the
+  gizmo. The anchored transform faces the road (+Z into it, interior
+  outward). Two anchors would over-constrain a rigid prefab and are
+  rejected. Gates are met **from the side the road comes from**: network
+  roads from the front, internal roads from behind (other socket kinds
+  stay front-only).
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a
   driveway/building exit crossing the sidewalk to meet the road. Not a

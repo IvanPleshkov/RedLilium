@@ -689,7 +689,7 @@ pub fn spawn_levels_playground(world: &mut World) {
         .unwrap();
     let exit_north = node(world, 34.0, 30.0, 0.0);
     let exit_east = node(world, 54.0, 10.0, std::f32::consts::FRAC_PI_2);
-    road(world, cross[0], exit_north);
+    let north_road = road(world, cross[0], exit_north);
     let east_road = road(world, cross[1], exit_east);
 
     // A 3-way (Y) junction: the same model at N = 3, no exits.
@@ -889,6 +889,19 @@ pub fn spawn_levels_playground(world: &mut World) {
                 ..Building::default()
             },
         );
+        // Parcel C: glued to the east side of the cross's north road — the
+        // inverted derivation showcase: the parcel's 8 m frontage dictates
+        // the edge interval, only the center (u = 0.5) is authored; slide
+        // it along the road with the gizmo.
+        redlilium_levels::AddParcelAction::on_edge(EdgeAnchor {
+            parent_road: north_road,
+            right_edge: true,
+            u_min: 0.5,
+            u_max: 0.5,
+        })
+        .apply(world)
+        .unwrap();
+
         let gate_b = gate_at(world, b, 0.0, 0.0, 0.0);
         let landing_b = node(world, 0.0, 0.0, 0.0);
         world
