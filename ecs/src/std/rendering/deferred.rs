@@ -608,9 +608,10 @@ impl CameraRenderPipeline for DeferredPipeline {
                     GBUFFER_FORMATS.to_vec(),
                     view.target.depth.format(),
                 )
-                .with_shader_filter(redlilium_assets::Guid::stable(
-                    "shaders/deferred_gbuffer.slang",
-                )),
+                .with_shader_allowlist(vec![
+                    redlilium_assets::Guid::stable("shaders/deferred_gbuffer.slang"),
+                    redlilium_assets::Guid::stable("shaders/deferred_gbuffer_textured.slang"),
+                ]),
             );
         }
         graph.add_graphics_pass(gbuffer_pass);

@@ -98,6 +98,10 @@ const REGISTRY: &[ShaderSpec] = &[
         "std-assets/shaders/deferred_gbuffer.slang",
     ),
     vs_fs_spec(
+        "std_deferred_gbuffer_textured",
+        "std-assets/shaders/deferred_gbuffer_textured.slang",
+    ),
+    vs_fs_spec(
         "std_deferred_resolve",
         "std-assets/shaders/deferred_resolve.slang",
     ),

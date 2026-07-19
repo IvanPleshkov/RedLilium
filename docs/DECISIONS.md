@@ -2622,3 +2622,68 @@ lookups — retrofitting later would touch every consumer at once.
 - #125: feature issue
 - #130 / ADR-035: first depth consumer (shadow maps), was blocked on this
 - #47 / ADR-029: graph-derived ordering the depth passes rely on
+
+## ADR-039: PBR Texture Convention — glTF Metallic-Roughness, ORM Packing
+
+**Date:** 2026-07-19
+**Status:** Accepted
+**Issues:** #144 follow-up (textured pbr model); feeds #7 (glTF importer), #121/#122 (UASTC)
+
+### Context
+
+The `pbr` shading model (#144) carries only uniform factors (`base_color`,
+`pbr_params`). Textured PBR needs a convention answering four questions
+before any asset is authored: which maps exist, how channels are packed,
+which color space each map lives in, and how texture values combine with
+the factor properties. Retrofitting a packing change later would invalidate
+every authored texture and material.
+
+### Decision
+
+**The engine adopts the glTF 2.0 metallic-roughness convention verbatim.**
+
+1. **Slots** (per material, each optional with a 1×1 default):
+   - `base_color_texture` — **sRGB** (`Rgba8UnormSrgb`). RGB is albedo;
+     A reserved for alpha cutout (not consumed yet). Default: white.
+   - `orm_texture` — **linear** (`Rgba8Unorm`), packed
+     **R = ambient occlusion, G = roughness, B = metallic** (the glTF
+     `occlusionTexture`/`metallicRoughnessTexture` layout, co-packed as the
+     ubiquitous "ORM" arrangement). Default: white (AO 1, factors decide).
+   - `normal_texture` — linear, tangent-space, **+Y up** (OpenGL/glTF).
+     Deferred to a follow-up: the std vertex layouts carry no tangents, and
+     the tangent question (mesh data vs screen-space cotangent frame) is a
+     separate decision. `TextureSource::FLAT_NORMAL` already reserves the
+     default.
+2. **Factors multiply textures** (glTF semantics): the existing schema
+   properties become factors — `albedo = base_color.rgb × tex.rgb`,
+   `metallic = pbr_params.x × orm.b`, `roughness = pbr_params.y × orm.g`.
+   An untextured material (all-white defaults) renders exactly as before.
+3. **No variant axis for texturing.** Texture slots are always declared and
+   bound; untextured materials bind the 1×1 defaults. A `HAS_TEXTURES`
+   define would double every permutation for the cost of one white-texel
+   sample.
+4. **Two shading models, not one**: `pbr` (position+normal layouts, no
+   textures) and `pbr_textured` (UV-carrying layouts) — the same split as
+   `opaque`/`opaque_textured`, because the vertex layout requirement is
+   part of the model contract.
+5. **AO travels in the G-buffer's albedo alpha**: RT0.a is `0` for
+   background (the clear value — the resolve's geometry test) and
+   `max(AO, 1/64)` for geometry; the resolve multiplies the IBL ambient
+   term by it. sRGB encoding never touches alpha, so the value stays
+   linear. The non-textured `pbr` model writes `1.0` (AO neutral).
+6. **Storage**: KTX2 + Zstandard with baked mips (the IBL pack's format),
+   generated deterministically by `xtask bake-textures` for the std test
+   set. sRGB-ness is carried by the KTX2 `vkFormat` — self-describing, no
+   loader settings. UASTC (#121/#122) changes the payload encoding later,
+   not this convention.
+
+### Consequences
+
+- glTF assets import without channel shuffling (#7), and DCC "ORM" export
+  presets match directly.
+- The deferred G-buffer pass accepts both pbr shaders (an allowlist
+  replaces the single-shader filter).
+- Every texture sample costs one fetch even untextured — accepted for the
+  permutation economy (point 3).
+- Normal mapping remains open until the tangent decision; the convention
+  (+Y, linear) is fixed now so authored content does not fork.

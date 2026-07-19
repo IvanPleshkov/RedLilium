@@ -1,0 +1,98 @@
+// Standard textured deferred G-buffer shader (ADR-039) — the `pbr_textured`
+// shading model: glTF metallic-roughness convention, base color (sRGB) and
+// packed ORM (R = AO, G = roughness, B = metallic) textures multiplying the
+// factor properties. Needs a UV-carrying vertex layout.
+//
+// Binding sets are ParameterBlocks classified by update frequency (the
+// [UpdateRate] attribute from the engine library module — see
+// docs/MATERIAL_ASSETS.md Decision 7). Declaration order fixes the set
+// indices: 0 camera (external), 1 model (dynamic), 2 material (static).
+// Within the material block: uniform fields pack into the implicit constant
+// buffer at binding 0; each texture/sampler gets the next descriptor slot —
+// the same order the engine's instance manager builds the static group in.
+import engine;
+
+struct CameraParams {
+    column_major float4x4 view_projection;
+};
+
+struct ModelParams {
+    column_major float4x4 model;
+};
+
+struct MaterialParams {
+    // Factor properties (glTF semantics: multiplied with the textures).
+    float4 base_color;
+    // x: metallic factor, y: roughness factor (z, w reserved).
+    float4 pbr_params;
+    Texture2D base_color_texture;
+    SamplerState base_color_texture_sampler;
+    // R = ambient occlusion, G = roughness, B = metallic (linear).
+    Texture2D orm_texture;
+    SamplerState orm_texture_sampler;
+};
+
+[UpdateRate("external")]
+ParameterBlock<CameraParams> gCamera;
+
+[UpdateRate("dynamic")]
+ParameterBlock<ModelParams> gModel;
+
+[UpdateRate("static")]
+ParameterBlock<MaterialParams> gMaterial;
+
+struct VsInput {
+    [[vk::location(0)]] float3 position : POSITION;
+    [[vk::location(1)]] float3 normal : NORMAL;
+    [[vk::location(2)]] float2 uv : TEXCOORD0;
+};
+
+struct VsOutput {
+    float4 clip_position : SV_Position;
+    float3 world_position : TEXCOORD0;
+    float3 world_normal : NORMAL;
+    float2 uv : TEXCOORD1;
+};
+
+[shader("vertex")]
+VsOutput vs_main(VsInput input) {
+    VsOutput output;
+    float4 world_pos = mul(gModel.model, float4(input.position, 1.0));
+    output.clip_position = mul(gCamera.view_projection, world_pos);
+    output.world_position = world_pos.xyz;
+    output.world_normal = mul(gModel.model, float4(input.normal, 0.0)).xyz;
+    output.uv = input.uv;
+    return output;
+}
+
+struct FsOutput {
+    // RT0: albedo (rgb) + AO-as-geometry-marker (a): 0 = background (the
+    // clear value), otherwise max(AO, 1/64) — the resolve multiplies the
+    // IBL ambient by it. Alpha is never sRGB-encoded, so the value stays
+    // linear (ADR-039).
+    float4 albedo : SV_Target0;
+    // RT1: world normal encoded to [0,1] (rgb) + metallic (a).
+    float4 normal_metallic : SV_Target1;
+    // RT2: world position (rgb) + roughness (a).
+    float4 position_roughness : SV_Target2;
+};
+
+[shader("fragment")]
+FsOutput fs_main(VsOutput input) {
+    FsOutput output;
+    float3 normal = normalize(input.world_normal);
+
+    float4 base_sample =
+        gMaterial.base_color_texture.Sample(gMaterial.base_color_texture_sampler, input.uv);
+    float3 orm = gMaterial.orm_texture.Sample(gMaterial.orm_texture_sampler, input.uv).rgb;
+
+    float3 albedo = gMaterial.base_color.rgb * base_sample.rgb;
+    float ao = orm.r;
+    float metallic = saturate(gMaterial.pbr_params.x * orm.b);
+    float roughness = max(gMaterial.pbr_params.y * orm.g, 0.04);
+
+    output.albedo = float4(albedo, max(ao, 1.0 / 64.0));
+    output.normal_metallic = float4(normal * 0.5 + 0.5, metallic);
+    output.position_roughness = float4(input.world_position, roughness);
+    return output;
+}

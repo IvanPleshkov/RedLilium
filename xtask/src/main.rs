@@ -18,12 +18,14 @@
 mod bake;
 mod dist;
 mod ibl;
+mod textures;
 
 fn main() {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "dist" => dist::run(),
         "bake-ibl" => ibl::run(),
+        "bake-textures" => textures::run(),
         "bake-shaders" => {
             #[cfg(feature = "slang")]
             bake::run();
@@ -40,7 +42,7 @@ fn main() {
         other => {
             eprintln!(
                 "unknown task {other:?}; available: dist [--target desktop|web], \
-                 bake-shaders [--check], bake-ibl"
+                 bake-shaders [--check], bake-ibl, bake-textures"
             );
             std::process::exit(2);
         }

@@ -421,14 +421,13 @@ fn spawn_demo_scene(world: &mut World, engine: &EngineContext) {
     }
 
     // A textured sphere (generated — its layout carries UVs) binding the std
-    // `textured` material instance. Only spawned if the asset exists, so the
-    // demo doesn't add an invisible entity on a stripped-down mount. NOTE:
-    // `opaque_textured` has no G-buffer form yet, so this entity only renders
-    // when the camera is on the forward path (texture support in the pbr
-    // model is future #144 follow-up work).
+    // `pbr_checker` instance (ADR-039: sRGB checker base color + linear ORM
+    // with alternating polished-metal / matte-dielectric tiles). Only
+    // spawned if the asset exists, so the demo doesn't add an invisible
+    // entity on a stripped-down mount.
     if let Some(guid) = {
         let db = world.resource::<AssetDb>();
-        db.guid_of(&AssetPath::new("std", "materials/textured.matinst"))
+        db.guid_of(&AssetPath::new("std", "materials/pbr_checker.matinst"))
     } {
         let entity = world.spawn();
         let transform = Transform::from_translation(Vec3::new(-1.0, 0.7, -2.0));

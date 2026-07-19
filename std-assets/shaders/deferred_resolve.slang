@@ -91,11 +91,13 @@ float4 fs_main(VsOutput input) : SV_Target {
     float4 normal_metallic_sample = gbuffer_normal_metallic.Sample(gbuffer_sampler, input.uv);
     float4 position_roughness_sample = gbuffer_position_roughness.Sample(gbuffer_sampler, input.uv);
 
-    // Background pixels carry no geometry (albedo alpha stays at the clear
-    // value 0) — keep whatever the skybox pass wrote.
-    if (albedo_sample.a < 0.5) {
+    // RT0 alpha is the AO-as-geometry-marker (ADR-039): 0 = background (the
+    // clear value — keep whatever the skybox pass wrote), otherwise
+    // max(AO, 1/64) written by the G-buffer shaders.
+    if (albedo_sample.a < 1.0 / 128.0) {
         discard;
     }
+    float ao = albedo_sample.a;
 
     // Decode G-buffer
     float3 albedo = albedo_sample.rgb;
@@ -137,7 +139,9 @@ float4 fs_main(VsOutput input) : SV_Target {
     float2 brdf_sample = brdf_lut.Sample(ibl_sampler, float2(n_dot_v, roughness)).rg;
     float3 specular_ibl = prefiltered_color * (f_ibl * brdf_sample.x + brdf_sample.y);
 
-    float3 ambient = kd_ibl * diffuse_ibl + specular_ibl;
+    // Ambient occlusion attenuates the image-based terms only — direct
+    // lights are shadowed by real shadows (#130), not baked occlusion.
+    float3 ambient = (kd_ibl * diffuse_ibl + specular_ibl) * ao;
 
     float3 result_color = ambient + lo;
 

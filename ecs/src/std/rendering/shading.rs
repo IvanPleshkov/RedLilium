@@ -143,7 +143,12 @@ impl ShadingRegistry {
     /// Build the registry with the built-in engine shading models.
     pub fn with_builtins() -> Self {
         let mut models = HashMap::new();
-        for model in [Self::opaque(), Self::opaque_textured(), Self::pbr()] {
+        for model in [
+            Self::opaque(),
+            Self::opaque_textured(),
+            Self::pbr(),
+            Self::pbr_textured(),
+        ] {
             models.insert(model.id.clone(), model);
         }
         Self { models }
@@ -210,6 +215,38 @@ impl ShadingRegistry {
                     // the shader's cbuffer layout).
                     name: "pbr_params".to_owned(),
                     default: PropValue::Vec4([0.0, 0.5, 0.0, 0.0]),
+                },
+            ],
+        }
+    }
+
+    /// The `pbr_textured` model (ADR-039): `pbr` plus the glTF
+    /// metallic-roughness texture pair — sRGB base color and linear packed
+    /// ORM (R = AO, G = roughness, B = metallic), each multiplying the
+    /// factor properties. Needs a UV-carrying vertex layout. White 1×1
+    /// defaults make an untextured instance render exactly like `pbr`.
+    fn pbr_textured() -> ShadingModel {
+        ShadingModel {
+            id: "pbr_textured".to_owned(),
+            shader: Guid::stable("shaders/deferred_gbuffer_textured.slang"),
+            schema: vec![
+                PropDef {
+                    name: "base_color".to_owned(),
+                    default: PropValue::Vec4([1.0, 1.0, 1.0, 1.0]),
+                },
+                PropDef {
+                    // x: metallic factor, y: roughness factor (z, w
+                    // reserved). Both default to 1: the ORM texture decides.
+                    name: "pbr_params".to_owned(),
+                    default: PropValue::Vec4([1.0, 1.0, 0.0, 0.0]),
+                },
+                PropDef {
+                    name: "base_color_texture".to_owned(),
+                    default: PropValue::Texture(TextureSource::WHITE),
+                },
+                PropDef {
+                    name: "orm_texture".to_owned(),
+                    default: PropValue::Texture(TextureSource::WHITE),
                 },
             ],
         }

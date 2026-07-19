@@ -144,12 +144,13 @@ pub struct DrawArgs {
     /// standard external (camera) + dynamic (model) rate-classified sets;
     /// see `std-assets/shaders/depth_only.slang`.
     pub depth_override: Option<(Guid, Arc<Shader>)>,
-    /// Draw only primitives whose material uses this shader (#144). An MRT
-    /// pass needs it: a single-output shader is VALID against multiple color
-    /// attachments (it writes only target 0, leaving the rest at their clear
-    /// values), so without the filter a non-pbr material would land in the
-    /// G-buffer with garbage normals instead of being skipped.
-    pub shader_filter: Option<Guid>,
+    /// Draw only primitives whose material uses one of these shaders (#144).
+    /// An MRT pass needs it: a single-output shader is VALID against
+    /// multiple color attachments (it writes only target 0, leaving the
+    /// rest at their clear values), so without the filter a non-pbr
+    /// material would land in the G-buffer with garbage normals instead of
+    /// being skipped. Empty = no filtering.
+    pub shader_allowlist: Vec<Guid>,
 }
 
 impl DrawArgs {
@@ -166,7 +167,7 @@ impl DrawArgs {
             depth_format,
             phase: RenderPhase::Opaque,
             depth_override: None,
-            shader_filter: None,
+            shader_allowlist: Vec::new(),
         }
     }
 
@@ -183,14 +184,14 @@ impl DrawArgs {
             depth_format,
             phase: RenderPhase::Opaque,
             depth_override: None,
-            shader_filter: None,
+            shader_allowlist: Vec::new(),
         }
     }
 
-    /// Restrict the pass to primitives whose material uses `shader` — see
-    /// [`shader_filter`](Self::shader_filter).
-    pub fn with_shader_filter(mut self, shader: Guid) -> Self {
-        self.shader_filter = Some(shader);
+    /// Restrict the pass to primitives whose material uses one of `shaders`
+    /// — see [`shader_allowlist`](Self::shader_allowlist).
+    pub fn with_shader_allowlist(mut self, shaders: Vec<Guid>) -> Self {
+        self.shader_allowlist = shaders;
         self
     }
 
@@ -209,7 +210,7 @@ impl DrawArgs {
             depth_format,
             phase,
             depth_override: Some((shader_guid, shader)),
-            shader_filter: None,
+            shader_allowlist: Vec::new(),
         }
     }
 }
@@ -288,8 +289,8 @@ impl SceneDrawer {
                 continue;
             }
             for (mesh, instance) in &item.primitives {
-                if let Some(filter) = args.shader_filter
-                    && instance.shader_guid != filter
+                if !args.shader_allowlist.is_empty()
+                    && !args.shader_allowlist.contains(&instance.shader_guid)
                 {
                     continue;
                 }
