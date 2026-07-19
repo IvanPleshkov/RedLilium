@@ -4511,7 +4511,6 @@ dependencies = [
  "redlilium-debug-drawer",
  "redlilium-ecs",
  "redlilium-runtime",
- "serde",
 ]
 
 [[package]]

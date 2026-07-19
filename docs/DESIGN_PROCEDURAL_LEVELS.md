@@ -110,35 +110,45 @@ the entities mean.
   perimeters, projected to ground plane); control points bend the
   interpolated surface where plain filling is too flat.
   **Terrain is the final fill** (decided 2026-07-19): it conforms to roads
-  and architecture — road edges and lot perimeters (curves *with heights*)
+  and architecture — road edges and parcel boundaries (curves *with heights*)
   are boundary conditions of the fill, never constraints on them. The fill
   is not necessarily continuous at a parcel perimeter: a parcel may be
   **cut or filled into the surrounding ground with a sharp transition**
   (a flat parking pad in a slope — excavated or embanked); the transition
   geometry (scarp, retaining) is generated from the height delta along the
   seam, it is never authored as meshes. In particular, nothing in the
-  authoring layer assumes a ground plane: lots and buildings live in full
-  3D, and edge-anchored elements inherit height from the edge they sit on.
-- **Lot** — the parcel primitive of the architecture chapter:
-  `Lot { frontage, depth }`, a rectangle behind a straight frontage segment
-  following the socket convention (local X along the frontage, **+Z faces
-  the road network, the parcel occupies −Z**). Two states, one component:
-  *edge-anchored* (the entity also carries an `EdgeAnchor` — transform and
-  frontage derive from the interval chord, sharing all the anchored-node
-  machinery: sliding, following, undo — but **facing flipped 180°** vs an
-  anchored node: the lot's +Z points *into* the parent road it fronts, the
-  parcel extends outward, an anchored node's +Z points away because its
-  network is the driveway growing outward) and *free* (transform authored
-  by hand). A building placed on a lot is a separate concern; the lot only
-  reserves and orients the parcel.
-  **The parcel owns its whole interior** (decided 2026-07-19): the yard —
-  paths, lawn, the driveway apron — is the lot/building generator's domain,
-  part of the recipe, and terrain never enters the perimeter; the terrain
-  seam is the lot *perimeter*, so a building is always buffered from
-  terrain by its own yard. The parcel surface is **not flat in the general
-  case** — flatness is a legitimate special case (the parking pad above),
-  not an assumption; the reference-surface model for non-planar parcels is
-  an open question (§8).
+  authoring layer assumes a ground plane: parcels and buildings live in
+  full 3D, and edge-anchored elements inherit height from the edge they
+  sit on.
+- **Parcel** — the container primitive of the architecture chapter
+  (reworked 2026-07-19): a piece of the world bounded by a **closed
+  polyline**, owning everything inside. `Parcel { boundary: Vec<Entity> }`
+  lists child `ParcelVertex` entities in **explicit perimeter order**
+  (boundaries may be concave — never re-derived by angle, unlike junction
+  loops); vertex local translations carry heights, parcels are **not flat
+  in the general case** — flatness is a legitimate special case (a parking
+  pad cut/filled into a slope). Boundary segments are straight today;
+  curved segments with optional C1 joints (auto tangents as on roads) are
+  planned.
+  **Gates** (`ParcelGate`): the parcel owns **any number of connection
+  sockets** on its boundary — child `RoadNode`s, +Z outward, standard
+  socket rule. A gate is two-sided: a network road arrives at it from the
+  front (`b_from_front`), and the parcel's **internal roads** — ordinary
+  `RoadNode`/`RoadSegment` children; the road math reads `GlobalTransform`
+  and ignores hierarchy — connect to the same node from behind.
+  **The parcel owns its whole interior** (decided 2026-07-19): the yard,
+  internal roads, buildings are its content; terrain never enters the
+  perimeter, the terrain seam is the parcel boundary (possibly a sharp
+  cut/fill transition), so a building is always buffered from terrain by
+  its own yard.
+  **Parcel-as-prefab is the point**: content lives in the parcel's local
+  space as its subtree, so "parcel with a villa" or "parcel with a whole
+  factory" is one reusable prefab.
+  Planned (slice 3): an optional single `EdgeAnchor` re-attaching a parcel
+  to a road edge with **inverted derivation** — the rigid prefab dictates
+  its frontage length, the edge interval's width derives from it (center
+  still slides); two anchors would over-constrain a rigid prefab and are
+  rejected.
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a
   driveway/building exit crossing the sidewalk to meet the road. Not a
@@ -167,23 +177,19 @@ the entities mean.
   result. A validator flags *unsanctioned* crossings — two roads
   intersecting in projection with neither a shared node nor an edge anchor —
   as authoring errors; it never tries to auto-resolve them.
-- **Building** — a `Building` component **on the lot entity** (the lot
-  reserves the parcel, the building fills it). Today it carries flat
-  box-massing recipe parameters (floors, floor height, footprint inset,
-  seed, exits) — the P4 stub of the eventual **assembly graph asset** (a
-  reusable recipe: one "землянка" recipe, ten placements); the fields are
-  already the asset's fields, promotion is mechanical once AssetRef
-  inspector editing lands. **Exit sockets materialize at placement time by
-  the edit action** — ordinary child entities with `RoadNode` +
-  `BuildingExit`, parented to the lot: they follow the lot through plain
-  `GlobalTransform` propagation, and driveway `RoadSegment`s reference them
-  stably across scene reloads (a per-frame derived spawn was rejected for
-  breaking those references). Socket convention as everywhere: exit +Z
-  faces outward into the road network. Terrain never reaches the building:
-  the parcel owns its interior, so the terrain seam is the lot perimeter,
-  not the footprint — there is no footprint cut-out. Interior/exterior
-  volumes, occluders and gameplay metadata still get their own design
-  round (phase 3, §7).
+- **Building** — parcel *content*: a **child entity of a parcel** with its
+  own transform and its own footprint (`half_width × half_depth` local
+  rectangle); one parcel holds **any number** of buildings (a villa, or a
+  factory full of structures). The component carries flat box-massing
+  recipe parameters (floors, floor height, footprint extents, seed) — the
+  P4 stub of the eventual **assembly graph asset** (a reusable recipe: one
+  "землянка" recipe, ten placements); the fields are already the asset's
+  fields, promotion is mechanical once AssetRef inspector editing lands.
+  Connections to the road network belong to the *parcel* (its gates), not
+  to buildings. Terrain never reaches a building: the parcel owns its
+  interior, so the terrain seam is the parcel boundary — there is no
+  footprint cut-out. Interior/exterior volumes, occluders and gameplay
+  metadata still get their own design round (phase 3, §7).
 
 Graph edits go through the standard `EditAction`/`ActionQueue` path like any
 other entity/component edit — the plugin's editor tools produce actions, never
@@ -335,13 +341,13 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
   cover everything described so far.
 - Chunk cell identity for terrain regions (roads/intersections have natural
   ids; regions appear/disappear as the graph changes).
-- **Parcel reference surface** — the model for non-planar lots (§3: parcels
-  are not flat in the general case). Candidate: the same "span between two
-  straight segments" rule as roads — frontage segment ↔ back segment, a
-  bicubic patch between them, with the flat rectangle as the degenerate
-  case. Also open: how perimeter heights parameterize the terrain boundary
-  condition, and how the cut/fill transition (scarp vs retaining wall) is
-  selected.
+- **Parcel reference surface** — the interior surface over a closed,
+  possibly non-planar boundary polyline (§3: parcels are not flat in the
+  general case). Stub: fan/planar fill from the boundary; the real
+  interpolation (and interaction with internal roads' surfaces) is the
+  generator's concern. Also open: how perimeter heights parameterize the
+  terrain boundary condition, and how the cut/fill transition (scarp vs
+  retaining wall) is selected.
 - ~~Road attachment side~~ — **resolved** (2026-07-18): `RoadSegment` grew
   `b_from_front` — the road meets `b` on its +Z side instead of the default
   −Z. The connect tool sets it automatically when the clicked target is a

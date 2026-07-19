@@ -10,4 +10,3 @@ redlilium-core = { path = "../core" }
 redlilium-debug-drawer = { path = "../debug_drawer" }
 redlilium-ecs = { path = "../ecs" }
 redlilium-runtime = { path = "../runtime" }
-serde = { workspace = true }

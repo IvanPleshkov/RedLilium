@@ -709,62 +709,168 @@ pub fn spawn_levels_playground(world: &mut World) {
         )
         .unwrap();
 
-    // Lots & buildings (architecture chapter). Two states of the same
-    // primitive: a lot glued to the first road's left edge (transform and
-    // frontage derive from the edge chord; it faces the road, the parcel
-    // extends outward), and a free-standing lot whose building exit drives
-    // into the cross's east road through an ordinary driveway.
+    // Parcels (architecture chapter): prefab-shaped containers bounded by
+    // a closed polyline, owning gates (connection sockets on the boundary)
+    // and content (buildings — any number). Terrain never enters a parcel;
+    // its perimeter is the terrain's boundary condition.
     {
         use redlilium_core::abstract_editor::EditAction;
-        use redlilium_levels::{Building, EdgeAnchor, Lot, PlaceBuildingAction};
+        use redlilium_core::math::quat_from_rotation_y;
+        use redlilium_ecs::Entity;
+        use redlilium_levels::{
+            Building, EdgeAnchor, Parcel, ParcelGate, ParcelVertex, PlaceBuildingAction,
+        };
 
-        let anchored_lot = world.spawn();
-        let t = Transform::default();
-        world.insert(anchored_lot, t).unwrap();
-        world
-            .insert(anchored_lot, GlobalTransform(t.to_matrix()))
-            .unwrap();
-        world.insert(anchored_lot, Lot::default()).unwrap();
+        let child = |world: &mut World, parent: Entity, local: Transform| -> Entity {
+            let e = world.spawn();
+            world.insert(e, local).unwrap();
+            let parent_m = world.get::<GlobalTransform>(parent).unwrap().0;
+            world
+                .insert(e, GlobalTransform(parent_m * local.to_matrix()))
+                .unwrap();
+            redlilium_ecs::set_parent(world, e, parent);
+            e
+        };
+        let parcel_at = |world: &mut World, t: Transform, verts: &[[f32; 3]]| -> Entity {
+            let parcel = world.spawn();
+            world.insert(parcel, t).unwrap();
+            world
+                .insert(parcel, GlobalTransform(t.to_matrix()))
+                .unwrap();
+            let boundary: Vec<Entity> = verts
+                .iter()
+                .map(|&[x, y, z]| {
+                    let v = child(
+                        world,
+                        parcel,
+                        Transform::new(
+                            Vec3::new(x, y, z),
+                            quat_from_rotation_y(0.0),
+                            Vec3::new(1.0, 1.0, 1.0),
+                        ),
+                    );
+                    world.insert(v, ParcelVertex).unwrap();
+                    v
+                })
+                .collect();
+            world.insert(parcel, Parcel { boundary }).unwrap();
+            parcel
+        };
+        let gate_at = |world: &mut World, parcel: Entity, x: f32, z: f32, yaw: f32| -> Entity {
+            let gate = child(
+                world,
+                parcel,
+                Transform::new(
+                    Vec3::new(x, 0.0, z),
+                    quat_from_rotation_y(yaw),
+                    Vec3::new(1.0, 1.0, 1.0),
+                ),
+            );
+            world.insert(gate, RoadNode { half_width: 1.5 }).unwrap();
+            world.insert(gate, ParcelGate).unwrap();
+            gate
+        };
+        let building_at =
+            |world: &mut World, parcel: Entity, x: f32, z: f32, building: Building| {
+                let local = Transform::new(
+                    Vec3::new(x, 0.0, z),
+                    quat_from_rotation_y(0.0),
+                    Vec3::new(1.0, 1.0, 1.0),
+                );
+                PlaceBuildingAction::new(parcel, local, building)
+                    .apply(world)
+                    .unwrap();
+            };
+
+        // Parcel A, west of the first road: an irregular pentagon (one
+        // vertex raised — parcels are not flat), two buildings, and a gate
+        // on its east side; the gate's driveway lands on the road's left
+        // edge through an edge-anchored node.
+        let a = parcel_at(
+            world,
+            Transform::new(
+                Vec3::new(-14.0, 0.0, 2.0),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ),
+            &[
+                [-6.0, 0.0, 0.0],
+                [6.0, 0.0, 0.0],
+                [8.0, 0.0, -6.0],
+                [0.0, 1.0, -10.0],
+                [-7.0, 0.0, -5.0],
+            ],
+        );
+        building_at(world, a, -2.0, -4.5, Building::default());
+        building_at(
+            world,
+            a,
+            4.0,
+            -6.0,
+            Building {
+                floors: 1,
+                half_width: 2.0,
+                half_depth: 2.0,
+                ..Building::default()
+            },
+        );
+        let gate_a = gate_at(world, a, 7.0, -3.0, std::f32::consts::FRAC_PI_2);
+        let landing_a = node(world, 0.0, 0.0, 0.0);
         world
             .insert(
-                anchored_lot,
+                landing_a,
                 EdgeAnchor {
                     parent_road: r1,
                     right_edge: false,
                     u_min: 0.55,
-                    u_max: 0.85,
+                    u_max: 0.7,
                 },
             )
             .unwrap();
-        // Settle before placing the building so the materialized exit
-        // inherits the on-edge transform.
-        redlilium_levels::settle_edge_anchors(world);
-        PlaceBuildingAction::new(anchored_lot, Building::default())
-            .apply(world)
-            .unwrap();
-
-        let free_lot = world.spawn();
-        let t = Transform::new(
-            Vec3::new(48.0, 0.0, 0.0),
-            redlilium_core::math::quat_from_rotation_y(0.0),
-            Vec3::new(1.0, 1.0, 1.0),
-        );
-        world.insert(free_lot, t).unwrap();
-        world
-            .insert(free_lot, GlobalTransform(t.to_matrix()))
-            .unwrap();
-        world.insert(free_lot, Lot::default()).unwrap();
-        PlaceBuildingAction::new(free_lot, Building::default())
-            .apply(world)
-            .unwrap();
-        let exit_socket = world.get::<redlilium_ecs::Children>(free_lot).unwrap().0[0];
-
-        // Driveway: departs the exit socket along its +Z (toward the east
-        // road) and lands on a node glued to that road's south edge.
-        let landing = node(world, 0.0, 0.0, 0.0);
+        let drive_a = world.spawn();
         world
             .insert(
-                landing,
+                drive_a,
+                RoadSegment {
+                    a: gate_a,
+                    b: landing_a,
+                    b_from_front: true,
+                    ..RoadSegment::default()
+                },
+            )
+            .unwrap();
+
+        // Parcel B, south of the cross's east road: a plain rectangle with
+        // one building and a front gate driving into the road.
+        let b = parcel_at(
+            world,
+            Transform::new(
+                Vec3::new(48.0, 0.0, 0.0),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ),
+            &[
+                [-5.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [5.0, 0.0, -9.0],
+                [-5.0, 0.0, -9.0],
+            ],
+        );
+        building_at(
+            world,
+            b,
+            0.0,
+            -5.0,
+            Building {
+                floors: 3,
+                ..Building::default()
+            },
+        );
+        let gate_b = gate_at(world, b, 0.0, 0.0, 0.0);
+        let landing_b = node(world, 0.0, 0.0, 0.0);
+        world
+            .insert(
+                landing_b,
                 EdgeAnchor {
                     parent_road: east_road,
                     right_edge: true,
@@ -773,13 +879,13 @@ pub fn spawn_levels_playground(world: &mut World) {
                 },
             )
             .unwrap();
-        let driveway = world.spawn();
+        let drive_b = world.spawn();
         world
             .insert(
-                driveway,
+                drive_b,
                 RoadSegment {
-                    a: exit_socket,
-                    b: landing,
+                    a: gate_b,
+                    b: landing_b,
                     b_from_front: true,
                     ..RoadSegment::default()
                 },

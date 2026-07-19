@@ -276,12 +276,12 @@ fn road_touches(world: &World, road: Entity, node: Option<Entity>) -> bool {
 }
 
 /// Whether `node` is a socket — a junction connector, an edge-anchored
-/// node, or a building exit. Sockets keep +Z toward the road network, so a
+/// node, or a parcel gate. Sockets keep +Z toward the road network, so a
 /// road arriving AT one must meet it from the front
 /// (`RoadSegment::b_from_front`).
 fn is_socket(world: &World, node: Entity) -> bool {
     if world.get::<EdgeAnchor>(node).is_some()
-        || world.get::<crate::building::BuildingExit>(node).is_some()
+        || world.get::<crate::parcel::ParcelGate>(node).is_some()
     {
         return true;
     }
@@ -369,18 +369,44 @@ pub(crate) fn selection_pick(
             consider(dist, ROAD_HANDLE_PICK_RADIUS, t, road);
         }
     }
-    if let Ok(lots) = world.read_all::<crate::lot::Lot>() {
-        for (index, lot) in lots.iter() {
+    if let Ok(parcels) = world.read_all::<crate::parcel::Parcel>() {
+        for (index, parcel) in parcels.iter() {
+            let Some(entity) = world.entity_at_index(index) else {
+                continue;
+            };
+            let Some(lp) = crate::parcel::parcel_loop(world, parcel) else {
+                continue;
+            };
+            // The parcel picks by its boundary polyline; the vertex handle
+            // cubes pick the vertex entities themselves (they win by being
+            // strictly closer to the ray than the segments through them).
+            for i in 0..lp.len() {
+                let (dist, _, t) = ray_segment_closest(ray, lp[i], lp[(i + 1) % lp.len()]);
+                consider(dist, PICK_RADIUS, t, entity);
+            }
+            for (&vertex, p) in parcel.boundary.iter().zip(&lp) {
+                let (dist, _, t) = ray_segment_closest(ray, *p, *p);
+                consider(dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
+            }
+        }
+    }
+    if let Ok(buildings) = world.read_all::<crate::building::Building>() {
+        for (index, building) in buildings.iter() {
             let Some(entity) = world.entity_at_index(index) else {
                 continue;
             };
             let Some(gt) = world.get::<GlobalTransform>(entity) else {
                 continue;
             };
-            // Lots pick by their perimeter rectangle.
-            let corners = crate::lot::lot_corners(&gt.0, lot);
+            // Buildings pick by their ground-floor footprint perimeter.
+            let ring = crate::building::footprint_corners(building);
+            let corner = |[x, z]: [f32; 2]| {
+                let p = gt.0 * redlilium_core::math::Vec4::new(x, 0.0, z, 1.0);
+                Vec3::new(p.x, p.y, p.z)
+            };
             for i in 0..4 {
-                let (dist, _, t) = ray_segment_closest(ray, corners[i], corners[(i + 1) % 4]);
+                let (dist, _, t) =
+                    ray_segment_closest(ray, corner(ring[i]), corner(ring[(i + 1) % 4]));
                 consider(dist, PICK_RADIUS, t, entity);
             }
         }
@@ -569,7 +595,7 @@ fn reorientable(world: &World, node: Entity, exclude: Entity) -> Option<Entity> 
         return None;
     }
     if world.get::<EdgeAnchor>(node).is_some()
-        || world.get::<crate::building::BuildingExit>(node).is_some()
+        || world.get::<crate::parcel::ParcelGate>(node).is_some()
     {
         return None;
     }
@@ -741,18 +767,18 @@ mod tests {
     }
 
     #[test]
-    fn building_exit_is_a_socket() {
+    fn parcel_gate_is_a_socket() {
         let mut world = World::new();
         redlilium_ecs::register_std_components(&mut world);
         world.register_inspector_default::<RoadNode>();
         world.register_inspector_default::<crate::Junction>();
         world.register_inspector_default::<EdgeAnchor>();
-        world.register_inspector_default::<crate::building::BuildingExit>();
+        world.register_inspector_default::<crate::parcel::ParcelGate>();
 
-        let exit = world.spawn();
-        world.insert(exit, RoadNode::default()).unwrap();
-        world.insert(exit, crate::building::BuildingExit).unwrap();
-        assert!(is_socket(&world, exit));
+        let gate = world.spawn();
+        world.insert(gate, RoadNode::default()).unwrap();
+        world.insert(gate, crate::parcel::ParcelGate).unwrap();
+        assert!(is_socket(&world, gate));
         // A plain node is not.
         let plain = world.spawn();
         world.insert(plain, RoadNode::default()).unwrap();

@@ -15,8 +15,8 @@ const NODE_COLOR: [f32; 4] = [1.0, 0.75, 0.1, 1.0];
 const EDGE_COLOR: [f32; 4] = [0.15, 0.85, 1.0, 1.0];
 /// Interior wireframe (dim teal).
 const GRID_COLOR: [f32; 4] = [0.05, 0.4, 0.5, 1.0];
-/// Lot parcels (green).
-const LOT_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
+/// Parcel boundaries (green).
+const PARCEL_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
 /// Building box massing (violet).
 const BUILDING_COLOR: [f32; 4] = [0.8, 0.5, 0.95, 1.0];
 
@@ -71,18 +71,31 @@ impl System for DrawLevelGraph {
                 }
             }
 
-            if let Ok(lots) = world.read_all::<crate::lot::Lot>() {
-                for (index, lot) in lots.iter() {
+            if let Ok(parcels) = world.read_all::<crate::parcel::Parcel>() {
+                for (_, parcel) in parcels.iter() {
+                    let Some(lp) = crate::parcel::parcel_loop(world, parcel) else {
+                        continue;
+                    };
+                    for i in 0..lp.len() {
+                        draw.draw_line(pt(&lp[i]), pt(&lp[(i + 1) % lp.len()]), PARCEL_COLOR);
+                    }
+                    // Vertex handles: the clickable proxies for the boundary
+                    // vertex entities (drag them to reshape the parcel).
+                    for p in &lp {
+                        draw_handle_cube(&mut draw, *p, HANDLE_HALF, PARCEL_COLOR);
+                    }
+                }
+            }
+
+            if let Ok(buildings) = world.read_all::<crate::building::Building>() {
+                for (index, building) in buildings.iter() {
                     let Some(entity) = world.entity_at_index(index) else {
                         continue;
                     };
                     let Some(gt) = world.get::<GlobalTransform>(entity) else {
                         continue;
                     };
-                    draw_lot(&mut draw, &gt.0, lot);
-                    if let Some(building) = world.get::<crate::building::Building>(entity) {
-                        draw_building(&mut draw, &gt.0, lot, building);
-                    }
+                    draw_building(&mut draw, &gt.0, building);
                 }
             }
 
@@ -143,33 +156,13 @@ fn draw_node(draw: &mut DebugDrawerContext<'_>, world: &Mat4, half_width: f32) {
     draw.draw_line(pt(&tip), pt(&(tip - fwd * 0.5 - side * 0.3)), NODE_COLOR);
 }
 
-/// Lot parcel: the perimeter rectangle plus a short arrow out of the
-/// frontage center — +Z, toward the road network the lot faces.
-fn draw_lot(draw: &mut DebugDrawerContext<'_>, world: &Mat4, lot: &crate::lot::Lot) {
-    let corners = crate::lot::lot_corners(world, lot);
-    for i in 0..4 {
-        draw.draw_line(pt(&corners[i]), pt(&corners[(i + 1) % 4]), LOT_COLOR);
-    }
-    let front_center = (corners[0] + corners[1]) * 0.5;
-    let out = bezier::heading(world);
-    draw.draw_line(
-        pt(&front_center),
-        pt(&(front_center + out * 1.2)),
-        LOT_COLOR,
-    );
-}
-
-/// Building box massing: the inset footprint extruded floor by floor —
-/// a ring per storey line plus the four corner verticals.
+/// Building box massing: the footprint extruded floor by floor — a ring
+/// per storey line plus the four corner verticals.
 fn draw_building(
     draw: &mut DebugDrawerContext<'_>,
     world: &Mat4,
-    lot: &crate::lot::Lot,
     building: &crate::building::Building,
 ) {
-    let Some((half_x, z_front, z_back)) = crate::building::footprint(lot, building) else {
-        return;
-    };
     if building.floors == 0 || building.floor_height <= 0.0 {
         return;
     }
@@ -177,17 +170,12 @@ fn draw_building(
         let p = world * Vec4::new(x, y, z, 1.0);
         Vec3::new(p.x, p.y, p.z)
     };
-    let ring = [
-        (-half_x, z_front),
-        (half_x, z_front),
-        (half_x, z_back),
-        (-half_x, z_back),
-    ];
+    let ring = crate::building::footprint_corners(building);
     for floor in 0..=building.floors {
         let y = floor as f32 * building.floor_height;
         for i in 0..4 {
-            let (ax, az) = ring[i];
-            let (bx, bz) = ring[(i + 1) % 4];
+            let [ax, az] = ring[i];
+            let [bx, bz] = ring[(i + 1) % 4];
             draw.draw_line(
                 pt(&corner(ax, y, az)),
                 pt(&corner(bx, y, bz)),
@@ -196,7 +184,7 @@ fn draw_building(
         }
     }
     let height = building.floors as f32 * building.floor_height;
-    for (x, z) in ring {
+    for [x, z] in ring {
         draw.draw_line(
             pt(&corner(x, 0.0, z)),
             pt(&corner(x, height, z)),

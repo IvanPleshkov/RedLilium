@@ -17,14 +17,14 @@ pub mod building;
 mod draw;
 pub mod graph;
 pub mod junction;
-pub mod lot;
+pub mod parcel;
 mod tool;
 
 pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_anchors};
-pub use building::{Building, BuildingExit, ExitSpec, PlaceBuildingAction};
+pub use building::{Building, PlaceBuildingAction};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
-pub use lot::{AddLotAction, Lot};
+pub use parcel::{AddParcelAction, Parcel, ParcelGate, ParcelVertex, parcel_loop};
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
 use redlilium_ecs::{Component, Entity, PostUpdate, Update, UpdateGlobalTransforms, World};
@@ -98,9 +98,10 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<RoadSegment>();
         world.register_inspector_default::<Junction>();
         world.register_inspector_default::<EdgeAnchor>();
-        world.register_inspector_default::<Lot>();
+        world.register_inspector_default::<Parcel>();
+        world.register_inspector_default::<ParcelVertex>();
+        world.register_inspector_default::<ParcelGate>();
         world.register_inspector_default::<Building>();
-        world.register_inspector_default::<BuildingExit>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
@@ -151,60 +152,70 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                     .push(Box::new(CreateJunctionAction::new(connectors)));
             },
         );
-        // "Add lot": place a parcel — glued to the road edge under the
-        // cursor, or free-standing at the ground click point.
+        // "Add parcel": stamp a default rectangular boundary at the ground
+        // click point; drag the vertex handles into shape afterwards.
         view.ops.add(
-            "Add lot",
+            "Add parcel",
+            |ctx| ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some(),
             |ctx| {
-                ctx.cursor_ray
-                    .as_ref()
-                    .is_some_and(|ray| lot::lot_target(ctx.world, ray).is_some())
-            },
-            |ctx| {
-                let target = ctx
-                    .cursor_ray
-                    .as_ref()
-                    .and_then(|ray| lot::lot_target(ctx.world, ray));
-                match target {
-                    Some(lot::LotTarget::Edge(hit)) => {
-                        let (u_min, u_max) =
-                            anchor::interval_around(ctx.world, &hit, Lot::default().frontage);
-                        ctx.actions.push(Box::new(AddLotAction::on_edge(EdgeAnchor {
-                            parent_road: hit.road,
-                            right_edge: hit.right_edge,
-                            u_min,
-                            u_max,
-                        })));
-                    }
-                    Some(lot::LotTarget::Free(point)) => {
-                        ctx.actions.push(Box::new(AddLotAction::at_point(point)));
-                    }
-                    None => {}
+                if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
+                    ctx.actions.push(Box::new(AddParcelAction::at_point(point)));
                 }
             },
         );
-        // "Place building": fill the selected lot with the default box
-        // recipe; exit sockets materialize as child road nodes. Tune the
-        // parameters in the inspector afterwards.
+        // "Place building": drop the default box recipe at the center of
+        // each selected parcel (a parcel holds any number of buildings) —
+        // move it and tune the parameters in the inspector afterwards.
         view.ops.add(
             "Place building",
             |ctx| {
-                ctx.selection.iter().any(|&e| {
-                    ctx.world.get::<Lot>(e).is_some() && ctx.world.get::<Building>(e).is_none()
-                })
+                ctx.selection
+                    .iter()
+                    .any(|&e| ctx.world.get::<Parcel>(e).is_some())
             },
             |ctx| {
-                let lots: Vec<Entity> = ctx
+                let parcels: Vec<Entity> = ctx
                     .selection
                     .iter()
                     .copied()
-                    .filter(|&e| {
-                        ctx.world.get::<Lot>(e).is_some() && ctx.world.get::<Building>(e).is_none()
-                    })
+                    .filter(|&e| ctx.world.get::<Parcel>(e).is_some())
                     .collect();
-                for lot in lots {
-                    ctx.actions
-                        .push(Box::new(PlaceBuildingAction::new(lot, Building::default())));
+                for entity in parcels {
+                    // Local drop point: centroid of the boundary vertices'
+                    // local positions (the parcel origin when degenerate).
+                    let centroid = ctx
+                        .world
+                        .get::<Parcel>(entity)
+                        .map(|p| {
+                            let locals: Vec<_> = p
+                                .boundary
+                                .iter()
+                                .filter_map(|&v| {
+                                    ctx.world
+                                        .get::<redlilium_ecs::Transform>(v)
+                                        .map(|t| t.translation)
+                                })
+                                .collect();
+                            if locals.is_empty() {
+                                redlilium_core::math::Vec3::zeros()
+                            } else {
+                                locals
+                                    .iter()
+                                    .fold(redlilium_core::math::Vec3::zeros(), |a, b| a + b)
+                                    / locals.len() as f32
+                            }
+                        })
+                        .unwrap_or_else(redlilium_core::math::Vec3::zeros);
+                    let local = redlilium_ecs::Transform::new(
+                        centroid,
+                        redlilium_core::math::quat_from_rotation_y(0.0),
+                        redlilium_core::math::Vec3::new(1.0, 1.0, 1.0),
+                    );
+                    ctx.actions.push(Box::new(PlaceBuildingAction::new(
+                        entity,
+                        local,
+                        Building::default(),
+                    )));
                 }
             },
         );
