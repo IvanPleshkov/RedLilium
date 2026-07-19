@@ -105,12 +105,18 @@ the entities mean.
   junction fills the −Z side. Roads should attach to a connector as their
   `a` end (departing along +Z).
 - **Terrain control point** — entity with `Transform` +
-  `TerrainControlPoint`. Terrain fills the regions *between* roads (faces of
-  the planar road graph, projected to ground plane); control points bend the
+  `TerrainControlPoint`. Terrain fills the regions *between* roads **and
+  parcels** (faces of the planar graph formed by road edges and lot
+  perimeters, projected to ground plane); control points bend the
   interpolated surface where plain filling is too flat.
   **Terrain is the final fill** (decided 2026-07-19): it conforms to roads
-  and architecture — road edges and lot boundaries are boundary conditions
-  of the fill, never constraints on them. In particular, nothing in the
+  and architecture — road edges and lot perimeters (curves *with heights*)
+  are boundary conditions of the fill, never constraints on them. The fill
+  is not necessarily continuous at a parcel perimeter: a parcel may be
+  **cut or filled into the surrounding ground with a sharp transition**
+  (a flat parking pad in a slope — excavated or embanked); the transition
+  geometry (scarp, retaining) is generated from the height delta along the
+  seam, it is never authored as meshes. In particular, nothing in the
   authoring layer assumes a ground plane: lots and buildings live in full
   3D, and edge-anchored elements inherit height from the edge they sit on.
 - **Lot** — the parcel primitive of the architecture chapter:
@@ -125,6 +131,14 @@ the entities mean.
   network is the driveway growing outward) and *free* (transform authored
   by hand). A building placed on a lot is a separate concern; the lot only
   reserves and orients the parcel.
+  **The parcel owns its whole interior** (decided 2026-07-19): the yard —
+  paths, lawn, the driveway apron — is the lot/building generator's domain,
+  part of the recipe, and terrain never enters the perimeter; the terrain
+  seam is the lot *perimeter*, so a building is always buffered from
+  terrain by its own yard. The parcel surface is **not flat in the general
+  case** — flatness is a legitimate special case (the parking pad above),
+  not an assumption; the reference-surface model for non-planar parcels is
+  an open question (§8).
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a
   driveway/building exit crossing the sidewalk to meet the road. Not a
@@ -165,10 +179,11 @@ the entities mean.
   `GlobalTransform` propagation, and driveway `RoadSegment`s reference them
   stably across scene reloads (a per-frame derived spawn was rejected for
   breaking those references). Socket convention as everywhere: exit +Z
-  faces outward into the road network. Terrain interaction (footprint
-  cut-outs) waits for the terrain chapter — terrain conforms to buildings,
-  not vice versa. Interior/exterior volumes, occluders and gameplay
-  metadata still get their own design round (phase 3, §7).
+  faces outward into the road network. Terrain never reaches the building:
+  the parcel owns its interior, so the terrain seam is the lot perimeter,
+  not the footprint — there is no footprint cut-out. Interior/exterior
+  volumes, occluders and gameplay metadata still get their own design
+  round (phase 3, §7).
 
 Graph edits go through the standard `EditAction`/`ActionQueue` path like any
 other entity/component edit — the plugin's editor tools produce actions, never
@@ -301,8 +316,9 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
 2. **Phase 2 — terrain + tools.** Region extraction between roads (planar
    graph faces), terrain fill + control points, intersection surfaces,
    viewport tools (§6.2), debug-draw (§6.4).
-3. **Phase 3 — buildings.** Assembly-graph asset, terrain cut-outs,
-   interior/exterior + occluder metadata. Gets its own design doc/round.
+3. **Phase 3 — buildings.** Assembly-graph asset, parcel-perimeter terrain
+   seams (cut/fill transitions), interior/exterior + occluder metadata.
+   Gets its own design doc/round.
 4. **Later** (explicitly deferred): tyroxine as the real generator, navmesh,
    LOD baking (LOD1 and below), incremental invalidation, streaming budgets.
 
@@ -319,6 +335,13 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
   cover everything described so far.
 - Chunk cell identity for terrain regions (roads/intersections have natural
   ids; regions appear/disappear as the graph changes).
+- **Parcel reference surface** — the model for non-planar lots (§3: parcels
+  are not flat in the general case). Candidate: the same "span between two
+  straight segments" rule as roads — frontage segment ↔ back segment, a
+  bicubic patch between them, with the flat rectangle as the degenerate
+  case. Also open: how perimeter heights parameterize the terrain boundary
+  condition, and how the cut/fill transition (scarp vs retaining wall) is
+  selected.
 - ~~Road attachment side~~ — **resolved** (2026-07-18): `RoadSegment` grew
   `b_from_front` — the road meets `b` on its +Z side instead of the default
   −Z. The connect tool sets it automatically when the clicked target is a
