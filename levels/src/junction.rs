@@ -228,12 +228,14 @@ impl EditAction<World> for CreateJunctionAction {
     }
 }
 
-/// Undoable "stamp a 4-way junction template at a point": four outward
-/// connectors around `center` plus the junction over them — drag them into
-/// shape afterwards, attach roads with the connect tool.
+/// Undoable "stamp an N-way junction template at a point": `arms` outward
+/// connectors evenly spread around `center` plus the junction over them —
+/// drag them into shape afterwards, attach roads with the connect tool.
 #[derive(Debug)]
 pub struct StampJunctionAction {
     center: Vec3,
+    arms: usize,
+    description: String,
     created: Vec<Entity>,
 }
 
@@ -241,9 +243,13 @@ pub struct StampJunctionAction {
 const STAMP_ARM: f32 = 8.0;
 
 impl StampJunctionAction {
-    pub fn new(center: Vec3) -> Self {
+    /// `arms` is clamped to at least 3 — fewer cannot enclose an area.
+    pub fn new(center: Vec3, arms: usize) -> Self {
+        let arms = arms.max(3);
         Self {
             center,
+            arms,
+            description: format!("Add {arms}-way junction"),
             created: Vec::new(),
         }
     }
@@ -256,9 +262,9 @@ impl EditAction<World> for StampJunctionAction {
                 world.despawn(e);
             }
         };
-        let mut connectors = Vec::with_capacity(4);
-        for i in 0..4 {
-            let yaw = i as f32 * std::f32::consts::FRAC_PI_2;
+        let mut connectors = Vec::with_capacity(self.arms);
+        for i in 0..self.arms {
+            let yaw = i as f32 * std::f32::consts::TAU / self.arms as f32;
             let transform = stamp_connector_transform(self.center, yaw, STAMP_ARM);
             let node = world.spawn();
             self.created.push(node);
@@ -295,7 +301,7 @@ impl EditAction<World> for StampJunctionAction {
     }
 
     fn description(&self) -> &str {
-        "Add 4-way junction"
+        &self.description
     }
 }
 
@@ -406,6 +412,49 @@ mod tests {
         };
         let lp = junction_loop(&world, &junction).expect("loop");
         assert_eq!(lp.corners.len(), 3);
+    }
+
+    #[test]
+    fn three_way_stamp_roundtrip() {
+        use redlilium_core::abstract_editor::EditAction;
+        let mut world = world_with_nodes();
+        let mut action = StampJunctionAction::new(Vec3::zeros(), 3);
+        assert_eq!(action.description(), "Add 3-way junction");
+        action.apply(&mut world).expect("stamp");
+
+        let junctions: Vec<Junction> = world
+            .read_all::<Junction>()
+            .unwrap()
+            .iter()
+            .map(|(_, j)| j.clone())
+            .collect();
+        assert_eq!(junctions.len(), 1);
+        assert_eq!(junctions[0].connectors.len(), 3);
+        let lp = junction_loop(&world, &junctions[0]).expect("loop");
+        assert_eq!(lp.corners.len(), 3);
+        for c in &lp.connectors {
+            // Every stamped connector faces outward from the stamp center.
+            let out = (center(c) - lp.centroid).normalize();
+            assert!(out.dot(&c.outward) > 0.99);
+        }
+
+        action.undo(&mut world).expect("undo");
+        assert!(
+            world
+                .read_all::<Junction>()
+                .unwrap()
+                .iter()
+                .next()
+                .is_none()
+        );
+        assert!(
+            world
+                .read_all::<RoadNode>()
+                .unwrap()
+                .iter()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

@@ -144,19 +144,22 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                     .push(Box::new(CreateJunctionAction::new(connectors)));
             },
         );
-        // "Add 4-way junction": stamp a cross template at the click point;
-        // drag the connectors into shape, attach roads with the connect tool.
-        view.ops.add(
-            "Add 4-way junction",
-            |ctx| ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some(),
-            |ctx| {
-                if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
-                    ctx.actions.push(Box::new(StampJunctionAction::new(point)));
-                    // Straight into wiring: stamp, then click a connector
-                    // and chain roads out of it.
-                    ctx.request_tool = Some(CONNECT_TOOL.to_owned());
-                }
-            },
-        );
+        // Junction stamps: an N-armed template at the click point; drag the
+        // connectors into shape, attach roads with the connect tool.
+        for (label, arms) in [("Add 3-way junction", 3), ("Add 4-way junction", 4)] {
+            view.ops.add(
+                label,
+                |ctx| ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some(),
+                move |ctx| {
+                    if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
+                        ctx.actions
+                            .push(Box::new(StampJunctionAction::new(point, arms)));
+                        // Straight into wiring: stamp, then click a connector
+                        // and chain roads out of it.
+                        ctx.request_tool = Some(CONNECT_TOOL.to_owned());
+                    }
+                },
+            );
+        }
     }
 }
