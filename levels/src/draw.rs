@@ -15,6 +15,10 @@ const NODE_COLOR: [f32; 4] = [1.0, 0.75, 0.1, 1.0];
 const EDGE_COLOR: [f32; 4] = [0.15, 0.85, 1.0, 1.0];
 /// Interior wireframe (dim teal).
 const GRID_COLOR: [f32; 4] = [0.05, 0.4, 0.5, 1.0];
+/// Parcel boundaries (green).
+const PARCEL_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
+/// Building box massing (violet).
+const BUILDING_COLOR: [f32; 4] = [0.8, 0.5, 0.95, 1.0];
 
 /// Longitudinal tessellation of the preview wireframe.
 const U_STEPS: usize = 16;
@@ -64,6 +68,43 @@ impl System for DrawLevelGraph {
                             draw.draw_line(pt(&(p - out)), pt(&(p + out)), NODE_COLOR);
                         }
                     }
+                }
+            }
+
+            if let Ok(parcels) = world.read_all::<crate::parcel::Parcel>() {
+                for (_, parcel) in parcels.iter() {
+                    let Some(lp) = crate::parcel::parcel_loop(world, parcel) else {
+                        continue;
+                    };
+                    for i in 0..lp.len() {
+                        draw.draw_line(pt(&lp[i]), pt(&lp[(i + 1) % lp.len()]), PARCEL_COLOR);
+                    }
+                    // Vertex handles: clickable proxies for the boundary
+                    // vertex entities (drag to reshape), plus antennae for
+                    // nonzero curve handles (the pen model made visible).
+                    let Some(corners) = crate::parcel::parcel_corners(world, parcel) else {
+                        continue;
+                    };
+                    for (_, p, h_out, h_in) in corners {
+                        draw_handle_cube(&mut draw, p, HANDLE_HALF, PARCEL_COLOR);
+                        for h in [h_out, h_in] {
+                            if (h - p).norm() > 1e-3 {
+                                draw.draw_line(pt(&p), pt(&h), GRID_COLOR);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Ok(buildings) = world.read_all::<crate::building::Building>() {
+                for (index, building) in buildings.iter() {
+                    let Some(entity) = world.entity_at_index(index) else {
+                        continue;
+                    };
+                    let Some(gt) = world.get::<GlobalTransform>(entity) else {
+                        continue;
+                    };
+                    draw_building(&mut draw, &gt.0, building);
                 }
             }
 
@@ -122,6 +163,43 @@ fn draw_node(draw: &mut DebugDrawerContext<'_>, world: &Mat4, half_width: f32) {
     draw.draw_line(pt(&center), pt(&tip), NODE_COLOR);
     draw.draw_line(pt(&tip), pt(&(tip - fwd * 0.5 + side * 0.3)), NODE_COLOR);
     draw.draw_line(pt(&tip), pt(&(tip - fwd * 0.5 - side * 0.3)), NODE_COLOR);
+}
+
+/// Building box massing: the footprint extruded floor by floor — a ring
+/// per storey line plus the four corner verticals.
+fn draw_building(
+    draw: &mut DebugDrawerContext<'_>,
+    world: &Mat4,
+    building: &crate::building::Building,
+) {
+    if building.floors == 0 || building.floor_height <= 0.0 {
+        return;
+    }
+    let corner = |x: f32, y: f32, z: f32| {
+        let p = world * Vec4::new(x, y, z, 1.0);
+        Vec3::new(p.x, p.y, p.z)
+    };
+    let ring = crate::building::footprint_corners(building);
+    for floor in 0..=building.floors {
+        let y = floor as f32 * building.floor_height;
+        for i in 0..4 {
+            let [ax, az] = ring[i];
+            let [bx, bz] = ring[(i + 1) % 4];
+            draw.draw_line(
+                pt(&corner(ax, y, az)),
+                pt(&corner(bx, y, bz)),
+                BUILDING_COLOR,
+            );
+        }
+    }
+    let height = building.floors as f32 * building.floor_height;
+    for [x, z] in ring {
+        draw.draw_line(
+            pt(&corner(x, 0.0, z)),
+            pt(&corner(x, height, z)),
+            BUILDING_COLOR,
+        );
+    }
 }
 
 /// Junction boundary: corner curves in the edge color (they continue the

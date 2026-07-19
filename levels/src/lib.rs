@@ -13,14 +13,21 @@
 
 pub mod anchor;
 pub mod bezier;
+pub mod building;
 mod draw;
 pub mod graph;
 pub mod junction;
+pub mod parcel;
 mod tool;
 
 pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_anchors};
+pub use building::{Building, PlaceBuildingAction};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
+pub use parcel::{
+    AddGateAction, AddParcelAction, DuplicateParcelAction, Parcel, ParcelGate, ParcelVertex,
+    parcel_loop,
+};
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
 use redlilium_ecs::{Component, Entity, PostUpdate, Update, UpdateGlobalTransforms, World};
@@ -94,6 +101,10 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<RoadSegment>();
         world.register_inspector_default::<Junction>();
         world.register_inspector_default::<EdgeAnchor>();
+        world.register_inspector_default::<Parcel>();
+        world.register_inspector_default::<ParcelVertex>();
+        world.register_inspector_default::<ParcelGate>();
+        world.register_inspector_default::<Building>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
@@ -144,19 +155,159 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                     .push(Box::new(CreateJunctionAction::new(connectors)));
             },
         );
-        // "Add 4-way junction": stamp a cross template at the click point;
-        // drag the connectors into shape, attach roads with the connect tool.
+        // "Add parcel": stamp a default rectangular boundary — glued to
+        // the road edge under the cursor (the frontage dictates the edge
+        // interval; slide it with the gizmo), or free-standing at the
+        // ground click point. Drag the vertex handles into shape after.
         view.ops.add(
-            "Add 4-way junction",
-            |ctx| ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some(),
+            "Add parcel",
             |ctx| {
-                if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
-                    ctx.actions.push(Box::new(StampJunctionAction::new(point)));
-                    // Straight into wiring: stamp, then click a connector
-                    // and chain roads out of it.
-                    ctx.request_tool = Some(CONNECT_TOOL.to_owned());
+                ctx.cursor_ray.as_ref().is_some_and(|ray| {
+                    anchor::edge_under_cursor(ctx.world, ray, 1.0).is_some()
+                        || tool::ground_hit(ray).is_some()
+                })
+            },
+            |ctx| {
+                let Some(ray) = ctx.cursor_ray.as_ref() else {
+                    return;
+                };
+                if let Some(hit) = anchor::edge_under_cursor(ctx.world, ray, 1.0) {
+                    ctx.actions
+                        .push(Box::new(AddParcelAction::on_edge(EdgeAnchor {
+                            parent_road: hit.road,
+                            right_edge: hit.right_edge,
+                            u_min: hit.u,
+                            u_max: hit.u,
+                        })));
+                } else if let Some(point) = tool::ground_hit(ray) {
+                    ctx.actions.push(Box::new(AddParcelAction::at_point(point)));
                 }
             },
         );
+        // "Add gate": drop a connection socket onto the selected parcel's
+        // boundary at the point under the cursor (+Z outward). Roads then
+        // connect to it from either side with the connect tool.
+        view.ops.add(
+            "Add gate",
+            |ctx| {
+                ctx.cursor_ray.as_ref().is_some_and(|ray| {
+                    ctx.selection.iter().any(|&e| {
+                        ctx.world.get::<Parcel>(e).is_some()
+                            && parcel::gate_spot(ctx.world, e, ray).is_some()
+                    })
+                })
+            },
+            |ctx| {
+                let Some(ray) = ctx.cursor_ray.as_ref() else {
+                    return;
+                };
+                for &entity in ctx.selection.iter() {
+                    if ctx.world.get::<Parcel>(entity).is_some()
+                        && let Some(local) = parcel::gate_spot(ctx.world, entity, ray)
+                    {
+                        ctx.actions
+                            .push(Box::new(parcel::AddGateAction::new(entity, local)));
+                        break;
+                    }
+                }
+            },
+        );
+        // "Duplicate parcel": the prefab payoff — clone the selected
+        // parcel's whole subtree (boundary, gates, buildings, internal
+        // roads) at the ground click point. The copy starts free-standing.
+        view.ops.add(
+            "Duplicate parcel",
+            |ctx| {
+                ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some()
+                    && ctx
+                        .selection
+                        .iter()
+                        .any(|&e| ctx.world.get::<Parcel>(e).is_some())
+            },
+            |ctx| {
+                if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit)
+                    && let Some(&source) = ctx
+                        .selection
+                        .iter()
+                        .find(|&&e| ctx.world.get::<Parcel>(e).is_some())
+                {
+                    ctx.actions
+                        .push(Box::new(DuplicateParcelAction::new(source, point)));
+                }
+            },
+        );
+        // "Place building": drop the default box recipe at the center of
+        // each selected parcel (a parcel holds any number of buildings) —
+        // move it and tune the parameters in the inspector afterwards.
+        view.ops.add(
+            "Place building",
+            |ctx| {
+                ctx.selection
+                    .iter()
+                    .any(|&e| ctx.world.get::<Parcel>(e).is_some())
+            },
+            |ctx| {
+                let parcels: Vec<Entity> = ctx
+                    .selection
+                    .iter()
+                    .copied()
+                    .filter(|&e| ctx.world.get::<Parcel>(e).is_some())
+                    .collect();
+                for entity in parcels {
+                    // Local drop point: centroid of the boundary vertices'
+                    // local positions (the parcel origin when degenerate).
+                    let centroid = ctx
+                        .world
+                        .get::<Parcel>(entity)
+                        .map(|p| {
+                            let locals: Vec<_> = p
+                                .boundary
+                                .iter()
+                                .filter_map(|&v| {
+                                    ctx.world
+                                        .get::<redlilium_ecs::Transform>(v)
+                                        .map(|t| t.translation)
+                                })
+                                .collect();
+                            if locals.is_empty() {
+                                redlilium_core::math::Vec3::zeros()
+                            } else {
+                                locals
+                                    .iter()
+                                    .fold(redlilium_core::math::Vec3::zeros(), |a, b| a + b)
+                                    / locals.len() as f32
+                            }
+                        })
+                        .unwrap_or_else(redlilium_core::math::Vec3::zeros);
+                    let local = redlilium_ecs::Transform::new(
+                        centroid,
+                        redlilium_core::math::quat_from_rotation_y(0.0),
+                        redlilium_core::math::Vec3::new(1.0, 1.0, 1.0),
+                    );
+                    ctx.actions.push(Box::new(PlaceBuildingAction::new(
+                        entity,
+                        local,
+                        Building::default(),
+                    )));
+                }
+            },
+        );
+        // Junction stamps: an N-armed template at the click point; drag the
+        // connectors into shape, attach roads with the connect tool.
+        for (label, arms) in [("Add 3-way junction", 3), ("Add 4-way junction", 4)] {
+            view.ops.add(
+                label,
+                |ctx| ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some(),
+                move |ctx| {
+                    if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
+                        ctx.actions
+                            .push(Box::new(StampJunctionAction::new(point, arms)));
+                        // Straight into wiring: stamp, then click a connector
+                        // and chain roads out of it.
+                        ctx.request_tool = Some(CONNECT_TOOL.to_owned());
+                    }
+                },
+            );
+        }
     }
 }

@@ -105,9 +105,63 @@ the entities mean.
   junction fills the −Z side. Roads should attach to a connector as their
   `a` end (departing along +Z).
 - **Terrain control point** — entity with `Transform` +
-  `TerrainControlPoint`. Terrain fills the regions *between* roads (faces of
-  the planar road graph, projected to ground plane); control points bend the
+  `TerrainControlPoint`. Terrain fills the regions *between* roads **and
+  parcels** (faces of the planar graph formed by road edges and lot
+  perimeters, projected to ground plane); control points bend the
   interpolated surface where plain filling is too flat.
+  **Terrain is the final fill** (decided 2026-07-19): it conforms to roads
+  and architecture — road edges and parcel boundaries (curves *with heights*)
+  are boundary conditions of the fill, never constraints on them. The fill
+  is not necessarily continuous at a parcel perimeter: a parcel may be
+  **cut or filled into the surrounding ground with a sharp transition**
+  (a flat parking pad in a slope — excavated or embanked); the transition
+  geometry (scarp, retaining) is generated from the height delta along the
+  seam, it is never authored as meshes. In particular, nothing in the
+  authoring layer assumes a ground plane: parcels and buildings live in
+  full 3D, and edge-anchored elements inherit height from the edge they
+  sit on.
+- **Parcel** — the container primitive of the architecture chapter
+  (reworked 2026-07-19): a piece of the world bounded by a **closed
+  polyline**, owning everything inside. `Parcel { boundary: Vec<Entity> }`
+  lists child `ParcelVertex` entities in **explicit perimeter order**
+  (boundaries may be concave — never re-derived by angle, unlike junction
+  loops); vertex local translations carry heights, parcels are **not flat
+  in the general case** — flatness is a legitimate special case (a parking
+  pad cut/filled into a slope). Boundary segments follow the **pen model**:
+  each vertex carries two vertex-local Bézier handles (`handle_out` /
+  `handle_in`); both adjacent handles zero → a straight segment, mirrored
+  collinear handles → a **C1 joint**, arbitrary handles → curves meeting
+  at a corner (both requested cases, one mechanism). Handles being
+  vertex-local means rotating a vertex with the gizmo steers its curve.
+  **Gates** (`ParcelGate`): the parcel owns **any number of connection
+  sockets** on its boundary — child `RoadNode`s, +Z outward, standard
+  socket rule. A gate is two-sided: a network road arrives at it from the
+  front (`b_from_front`), and the parcel's **internal roads** — ordinary
+  `RoadNode`/`RoadSegment` children; the road math reads `GlobalTransform`
+  and ignores hierarchy — connect to the same node from behind.
+  **The parcel owns its whole interior** (decided 2026-07-19): the yard,
+  internal roads, buildings are its content; terrain never enters the
+  perimeter, the terrain seam is the parcel boundary (possibly a sharp
+  cut/fill transition), so a building is always buffered from terrain by
+  its own yard.
+  **Parcel-as-prefab is the point**: content lives in the parcel's local
+  space as its subtree, so "parcel with a villa" or "parcel with a whole
+  factory" is one reusable prefab. Concretely today: *Duplicate parcel*
+  clones the subtree through the generic `extract_prefab`/`instantiate`
+  machinery with every internal reference (boundary lists, hierarchy,
+  internal-road endpoints) remapped; the copy drops its edge anchor and
+  starts free. Prefab *assets* (a villa recipe on disk) ride the existing
+  prefab-serialization machinery in a later chapter.
+  A parcel may carry an optional single `EdgeAnchor` gluing it to a road
+  edge with **inverted derivation**: the rigid prefab dictates its
+  frontage length (the local distance between its first two boundary
+  vertices), the edge interval's *width* derives from it, and only the
+  interval's center is authored — it slides along the road under the
+  gizmo. The anchored transform faces the road (+Z into it, interior
+  outward). Two anchors would over-constrain a rigid prefab and are
+  rejected. Gates are met **from the side the road comes from**: network
+  roads from the front, internal roads from behind (other socket kinds
+  stay front-only).
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a
   driveway/building exit crossing the sidewalk to meet the road. Not a
@@ -136,12 +190,19 @@ the entities mean.
   result. A validator flags *unsanctioned* crossings — two roads
   intersecting in projection with neither a shared node nor an edge anchor —
   as authoring errors; it never tries to auto-resolve them.
-- **Building** — entity with `Transform` + a reference to an **assembly
-  graph asset** (a reusable recipe: one "землянка" recipe, ten placements).
-  Its footprint cuts a hole in the terrain region it sits in and the assembly
-  graph generates the structure. From the same graph we later extract
-  interior/exterior volumes, occluders, and gameplay metadata. Details get
-  their own design round (phase 3, §7).
+- **Building** — parcel *content*: a **child entity of a parcel** with its
+  own transform and its own footprint (`half_width × half_depth` local
+  rectangle); one parcel holds **any number** of buildings (a villa, or a
+  factory full of structures). The component carries flat box-massing
+  recipe parameters (floors, floor height, footprint extents, seed) — the
+  P4 stub of the eventual **assembly graph asset** (a reusable recipe: one
+  "землянка" recipe, ten placements); the fields are already the asset's
+  fields, promotion is mechanical once AssetRef inspector editing lands.
+  Connections to the road network belong to the *parcel* (its gates), not
+  to buildings. Terrain never reaches a building: the parcel owns its
+  interior, so the terrain seam is the parcel boundary — there is no
+  footprint cut-out. Interior/exterior volumes, occluders and gameplay
+  metadata still get their own design round (phase 3, §7).
 
 Graph edits go through the standard `EditAction`/`ActionQueue` path like any
 other entity/component edit — the plugin's editor tools produce actions, never
@@ -274,8 +335,9 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
 2. **Phase 2 — terrain + tools.** Region extraction between roads (planar
    graph faces), terrain fill + control points, intersection surfaces,
    viewport tools (§6.2), debug-draw (§6.4).
-3. **Phase 3 — buildings.** Assembly-graph asset, terrain cut-outs,
-   interior/exterior + occluder metadata. Gets its own design doc/round.
+3. **Phase 3 — buildings.** Assembly-graph asset, parcel-perimeter terrain
+   seams (cut/fill transitions), interior/exterior + occluder metadata.
+   Gets its own design doc/round.
 4. **Later** (explicitly deferred): tyroxine as the real generator, navmesh,
    LOD baking (LOD1 and below), incremental invalidation, streaming budgets.
 
@@ -292,6 +354,13 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
   cover everything described so far.
 - Chunk cell identity for terrain regions (roads/intersections have natural
   ids; regions appear/disappear as the graph changes).
+- **Parcel reference surface** — the interior surface over a closed,
+  possibly non-planar boundary polyline (§3: parcels are not flat in the
+  general case). Stub: fan/planar fill from the boundary; the real
+  interpolation (and interaction with internal roads' surfaces) is the
+  generator's concern. Also open: how perimeter heights parameterize the
+  terrain boundary condition, and how the cut/fill transition (scarp vs
+  retaining wall) is selected.
 - ~~Road attachment side~~ — **resolved** (2026-07-18): `RoadSegment` grew
   `b_from_front` — the road meets `b` on its +Z side instead of the default
   −Z. The connect tool sets it automatically when the clicked target is a

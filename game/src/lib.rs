@@ -718,8 +718,8 @@ pub fn spawn_levels_playground(world: &mut World) {
         .unwrap();
     let exit_north = node(world, 34.0, 30.0, 0.0);
     let exit_east = node(world, 54.0, 10.0, std::f32::consts::FRAC_PI_2);
-    road(world, cross[0], exit_north);
-    road(world, cross[1], exit_east);
+    let north_road = road(world, cross[0], exit_north);
+    let east_road = road(world, cross[1], exit_east);
 
     // A 3-way (Y) junction: the same model at N = 3, no exits.
     let y_center = Vec3::new(-16.0, 0.0, 22.0);
@@ -737,6 +737,226 @@ pub fn spawn_levels_playground(world: &mut World) {
             },
         )
         .unwrap();
+
+    // Parcels (architecture chapter): prefab-shaped containers bounded by
+    // a closed polyline, owning gates (connection sockets on the boundary)
+    // and content (buildings — any number). Terrain never enters a parcel;
+    // its perimeter is the terrain's boundary condition.
+    {
+        use redlilium_core::abstract_editor::EditAction;
+        use redlilium_core::math::quat_from_rotation_y;
+        use redlilium_ecs::Entity;
+        use redlilium_levels::{
+            Building, EdgeAnchor, Parcel, ParcelGate, ParcelVertex, PlaceBuildingAction,
+        };
+
+        let child = |world: &mut World, parent: Entity, local: Transform| -> Entity {
+            let e = world.spawn();
+            world.insert(e, local).unwrap();
+            let parent_m = world.get::<GlobalTransform>(parent).unwrap().0;
+            world
+                .insert(e, GlobalTransform(parent_m * local.to_matrix()))
+                .unwrap();
+            redlilium_ecs::set_parent(world, e, parent);
+            e
+        };
+        let parcel_at = |world: &mut World, t: Transform, verts: &[[f32; 3]]| -> Entity {
+            let parcel = world.spawn();
+            world.insert(parcel, t).unwrap();
+            world
+                .insert(parcel, GlobalTransform(t.to_matrix()))
+                .unwrap();
+            let boundary: Vec<Entity> = verts
+                .iter()
+                .map(|&[x, y, z]| {
+                    let v = child(
+                        world,
+                        parcel,
+                        Transform::new(
+                            Vec3::new(x, y, z),
+                            quat_from_rotation_y(0.0),
+                            Vec3::new(1.0, 1.0, 1.0),
+                        ),
+                    );
+                    world.insert(v, ParcelVertex::default()).unwrap();
+                    v
+                })
+                .collect();
+            world.insert(parcel, Parcel { boundary }).unwrap();
+            parcel
+        };
+        let gate_at = |world: &mut World, parcel: Entity, x: f32, z: f32, yaw: f32| -> Entity {
+            let gate = child(
+                world,
+                parcel,
+                Transform::new(
+                    Vec3::new(x, 0.0, z),
+                    quat_from_rotation_y(yaw),
+                    Vec3::new(1.0, 1.0, 1.0),
+                ),
+            );
+            world.insert(gate, RoadNode { half_width: 1.5 }).unwrap();
+            world.insert(gate, ParcelGate).unwrap();
+            gate
+        };
+        let building_at =
+            |world: &mut World, parcel: Entity, x: f32, z: f32, building: Building| {
+                let local = Transform::new(
+                    Vec3::new(x, 0.0, z),
+                    quat_from_rotation_y(0.0),
+                    Vec3::new(1.0, 1.0, 1.0),
+                );
+                PlaceBuildingAction::new(parcel, local, building)
+                    .apply(world)
+                    .unwrap();
+            };
+
+        // Parcel A, west of the first road: an irregular pentagon (one
+        // vertex raised — parcels are not flat), two buildings, and a gate
+        // on its east side; the gate's driveway lands on the road's left
+        // edge through an edge-anchored node.
+        let a = parcel_at(
+            world,
+            Transform::new(
+                Vec3::new(-14.0, 0.0, 2.0),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ),
+            &[
+                [-6.0, 0.0, 0.0],
+                [6.0, 0.0, 0.0],
+                [8.0, 0.0, -6.0],
+                [0.0, 1.0, -10.0],
+                [-7.0, 0.0, -5.0],
+            ],
+        );
+        // Curved boundary showcase: the NE corner rounds with mirrored
+        // (C1) handles; the SW vertex curves one-sidedly — a corner joint.
+        {
+            let boundary = world.get::<Parcel>(a).unwrap().boundary.clone();
+            world
+                .insert(
+                    boundary[2],
+                    ParcelVertex {
+                        handle_in: Vec3::new(-0.5, 0.0, 1.8),
+                        handle_out: Vec3::new(0.5, 0.0, -1.8),
+                    },
+                )
+                .unwrap();
+            world
+                .insert(
+                    boundary[4],
+                    ParcelVertex {
+                        handle_in: Vec3::new(2.0, 0.0, -2.0),
+                        handle_out: Vec3::zeros(),
+                    },
+                )
+                .unwrap();
+        }
+        building_at(world, a, -2.0, -4.5, Building::default());
+        building_at(
+            world,
+            a,
+            4.0,
+            -6.0,
+            Building {
+                floors: 1,
+                half_width: 2.0,
+                half_depth: 2.0,
+                ..Building::default()
+            },
+        );
+        let gate_a = gate_at(world, a, 7.0, -3.0, std::f32::consts::FRAC_PI_2);
+        let landing_a = node(world, 0.0, 0.0, 0.0);
+        world
+            .insert(
+                landing_a,
+                EdgeAnchor {
+                    parent_road: r1,
+                    right_edge: false,
+                    u_min: 0.55,
+                    u_max: 0.7,
+                },
+            )
+            .unwrap();
+        let drive_a = world.spawn();
+        world
+            .insert(
+                drive_a,
+                RoadSegment {
+                    a: gate_a,
+                    b: landing_a,
+                    b_from_front: true,
+                    ..RoadSegment::default()
+                },
+            )
+            .unwrap();
+
+        // Parcel B, south of the cross's east road: a plain rectangle with
+        // one building and a front gate driving into the road.
+        let b = parcel_at(
+            world,
+            Transform::new(
+                Vec3::new(48.0, 0.0, 0.0),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ),
+            &[
+                [-5.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [5.0, 0.0, -9.0],
+                [-5.0, 0.0, -9.0],
+            ],
+        );
+        building_at(
+            world,
+            b,
+            0.0,
+            -5.0,
+            Building {
+                floors: 3,
+                ..Building::default()
+            },
+        );
+        // Parcel C: glued to the east side of the cross's north road — the
+        // inverted derivation showcase: the parcel's 8 m frontage dictates
+        // the edge interval, only the center (u = 0.5) is authored; slide
+        // it along the road with the gizmo.
+        redlilium_levels::AddParcelAction::on_edge(EdgeAnchor {
+            parent_road: north_road,
+            right_edge: true,
+            u_min: 0.5,
+            u_max: 0.5,
+        })
+        .apply(world)
+        .unwrap();
+
+        let gate_b = gate_at(world, b, 0.0, 0.0, 0.0);
+        let landing_b = node(world, 0.0, 0.0, 0.0);
+        world
+            .insert(
+                landing_b,
+                EdgeAnchor {
+                    parent_road: east_road,
+                    right_edge: true,
+                    u_min: 0.4,
+                    u_max: 0.6,
+                },
+            )
+            .unwrap();
+        let drive_b = world.spawn();
+        world
+            .insert(
+                drive_b,
+                RoadSegment {
+                    a: gate_b,
+                    b: landing_b,
+                    b_from_front: true,
+                    ..RoadSegment::default()
+                },
+            )
+            .unwrap();
+    }
 
     // Bake the edge-anchored nodes' derived transforms so the scene ships
     // settled — the editor's derive system then has nothing to rewrite.

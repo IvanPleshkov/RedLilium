@@ -28,8 +28,8 @@ use crate::graph::road_patch;
 use crate::{RoadNode, RoadSegment, bezier};
 
 /// Glues the carrying [`RoadNode`] to a side edge of a road. The node's
-/// `Transform` and `half_width` are derived from the parent edge every frame
-/// by [`DeriveEdgeAnchors`] — author the interval, not the placement.
+/// `Transform` and `half_width` are derived from the parent edge every
+/// frame by [`DeriveEdgeAnchors`] — author the interval, not the placement.
 #[derive(Debug, Clone, Component)]
 pub struct EdgeAnchor {
     /// The road entity (carries [`RoadSegment`]) whose edge this node sits
@@ -135,6 +135,53 @@ fn project_onto_edge(
     (c - half, c + half)
 }
 
+/// Derive an anchored **parcel**'s placement — the inverted derivation:
+/// the rigid parcel dictates its frontage length, and the edge interval's
+/// *width* derives from it (mapped through the local edge-length density);
+/// only the interval's center is authored (it slides). The transform faces
+/// the opposite way from an anchored node: **+Z points into the parent
+/// road** the parcel fronts, the interior extends outward behind.
+/// Returns `(transform, derived interval)`.
+pub(crate) fn derive_parcel_anchor(
+    world: &World,
+    entity: Entity,
+    anchor: &EdgeAnchor,
+) -> Option<(Transform, (f32, f32))> {
+    let parcel = world.get::<crate::parcel::Parcel>(entity)?;
+    let frontage = crate::parcel::parcel_frontage(world, parcel)?;
+    let patch = road_patch(world, anchor.parent_road)?;
+    let v_edge = if anchor.right_edge { 1.0 } else { 0.0 };
+
+    let center = ((anchor.u_min + anchor.u_max) * 0.5).clamp(0.0, 1.0);
+    // Frontage length → u half-width via |dP/du| at the center.
+    let h = 1e-3;
+    let u = center.clamp(h, 1.0 - h);
+    let speed = (bezier::eval(&patch, u + h, v_edge) - bezier::eval(&patch, u - h, v_edge)).norm()
+        / (2.0 * h);
+    let half_u = if speed > 1e-4 {
+        ((frontage * 0.5) / speed).min(0.45)
+    } else {
+        return None;
+    };
+    let center = center.clamp(half_u, 1.0 - half_u);
+    let interval = (center - half_u, center + half_u);
+
+    let scaffold = EdgeAnchor {
+        u_min: interval.0,
+        u_max: interval.1,
+        ..anchor.clone()
+    };
+    let (node_t, _) = derive_anchor_state(world, &scaffold)?;
+    // Flip 180°: a node's +Z points away from the road (its network is the
+    // driveway growing outward); the parcel's frontage FACES the road.
+    let transform = Transform::new(
+        node_t.translation,
+        node_t.rotation * quat_from_rotation_y(std::f32::consts::PI),
+        node_t.scale,
+    );
+    Some((transform, interval))
+}
+
 /// One planned write: derived placement, plus the shifted interval when the
 /// node is *sliding* (its transform was authored away from the derived one).
 type AnchorUpdate = (Entity, Transform, f32, Option<(f32, f32)>);
@@ -145,7 +192,7 @@ type AnchorUpdate = (Entity, Transform, f32, Option<(f32, f32)>);
 /// edge and shift the interval (sliding). A node equal to the cache whose
 /// derived state moved away follows the edge (parametric follow). Settled
 /// nodes are recorded into the cache. Empty result means settled.
-fn anchor_updates(
+pub(crate) fn anchor_updates(
     world: &World,
     cache: &mut std::collections::HashMap<Entity, Transform>,
     slide: bool,
@@ -158,19 +205,34 @@ fn anchor_updates(
         let Some(entity) = world.entity_at_index(index) else {
             continue;
         };
-        let Some((derived_t, derived_hw)) = derive_anchor_state(world, anchor) else {
+        // Two carrier kinds: a parcel derives its transform AND the edge
+        // interval (inverted derivation — see `derive_parcel_anchor`); a
+        // node/bare entity derives its transform (+ half_width when a
+        // RoadNode is present) from the authored interval.
+        let is_parcel = world.get::<crate::parcel::Parcel>(entity).is_some();
+        let derived = if is_parcel {
+            derive_parcel_anchor(world, entity, anchor)
+                .map(|(t, interval)| (t, 0.0, Some(interval)))
+        } else {
+            derive_anchor_state(world, anchor).map(|(t, hw)| (t, hw, None))
+        };
+        let Some((derived_t, derived_hw, derived_interval)) = derived else {
             continue;
         };
-        let (current_t, current_n) = (
-            world.get::<Transform>(entity),
-            world.get::<RoadNode>(entity),
-        );
-        let (Some(t), Some(n)) = (current_t, current_n) else {
-            updates.push((entity, derived_t, derived_hw, None));
+        let Some(t) = world.get::<Transform>(entity) else {
+            updates.push((entity, derived_t, derived_hw, derived_interval));
             continue;
         };
+        // Width receiver: the road node's half_width when present; a bare
+        // anchored entity derives only its transform (never a reason to
+        // stay unsettled).
+        let current_w = world.get::<RoadNode>(entity).map(|n| n.half_width);
+        let interval_ok = derived_interval.is_none_or(|(lo, hi)| {
+            (anchor.u_min - lo).abs() <= 1e-4 && (anchor.u_max - hi).abs() <= 1e-4
+        });
         let settled = (t.to_matrix() - derived_t.to_matrix()).norm() <= 1e-4
-            && (n.half_width - derived_hw).abs() <= 1e-4;
+            && current_w.is_none_or(|w| (w - derived_hw).abs() <= 1e-4)
+            && interval_ok;
         if settled {
             cache.insert(entity, *t);
             continue;
@@ -181,14 +243,18 @@ fn anchor_updates(
                 .is_some_and(|prev| (prev.to_matrix() - t.to_matrix()).norm() > 1e-4);
         if moved {
             // Sliding: keep the interval width, move its center to the
-            // closest edge point to where the author dragged the node.
+            // closest edge point to where the author dragged the entity.
             let slid = (|| {
                 let patch = road_patch(world, anchor.parent_road)?;
                 let v_edge = if anchor.right_edge { 1.0 } else { 0.0 };
-                let (u_min, u_max) = (
-                    anchor.u_min.min(anchor.u_max),
-                    anchor.u_min.max(anchor.u_max),
-                );
+                let (u_min, u_max) = if let Some((lo, hi)) = derived_interval {
+                    (lo, hi)
+                } else {
+                    (
+                        anchor.u_min.min(anchor.u_max),
+                        anchor.u_min.max(anchor.u_max),
+                    )
+                };
                 let (new_min, new_max) =
                     project_onto_edge(&patch, v_edge, u_max - u_min, t.translation);
                 if (new_min - u_min).abs() < 1e-5 && (new_max - u_max).abs() < 1e-5 {
@@ -199,15 +265,20 @@ fn anchor_updates(
                     u_max: new_max,
                     ..anchor.clone()
                 };
-                let (slid_t, slid_hw) = derive_anchor_state(world, &slid)?;
-                Some((entity, slid_t, slid_hw, Some((new_min, new_max))))
+                if is_parcel {
+                    let (slid_t, interval) = derive_parcel_anchor(world, entity, &slid)?;
+                    Some((entity, slid_t, 0.0, Some(interval)))
+                } else {
+                    let (slid_t, slid_hw) = derive_anchor_state(world, &slid)?;
+                    Some((entity, slid_t, slid_hw, Some((new_min, new_max))))
+                }
             })();
             if let Some(update) = slid {
                 updates.push(update);
                 continue;
             }
         }
-        updates.push((entity, derived_t, derived_hw, None));
+        updates.push((entity, derived_t, derived_hw, derived_interval));
     }
     updates
 }
