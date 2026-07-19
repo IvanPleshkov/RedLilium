@@ -254,6 +254,22 @@ pub fn quat_rotate_vec3(q: Quat, v: Vec3) -> Vec3 {
     nalgebra::UnitQuaternion::new_normalize(q) * v
 }
 
+/// Rotation whose forward axis (**-Z**, the engine's transform convention)
+/// points along `dir`, with roll fixed by the world up (+Y). Degenerate for
+/// near-vertical directions, where +Z is used as the roll reference instead.
+///
+/// The canonical way to aim a directional light or camera at a direction.
+pub fn quat_looking_along(dir: Vec3) -> Quat {
+    let dir = dir.normalize();
+    let up = if dir.y.abs() > 0.999 {
+        Vec3::z()
+    } else {
+        Vec3::y()
+    };
+    // face_towards points the local +Z at its target; forward is -Z.
+    nalgebra::UnitQuaternion::face_towards(&-dir, &up).into_inner()
+}
+
 /// Convert a 4x4 matrix to a column-major `[[f32; 4]; 4]` array.
 pub fn mat4_to_cols_array_2d(m: &Mat4) -> [[f32; 4]; 4] {
     let s = m.as_slice();
@@ -472,6 +488,24 @@ mod tests {
         let proj = orthographic_rh_reversed(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
         assert!((projected_depth(&proj, 0.1) - 1.0).abs() < 1e-5);
         assert!(projected_depth(&proj, 100.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn looking_along_points_forward_at_dir() {
+        for dir in [
+            Vec3::new(0.75, 0.40, 0.75),
+            Vec3::new(-0.5, -0.3, -1.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0), // near-vertical fallback branch
+        ] {
+            let q = quat_looking_along(dir);
+            assert!((q.norm() - 1.0).abs() < 1e-6, "unit quaternion for {dir}");
+            let forward = quat_rotate_vec3(q, Vec3::new(0.0, 0.0, -1.0));
+            assert!(
+                (forward - dir.normalize()).norm() < 1e-5,
+                "forward {forward} should match {dir}"
+            );
+        }
     }
 
     #[test]

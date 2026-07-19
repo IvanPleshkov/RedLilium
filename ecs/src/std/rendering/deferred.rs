@@ -23,14 +23,14 @@
 //!
 //! The IBL set (irradiance/prefilter cubemaps, BRDF LUT, sky cubemap) is the
 //! baked KTX2 pack from `std-assets/textures/ibl/`, embedded here as a
-//! stopgap until IBL environments are first-class assets (#145). Light
-//! directions are constants until lights come from ECS components (#146);
-//! shadows arrive with #130.
+//! stopgap until IBL environments are first-class assets (#145). Direct
+//! lights come from the ECS light components (#146) — see [`gather_lights`];
+//! spot lights are not consumed yet. Shadows arrive with #130.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use redlilium_core::math::Mat4;
+use redlilium_core::math::{Mat4, Vec3};
 use redlilium_core::profiling::profile_scope;
 use redlilium_core::texture::ktx2::parse_ktx2;
 use redlilium_graphics::{
@@ -79,16 +79,129 @@ const GBUFFER_FORMATS: [TextureFormat; 3] = [
     TextureFormat::Rgba16Float,
 ];
 
-/// Direction toward the key light — a constant until #146 sources lights
-/// from ECS components (value matches the pbr_ibl demo's sun).
-const SUN_DIR_TO_LIGHT: [f32; 3] = [0.75, 0.40, 0.75];
+/// Uniform-array capacities of the resolve pass — must match the
+/// `MAX_*_LIGHTS` constants in `deferred_resolve.slang`. Lights beyond the
+/// capacity are dropped for the frame (warned once).
+const MAX_DIRECTIONAL_LIGHTS: usize = 4;
+const MAX_POINT_LIGHTS: usize = 16;
+
+/// One directional light as the resolve shader consumes it.
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuDirectionalLight {
+    /// xyz = normalized direction toward the light.
+    dir_to_light: [f32; 4],
+    /// rgb = linear color premultiplied by intensity.
+    color: [f32; 4],
+}
+
+/// One point light as the resolve shader consumes it.
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuPointLight {
+    /// xyz = world position, w = range (0 = unbounded).
+    position_range: [f32; 4],
+    /// rgb = linear color premultiplied by intensity.
+    color: [f32; 4],
+}
 
 /// Uniforms of the resolve pass (must match `deferred_resolve.slang`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ResolveUniforms {
     camera_pos: [f32; 4],
-    light_dir: [f32; 4],
+    /// x = directional count, y = point count.
+    light_counts: [u32; 4],
+    dir_lights: [GpuDirectionalLight; MAX_DIRECTIONAL_LIGHTS],
+    point_lights: [GpuPointLight; MAX_POINT_LIGHTS],
+}
+
+/// Snapshot the world's visible light components into the resolve uniforms
+/// (#146). Direction/position come from [`GlobalTransform`] (forward = the
+/// direction the light travels); [`Visibility`] off drops the light.
+fn gather_lights(world: &World) -> ResolveUniforms {
+    use crate::std::components::{DirectionalLight, GlobalTransform, PointLight, Visibility};
+    let mut uniforms = ResolveUniforms {
+        camera_pos: [0.0; 4],
+        light_counts: [0; 4],
+        dir_lights: [GpuDirectionalLight::default(); MAX_DIRECTIONAL_LIGHTS],
+        point_lights: [GpuPointLight::default(); MAX_POINT_LIGHTS],
+    };
+    let (Ok(globals), Ok(visibilities)) =
+        (world.read::<GlobalTransform>(), world.read::<Visibility>())
+    else {
+        return uniforms;
+    };
+    let visible = |idx| {
+        visibilities
+            .get(idx)
+            .is_none_or(|v: &Visibility| v.is_visible())
+    };
+
+    let mut dropped = 0usize;
+    if let Ok(lights) = world.read::<DirectionalLight>() {
+        for (idx, light) in lights.iter() {
+            if !visible(idx) {
+                continue;
+            }
+            let count = uniforms.light_counts[0] as usize;
+            if count == MAX_DIRECTIONAL_LIGHTS {
+                dropped += 1;
+                continue;
+            }
+            let forward = globals
+                .get(idx)
+                .map(|g| g.forward())
+                .unwrap_or_else(|| GlobalTransform::IDENTITY.forward());
+            let to_light = -forward;
+            uniforms.dir_lights[count] = GpuDirectionalLight {
+                dir_to_light: [to_light.x, to_light.y, to_light.z, 0.0],
+                color: [
+                    light.color.x * light.intensity,
+                    light.color.y * light.intensity,
+                    light.color.z * light.intensity,
+                    0.0,
+                ],
+            };
+            uniforms.light_counts[0] += 1;
+        }
+    }
+    if let Ok(lights) = world.read::<PointLight>() {
+        for (idx, light) in lights.iter() {
+            if !visible(idx) {
+                continue;
+            }
+            let count = uniforms.light_counts[1] as usize;
+            if count == MAX_POINT_LIGHTS {
+                dropped += 1;
+                continue;
+            }
+            let position = globals
+                .get(idx)
+                .map(|g| g.translation())
+                .unwrap_or_else(Vec3::zeros);
+            uniforms.point_lights[count] = GpuPointLight {
+                position_range: [position.x, position.y, position.z, light.range],
+                color: [
+                    light.color.x * light.intensity,
+                    light.color.y * light.intensity,
+                    light.color.z * light.intensity,
+                    0.0,
+                ],
+            };
+            uniforms.light_counts[1] += 1;
+        }
+    }
+    if dropped > 0 {
+        static OVERFLOW_WARNED: std::sync::Once = std::sync::Once::new();
+        OVERFLOW_WARNED.call_once(|| {
+            log::warn!(
+                "deferred: {dropped} light(s) beyond the uniform capacity \
+                 ({MAX_DIRECTIONAL_LIGHTS} directional / {MAX_POINT_LIGHTS} point) are dropped"
+            );
+        });
+    }
+    uniforms
 }
 
 /// Uniforms of the skybox pass (must match `skybox.slang`). The WGSL uniform
@@ -541,6 +654,10 @@ impl CameraRenderPipeline for DeferredPipeline {
             .map(|m| [m[(0, 3)], m[(1, 3)], m[(2, 3)]])
             .unwrap_or([0.0; 3]);
 
+        // This frame's direct lights, from the ECS light components (#146).
+        let mut resolve_uniforms = gather_lights(world);
+        resolve_uniforms.camera_pos = [camera_pos[0], camera_pos[1], camera_pos[2], 1.0];
+
         // Push this view's uniform slots into the frame ring.
         let (camera_offset, skybox_offset, resolve_offset, ring_buffer) = {
             let mut ring = world.resource_mut::<FrameRing>();
@@ -554,15 +671,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 _pad: [0.0; 3],
                 _pad1: [0.0; 4],
             }));
-            let resolve_offset = ring.push(bytemuck::bytes_of(&ResolveUniforms {
-                camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
-                light_dir: [
-                    SUN_DIR_TO_LIGHT[0],
-                    SUN_DIR_TO_LIGHT[1],
-                    SUN_DIR_TO_LIGHT[2],
-                    0.0,
-                ],
-            }));
+            let resolve_offset = ring.push(bytemuck::bytes_of(&resolve_uniforms));
             (
                 camera_offset,
                 skybox_offset,

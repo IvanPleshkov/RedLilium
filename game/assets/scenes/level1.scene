@@ -6,12 +6,60 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "DirectionalLight",
+                    schema_version: 1,
+                    data: Map([
+                        ("color", List([
+                            F32(1.0),
+                            F32(0.98),
+                            F32(0.95),
+                        ])),
+                        ("intensity", F32(1.6)),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Sun")),
+                    ]),
+                ),
+                (
                     type_name: "Visibility",
                     schema_version: 1,
                     data: Map([
                         ("0", Bool(true)),
                     ]),
                 ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.0),
+                            F32(10.0),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(-0.1656886),
+                            F32(0.37647903),
+                            F32(0.068630464),
+                            F32(0.9089008),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 1,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "RigidBody3D",
                     schema_version: 1,
@@ -20,25 +68,6 @@
                         ("linear_damping", F32(0.0)),
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
-                (
-                    type_name: "Collider3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("shape", Map([
-                            ("Cuboid", Map([
-                                ("half_extents", List([
-                                    F32(20.0),
-                                    F32(0.1),
-                                    F32(20.0),
-                                ])),
-                            ])),
-                        ])),
-                        ("friction", F32(0.0)),
-                        ("restitution", F32(0.0)),
-                        ("density", F32(1.0)),
-                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -60,6 +89,13 @@
                             ]),
                         ])),
                         ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -84,20 +120,32 @@
                         ])),
                     ]),
                 ),
+                (
+                    type_name: "Collider3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(20.0),
+                                    F32(0.1),
+                                    F32(20.0),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.0)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
+                    ]),
+                ),
             ],
         ),
         (
-            entity_index: 1,
+            entity_index: 2,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
                 (
                     type_name: "RigidBody3D",
                     schema_version: 1,
@@ -106,25 +154,6 @@
                         ("linear_damping", F32(0.0)),
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
-                (
-                    type_name: "Collider3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("shape", Map([
-                            ("Cuboid", Map([
-                                ("half_extents", List([
-                                    F32(0.5),
-                                    F32(0.5),
-                                    F32(0.5),
-                                ])),
-                            ])),
-                        ])),
-                        ("friction", F32(0.5)),
-                        ("restitution", F32(0.0)),
-                        ("density", F32(1.0)),
-                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -146,6 +175,13 @@
                             ]),
                         ])),
                         ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -170,30 +206,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 2,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
-                    type_name: "RigidBody3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("body_type", String("Fixed")),
-                        ("linear_damping", F32(0.0)),
-                        ("angular_damping", F32(0.0)),
-                        ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
                 (
                     type_name: "Collider3D",
                     schema_version: 1,
@@ -211,6 +223,23 @@
                         ("restitution", F32(0.0)),
                         ("density", F32(1.0)),
                         ("is_sensor", Bool(false)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 3,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
                     ]),
                 ),
                 (
@@ -232,6 +261,13 @@
                             ]),
                         ])),
                         ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -256,30 +292,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 3,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
-                    type_name: "RigidBody3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("body_type", String("Fixed")),
-                        ("linear_damping", F32(0.0)),
-                        ("angular_damping", F32(0.0)),
-                        ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
                 (
                     type_name: "Collider3D",
                     schema_version: 1,
@@ -297,6 +309,23 @@
                         ("restitution", F32(0.0)),
                         ("density", F32(1.0)),
                         ("is_sensor", Bool(false)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 4,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
                     ]),
                 ),
                 (
@@ -318,6 +347,13 @@
                             ]),
                         ])),
                         ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -342,30 +378,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 4,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
-                    type_name: "RigidBody3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("body_type", String("Fixed")),
-                        ("linear_damping", F32(0.0)),
-                        ("angular_damping", F32(0.0)),
-                        ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
                 (
                     type_name: "Collider3D",
                     schema_version: 1,
@@ -383,6 +395,23 @@
                         ("restitution", F32(0.0)),
                         ("density", F32(1.0)),
                         ("is_sensor", Bool(false)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 5,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
                     ]),
                 ),
                 (
@@ -404,6 +433,13 @@
                             ]),
                         ])),
                         ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -428,30 +464,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 5,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
-                    type_name: "RigidBody3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("body_type", String("Fixed")),
-                        ("linear_damping", F32(0.0)),
-                        ("angular_damping", F32(0.0)),
-                        ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
                 (
                     type_name: "Collider3D",
                     schema_version: 1,
@@ -469,6 +481,23 @@
                         ("restitution", F32(0.0)),
                         ("density", F32(1.0)),
                         ("is_sensor", Bool(false)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 6,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
                     ]),
                 ),
                 (
@@ -490,6 +519,13 @@
                             ]),
                         ])),
                         ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -514,30 +550,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 6,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
-                    type_name: "RigidBody3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("body_type", String("Fixed")),
-                        ("linear_damping", F32(0.0)),
-                        ("angular_damping", F32(0.0)),
-                        ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
                 (
                     type_name: "Collider3D",
                     schema_version: 1,
@@ -555,6 +567,23 @@
                         ("restitution", F32(0.0)),
                         ("density", F32(1.0)),
                         ("is_sensor", Bool(false)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 7,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
                     ]),
                 ),
                 (
@@ -576,6 +605,13 @@
                             ]),
                         ])),
                         ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -600,30 +636,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 7,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
-                    type_name: "RigidBody3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("body_type", String("Fixed")),
-                        ("linear_damping", F32(0.0)),
-                        ("angular_damping", F32(0.0)),
-                        ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
                 (
                     type_name: "Collider3D",
                     schema_version: 1,
@@ -641,6 +653,23 @@
                         ("restitution", F32(0.0)),
                         ("density", F32(1.0)),
                         ("is_sensor", Bool(false)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 8,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
                     ]),
                 ),
                 (
@@ -662,6 +691,13 @@
                             ]),
                         ])),
                         ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -686,30 +722,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 8,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
-                    type_name: "RigidBody3D",
-                    schema_version: 1,
-                    data: Map([
-                        ("body_type", String("Fixed")),
-                        ("linear_damping", F32(0.0)),
-                        ("angular_damping", F32(0.0)),
-                        ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
                 (
                     type_name: "Collider3D",
                     schema_version: 1,
@@ -727,6 +739,23 @@
                         ("restitution", F32(0.0)),
                         ("density", F32(1.0)),
                         ("is_sensor", Bool(false)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 9,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
                     ]),
                 ),
                 (
@@ -751,6 +780,13 @@
                     ]),
                 ),
                 (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -772,10 +808,29 @@
                         ])),
                     ]),
                 ),
+                (
+                    type_name: "Collider3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
+                    ]),
+                ),
             ],
         ),
         (
-            entity_index: 9,
+            entity_index: 10,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
@@ -812,30 +867,30 @@
     resources: [],
     metadata: (
         engine_fingerprint: "",
-        timestamp: 1784421245,
+        timestamp: 1784462088,
         component_schemas: {
-            "RenderPath": "a423c0d36d1e6289",
+            "DirectionalLight": "12b906e5389ce958",
+            "Name": "e8b72b8ee639d17d",
+            "RigidBody3D": "4c303fe7f34110a5",
             "Children": "2bb9642f7f8700bb",
             "FollowCamera": "21d1db18d14cff54",
             "EditorOnly": "c680d604bee70f02",
             "SpotLight": "00945c87ce2de8db",
-            "Junction": "e7bd6fa35d204f69",
-            "CameraOutput": "ac6c44bbf8aba2c0",
-            "Camera": "ad5fbce407082262",
-            "RoadSegment": "0b419cbd0c745715",
-            "PointLight": "c2de590ad3761220",
-            "FreeFlyCamera": "5f11e33f3f164d87",
-            "Parent": "a91799e57333f547",
-            "Visibility": "c1bac1b299fc1b84",
             "CarSpawn": "c680d604bee70f02",
-            "RigidBody3D": "4c303fe7f34110a5",
-            "Transform": "8438ab3d4ed5ea92",
+            "RenderPath": "a423c0d36d1e6289",
+            "CameraOutput": "ac6c44bbf8aba2c0",
             "Collider3D": "a39247f1249750e7",
-            "DirectionalLight": "12b906e5389ce958",
-            "Name": "e8b72b8ee639d17d",
-            "EdgeAnchor": "8bd5bd105a1910c6",
-            "CarController": "fc41e6ec35f9fc4f",
+            "Parent": "a91799e57333f547",
+            "PointLight": "c2de590ad3761220",
+            "Visibility": "c1bac1b299fc1b84",
+            "RoadSegment": "0b419cbd0c745715",
             "RoadNode": "baff4354f0b378f3",
+            "CarController": "fc41e6ec35f9fc4f",
+            "Transform": "8438ab3d4ed5ea92",
+            "Junction": "e7bd6fa35d204f69",
+            "Camera": "ad5fbce407082262",
+            "EdgeAnchor": "8bd5bd105a1910c6",
+            "FreeFlyCamera": "5f11e33f3f164d87",
         },
     ),
 )

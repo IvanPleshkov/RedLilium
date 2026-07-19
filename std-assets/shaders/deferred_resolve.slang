@@ -3,8 +3,10 @@
 // fullscreen triangle over the skybox background (background pixels are
 // discarded via the G-buffer's albedo-alpha geometry marker).
 //
-// The key/fill light constants are a stopgap until lights come from ECS
-// components (#146). Shadows arrive with #130.
+// Direct lights arrive per frame in the uniforms, gathered from the ECS
+// light components (#146) — fixed-capacity arrays, counts in
+// `light_counts`. Without lights the image is IBL-only. Shadows arrive
+// with #130; spot lights are not consumed yet.
 //
 // Output-transform axes, selected by the pipeline from the camera target's
 // format (same scheme as the egui shader):
@@ -55,10 +57,27 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 // Fragment Shader
 // =============================================================================
 
+// Fixed uniform-array capacities; the CPU side truncates beyond these
+// (MAX_*_LIGHTS in ecs/src/std/rendering/deferred.rs must match).
+static const uint MAX_DIRECTIONAL_LIGHTS = 4;
+static const uint MAX_POINT_LIGHTS = 16;
+
+struct DirectionalLightData {
+    float4 dir_to_light; // xyz = normalized direction toward the light
+    float4 color;        // rgb = linear color premultiplied by intensity
+};
+
+struct PointLightData {
+    float4 position_range; // xyz = world position, w = range (0 = unbounded)
+    float4 color;          // rgb = linear color premultiplied by intensity
+};
+
 [[vk::binding(0, 0)]]
 cbuffer ResolveUniforms {
     float4 camera_pos;
-    float4 light_dir;   // xyz = normalized direction toward the key light
+    uint4 light_counts;  // x = directional count, y = point count
+    DirectionalLightData dir_lights[MAX_DIRECTIONAL_LIGHTS];
+    PointLightData point_lights[MAX_POINT_LIGHTS];
 };
 
 // G-buffer textures
@@ -114,19 +133,34 @@ float4 fs_main(VsOutput input) : SV_Target {
     float n_dot_v = max(dot(normal, v), 0.0);
     float3 f0 = calculate_f0(albedo, metallic);
 
-    // === Direct lighting ===
-    // Key light (sun-like); toned down so the image-based lighting stays the
-    // dominant look.
-    float3 sun_dir = normalize(light_dir.xyz);
-    float3 light_color = float3(1.0, 0.98, 0.95) * 1.6;
-    float3 lo = pbr_direct_lighting(normal, v, sun_dir, albedo, metallic, roughness, light_color);
-
-    // Fill light (simple diffuse-only)
-    float3 fill_light_dir = normalize(float3(-0.5, -0.3, -1.0));
-    float3 fill_light_color = float3(0.3, 0.4, 0.5) * 0.5;
-    float fill_n_dot_l = max(dot(normal, fill_light_dir), 0.0);
-    float kd_fill = (1.0 - metallic);
-    lo = lo + kd_fill * albedo * INV_PI * fill_light_color * fill_n_dot_l;
+    // === Direct lighting (ECS light components, #146) ===
+    float3 lo = float3(0.0);
+    for (uint i = 0; i < light_counts.x; i++) {
+        lo += pbr_direct_lighting(
+            normal, v, dir_lights[i].dir_to_light.xyz,
+            albedo, metallic, roughness, dir_lights[i].color.rgb);
+    }
+    for (uint i = 0; i < light_counts.y; i++) {
+        float3 to_light = point_lights[i].position_range.xyz - world_position;
+        float dist_sq = max(dot(to_light, to_light), 1e-6);
+        float dist = sqrt(dist_sq);
+        float3 l = to_light / dist;
+        // Inverse-square falloff (intensity = radiance at unit distance),
+        // smoothly windowed to zero at `range` (UE-style (1-(d/r)^4)^2) so a
+        // bounded light has no hard cutoff edge.
+        float attenuation = 1.0 / dist_sq;
+        float range = point_lights[i].position_range.w;
+        if (range > 0.0) {
+            float q = dist / range;
+            q *= q;
+            q *= q;
+            float window = saturate(1.0 - q);
+            attenuation *= window * window;
+        }
+        lo += pbr_direct_lighting(
+            normal, v, l, albedo, metallic, roughness,
+            point_lights[i].color.rgb * attenuation);
+    }
 
     // === IBL ambient lighting ===
     float3 f_ibl = fresnel_schlick_roughness(n_dot_v, f0, roughness);

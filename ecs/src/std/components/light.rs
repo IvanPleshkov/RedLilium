@@ -2,15 +2,18 @@ use redlilium_core::math::Vec3;
 
 /// A directional light (e.g., sunlight).
 ///
-/// Direction comes from the entity's [`GlobalTransform`](crate::GlobalTransform)
-/// forward vector.
+/// The light travels along the entity's
+/// [`GlobalTransform`](crate::GlobalTransform) forward vector (aim it with
+/// [`quat_looking_along`](redlilium_core::math::quat_looking_along)).
+/// Consumed by the standard deferred renderer (#146).
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
 #[require(crate::Transform, crate::GlobalTransform, crate::Visibility)]
 #[repr(C)]
 pub struct DirectionalLight {
     /// Light color (linear RGB).
     pub color: Vec3,
-    /// Light intensity in lux.
+    /// Linear intensity multiplier on `color` (the incident radiance).
+    /// Physical units (lux) arrive with the exposure policy (#142).
     pub intensity: f32,
 }
 
@@ -33,14 +36,17 @@ impl Default for DirectionalLight {
 /// A point light that emits in all directions from a position.
 ///
 /// Position comes from the entity's [`GlobalTransform`](crate::GlobalTransform)
-/// translation.
+/// translation. Consumed by the standard deferred renderer (#146) with
+/// inverse-square falloff, windowed to zero at `range`.
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
 #[require(crate::Transform, crate::GlobalTransform, crate::Visibility)]
 #[repr(C)]
 pub struct PointLight {
     /// Light color (linear RGB).
     pub color: Vec3,
-    /// Light intensity in candela.
+    /// Linear intensity multiplier on `color` — the radiance received at
+    /// unit distance. Physical units (candela) arrive with the exposure
+    /// policy (#142).
     pub intensity: f32,
     /// Maximum range. Beyond this, attenuation is zero.
     /// Zero means infinite range.
@@ -78,7 +84,8 @@ impl Default for PointLight {
 /// A spot light that emits in a cone from a position.
 ///
 /// Position and direction come from the entity's
-/// [`GlobalTransform`](crate::GlobalTransform).
+/// [`GlobalTransform`](crate::GlobalTransform). Not consumed by the standard
+/// renderer yet (#146 ships directional + point; spot support is a follow-up).
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
 #[require(crate::Transform, crate::GlobalTransform, crate::Visibility)]
 #[repr(C)]

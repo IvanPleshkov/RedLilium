@@ -26,12 +26,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use redlilium_core::color::{f16_to_f32, srgb_encode, tonemap_pbr_neutral};
-use redlilium_core::math::Vec3;
+use redlilium_core::math::{Vec3, quat_looking_along};
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
-    CameraOutput, EcsRunner, GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer,
-    MeshSource, OutputFormat, Primitive, Render, RenderSchedule, SizePolicy, TextureManager,
-    Transform, Visibility,
+    CameraOutput, DirectionalLight, EcsRunner, GlobalTransform, MaterialInstanceSource,
+    MeshGenerator, MeshRenderer, MeshSource, OutputFormat, PointLight, Primitive, Render,
+    RenderSchedule, SizePolicy, TextureManager, Transform, Visibility,
 };
 use redlilium_graphics::{
     BufferDescriptor, BufferUsage, FramePipeline, GraphicsInstance, TextureFormat, TransferConfig,
@@ -202,6 +202,36 @@ fn spawn_golden_scene(world: &mut redlilium_ecs::World) {
         checker,
         Transform::from_translation(Vec3::new(-1.6, 0.6, 0.8)),
     );
+
+    // Key sun (#146: lights are ECS components) — same direction/energy as
+    // the retired built-in constant, so the lit look carries over.
+    let sun = world.spawn();
+    let sun_transform =
+        Transform::from_rotation(quat_looking_along(Vec3::new(-0.75, -0.40, -0.75)));
+    world.insert(sun, sun_transform).unwrap();
+    world
+        .insert(sun, GlobalTransform(sun_transform.to_matrix()))
+        .unwrap();
+    world.insert(sun, Visibility::VISIBLE).unwrap();
+    world
+        .insert(sun, DirectionalLight::new(Vec3::new(1.0, 0.98, 0.95), 1.6))
+        .unwrap();
+
+    // Warm point light between cube and checker sphere — exercises the
+    // inverse-square + range-window path.
+    let point = world.spawn();
+    let point_transform = Transform::from_translation(Vec3::new(-0.8, 1.6, 1.4));
+    world.insert(point, point_transform).unwrap();
+    world
+        .insert(point, GlobalTransform(point_transform.to_matrix()))
+        .unwrap();
+    world.insert(point, Visibility::VISIBLE).unwrap();
+    world
+        .insert(
+            point,
+            PointLight::new(Vec3::new(1.0, 0.55, 0.25), 3.0).with_range(8.0),
+        )
+        .unwrap();
 }
 
 fn set_output(

@@ -121,7 +121,7 @@
             guid: ("1dd84f4c-1a8a-5e66-906b-3ad8a7442f15"),
             path: "shaders/deferred_resolve.slang",
             kind: "shader",
-            source_hash: 1949808683369184815,
+            source_hash: 11315367160588148366,
             settings: None,
             references: {},
         ),

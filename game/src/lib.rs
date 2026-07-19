@@ -21,10 +21,10 @@ use redlilium_ecs::physics::components3d::{Collider3D, RigidBody3D};
 use redlilium_ecs::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
 use redlilium_ecs::physics::systems3d::{StepPhysics3D, SyncPhysicsBodies3D};
 use redlilium_ecs::{
-    Camera, Component, GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer,
-    MeshSource, PostUpdate, Primitive, Read, Res, ResMut, SceneManager, System, SystemContext,
-    SystemError, Time, Transform, Update, UpdateGlobalTransforms, Visibility, WindowInput, World,
-    WriteAll,
+    Camera, Component, DirectionalLight, GlobalTransform, MaterialInstanceSource, MeshGenerator,
+    MeshRenderer, MeshSource, Name, PostUpdate, Primitive, Read, Res, ResMut, SceneManager, System,
+    SystemContext, SystemError, Time, Transform, Update, UpdateGlobalTransforms, Visibility,
+    WindowInput, World, WriteAll,
 };
 use redlilium_runtime::{App, GameUi, Plugin};
 // The Quit button is native-only (a browser tab has no "exit").
@@ -414,6 +414,7 @@ impl Plugin for CarGamePlugin {
 /// spawned at load time by [`SpawnCarAtMarkers`], so an editor-authored level
 /// only needs cubes, colliders, and one marker.
 pub fn spawn_level_scene(world: &mut World) {
+    spawn_sun(world);
     spawn_level_geometry(world);
     let marker = world.spawn();
     world
@@ -423,6 +424,27 @@ pub fn spawn_level_scene(world: &mut World) {
         )
         .unwrap();
     world.insert(marker, CarSpawn).unwrap();
+}
+
+/// The scenes' key light (#146: lights are ECS components; the deferred path
+/// no longer has a built-in sun). Direction and energy match the retired
+/// constant, so the lit look carries over.
+pub fn spawn_sun(world: &mut World) {
+    let sun = world.spawn();
+    let transform = Transform::new(
+        Vec3::new(0.0, 10.0, 0.0),
+        redlilium_core::math::quat_looking_along(Vec3::new(-0.75, -0.40, -0.75)),
+        Vec3::new(1.0, 1.0, 1.0),
+    );
+    world.insert(sun, Name::new("Sun")).unwrap();
+    world.insert(sun, transform).unwrap();
+    world
+        .insert(sun, GlobalTransform(transform.to_matrix()))
+        .unwrap();
+    world.insert(sun, Visibility::VISIBLE).unwrap();
+    world
+        .insert(sun, DirectionalLight::new(Vec3::new(1.0, 0.98, 0.95), 1.6))
+        .unwrap();
 }
 
 /// Spawn the drivable chassis at `position`: dynamic box, 1×0.6×2 m.
@@ -556,6 +578,7 @@ pub fn spawn_level_geometry(world: &mut World) {
 /// Spawn the menu backdrop: a decorative ring of cubes for the camera to look
 /// at while the menu is up. Authored into [`MENU_SCENE`] by `gen_scenes`.
 pub fn spawn_menu_backdrop(world: &mut World) {
+    spawn_sun(world);
     let material = MaterialInstanceSource {
         guid: Guid::stable("materials/pbr.matinst"),
     };
@@ -581,6 +604,8 @@ pub fn spawn_menu_backdrop(world: &mut World) {
 /// and rotate nodes with the gizmo and the patches follow.
 pub fn spawn_levels_playground(world: &mut World) {
     use redlilium_levels::{RoadNode, RoadSegment};
+
+    spawn_sun(world);
 
     let node = |world: &mut World, x: f32, z: f32, yaw: f32| {
         let entity = world.spawn();
