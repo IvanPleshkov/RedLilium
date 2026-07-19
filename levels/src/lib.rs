@@ -13,6 +13,7 @@
 
 pub mod anchor;
 pub mod bezier;
+pub mod building;
 mod draw;
 pub mod graph;
 pub mod junction;
@@ -20,6 +21,7 @@ pub mod lot;
 mod tool;
 
 pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_anchors};
+pub use building::{Building, BuildingExit, ExitSpec, PlaceBuildingAction};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
 pub use lot::{AddLotAction, Lot};
@@ -97,6 +99,8 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<Junction>();
         world.register_inspector_default::<EdgeAnchor>();
         world.register_inspector_default::<Lot>();
+        world.register_inspector_default::<Building>();
+        world.register_inspector_default::<BuildingExit>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
@@ -176,6 +180,31 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                         ctx.actions.push(Box::new(AddLotAction::at_point(point)));
                     }
                     None => {}
+                }
+            },
+        );
+        // "Place building": fill the selected lot with the default box
+        // recipe; exit sockets materialize as child road nodes. Tune the
+        // parameters in the inspector afterwards.
+        view.ops.add(
+            "Place building",
+            |ctx| {
+                ctx.selection.iter().any(|&e| {
+                    ctx.world.get::<Lot>(e).is_some() && ctx.world.get::<Building>(e).is_none()
+                })
+            },
+            |ctx| {
+                let lots: Vec<Entity> = ctx
+                    .selection
+                    .iter()
+                    .copied()
+                    .filter(|&e| {
+                        ctx.world.get::<Lot>(e).is_some() && ctx.world.get::<Building>(e).is_none()
+                    })
+                    .collect();
+                for lot in lots {
+                    ctx.actions
+                        .push(Box::new(PlaceBuildingAction::new(lot, Building::default())));
                 }
             },
         );

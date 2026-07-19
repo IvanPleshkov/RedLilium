@@ -275,11 +275,14 @@ fn road_touches(world: &World, road: Entity, node: Option<Entity>) -> bool {
         .is_some_and(|seg| seg.a == node || seg.b == node)
 }
 
-/// Whether `node` is a socket — a junction connector or an edge-anchored
-/// node. Sockets keep +Z toward the road network, so a road arriving AT
-/// one must meet it from the front (`RoadSegment::b_from_front`).
+/// Whether `node` is a socket — a junction connector, an edge-anchored
+/// node, or a building exit. Sockets keep +Z toward the road network, so a
+/// road arriving AT one must meet it from the front
+/// (`RoadSegment::b_from_front`).
 fn is_socket(world: &World, node: Entity) -> bool {
-    if world.get::<EdgeAnchor>(node).is_some() {
+    if world.get::<EdgeAnchor>(node).is_some()
+        || world.get::<crate::building::BuildingExit>(node).is_some()
+    {
         return true;
     }
     if let Ok(junctions) = world.read_all::<crate::Junction>()
@@ -565,7 +568,9 @@ fn reorientable(world: &World, node: Entity, exclude: Entity) -> Option<Entity> 
     if roads != 2 {
         return None;
     }
-    if world.get::<EdgeAnchor>(node).is_some() {
+    if world.get::<EdgeAnchor>(node).is_some()
+        || world.get::<crate::building::BuildingExit>(node).is_some()
+    {
         return None;
     }
     if let Ok(junctions) = world.read_all::<crate::Junction>()
@@ -733,6 +738,25 @@ mod tests {
         // A scene mesh BEHIND the control (t = 15): the control wins.
         let hit = selection_pick(&world, &query(Some(Vec3::new(0.0, -5.0, 0.0)))).expect("wins");
         assert_eq!(hit.entity, node);
+    }
+
+    #[test]
+    fn building_exit_is_a_socket() {
+        let mut world = World::new();
+        redlilium_ecs::register_std_components(&mut world);
+        world.register_inspector_default::<RoadNode>();
+        world.register_inspector_default::<crate::Junction>();
+        world.register_inspector_default::<EdgeAnchor>();
+        world.register_inspector_default::<crate::building::BuildingExit>();
+
+        let exit = world.spawn();
+        world.insert(exit, RoadNode::default()).unwrap();
+        world.insert(exit, crate::building::BuildingExit).unwrap();
+        assert!(is_socket(&world, exit));
+        // A plain node is not.
+        let plain = world.spawn();
+        world.insert(plain, RoadNode::default()).unwrap();
+        assert!(!is_socket(&world, plain));
     }
 
     #[test]

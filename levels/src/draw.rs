@@ -17,6 +17,8 @@ const EDGE_COLOR: [f32; 4] = [0.15, 0.85, 1.0, 1.0];
 const GRID_COLOR: [f32; 4] = [0.05, 0.4, 0.5, 1.0];
 /// Lot parcels (green).
 const LOT_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
+/// Building box massing (violet).
+const BUILDING_COLOR: [f32; 4] = [0.8, 0.5, 0.95, 1.0];
 
 /// Longitudinal tessellation of the preview wireframe.
 const U_STEPS: usize = 16;
@@ -78,6 +80,9 @@ impl System for DrawLevelGraph {
                         continue;
                     };
                     draw_lot(&mut draw, &gt.0, lot);
+                    if let Some(building) = world.get::<crate::building::Building>(entity) {
+                        draw_building(&mut draw, &gt.0, lot, building);
+                    }
                 }
             }
 
@@ -152,6 +157,52 @@ fn draw_lot(draw: &mut DebugDrawerContext<'_>, world: &Mat4, lot: &crate::lot::L
         pt(&(front_center + out * 1.2)),
         LOT_COLOR,
     );
+}
+
+/// Building box massing: the inset footprint extruded floor by floor —
+/// a ring per storey line plus the four corner verticals.
+fn draw_building(
+    draw: &mut DebugDrawerContext<'_>,
+    world: &Mat4,
+    lot: &crate::lot::Lot,
+    building: &crate::building::Building,
+) {
+    let Some((half_x, z_front, z_back)) = crate::building::footprint(lot, building) else {
+        return;
+    };
+    if building.floors == 0 || building.floor_height <= 0.0 {
+        return;
+    }
+    let corner = |x: f32, y: f32, z: f32| {
+        let p = world * Vec4::new(x, y, z, 1.0);
+        Vec3::new(p.x, p.y, p.z)
+    };
+    let ring = [
+        (-half_x, z_front),
+        (half_x, z_front),
+        (half_x, z_back),
+        (-half_x, z_back),
+    ];
+    for floor in 0..=building.floors {
+        let y = floor as f32 * building.floor_height;
+        for i in 0..4 {
+            let (ax, az) = ring[i];
+            let (bx, bz) = ring[(i + 1) % 4];
+            draw.draw_line(
+                pt(&corner(ax, y, az)),
+                pt(&corner(bx, y, bz)),
+                BUILDING_COLOR,
+            );
+        }
+    }
+    let height = building.floors as f32 * building.floor_height;
+    for (x, z) in ring {
+        draw.draw_line(
+            pt(&corner(x, 0.0, z)),
+            pt(&corner(x, height, z)),
+            BUILDING_COLOR,
+        );
+    }
 }
 
 /// Junction boundary: corner curves in the edge color (they continue the

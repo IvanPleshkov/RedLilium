@@ -150,12 +150,22 @@ the entities mean.
   result. A validator flags *unsanctioned* crossings — two roads
   intersecting in projection with neither a shared node nor an edge anchor —
   as authoring errors; it never tries to auto-resolve them.
-- **Building** — entity with `Transform` + a reference to an **assembly
-  graph asset** (a reusable recipe: one "землянка" recipe, ten placements).
-  Its footprint cuts a hole in the terrain region it sits in and the assembly
-  graph generates the structure. From the same graph we later extract
-  interior/exterior volumes, occluders, and gameplay metadata. Details get
-  their own design round (phase 3, §7).
+- **Building** — a `Building` component **on the lot entity** (the lot
+  reserves the parcel, the building fills it). Today it carries flat
+  box-massing recipe parameters (floors, floor height, footprint inset,
+  seed, exits) — the P4 stub of the eventual **assembly graph asset** (a
+  reusable recipe: one "землянка" recipe, ten placements); the fields are
+  already the asset's fields, promotion is mechanical once AssetRef
+  inspector editing lands. **Exit sockets materialize at placement time by
+  the edit action** — ordinary child entities with `RoadNode` +
+  `BuildingExit`, parented to the lot: they follow the lot through plain
+  `GlobalTransform` propagation, and driveway `RoadSegment`s reference them
+  stably across scene reloads (a per-frame derived spawn was rejected for
+  breaking those references). Socket convention as everywhere: exit +Z
+  faces outward into the road network. Terrain interaction (footprint
+  cut-outs) waits for the terrain chapter — terrain conforms to buildings,
+  not vice versa. Interior/exterior volumes, occluders and gameplay
+  metadata still get their own design round (phase 3, §7).
 
 Graph edits go through the standard `EditAction`/`ActionQueue` path like any
 other entity/component edit — the plugin's editor tools produce actions, never
