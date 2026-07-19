@@ -44,11 +44,14 @@ struct PipelineKey {
 
 /// A cached specialization: the pipeline plus the shader `Arc` it was compiled
 /// from (pointer identity is the version — a hot-reloaded shader recompiles).
-/// `broken` remembers a shader `Arc` whose recompile failed so the last-good
-/// pipeline keeps serving without retrying every frame.
+/// `broken` remembers a shader `Arc` whose (re)compile failed so nothing
+/// retries every frame: with a last-good pipeline (`material: Some`) that one
+/// keeps serving; without one (`material: None` — the first build failed,
+/// e.g. a single-output shader against an MRT pass, #144) the failure itself
+/// is cached and re-reported cheaply until the shader `Arc` changes.
 struct PipelineEntry {
     shader: Arc<Shader>,
-    material: Arc<Material>,
+    material: Option<Arc<Material>>,
     broken: Option<usize>,
 }
 
@@ -135,40 +138,79 @@ impl PipelineCache {
         shader: &Arc<Shader>,
         build: impl Fn(&Arc<GraphicsDevice>, &Arc<Shader>) -> Result<Arc<Material>, GraphicsError>,
     ) -> Result<Arc<Material>, GraphicsError> {
+        /// The error served for a cached failure (the real one was logged when
+        /// it happened; rebuilding it every frame would repeat the compile).
+        fn cached_failure(shader_guid: Guid) -> GraphicsError {
+            GraphicsError::InvalidParameter(format!(
+                "pipeline specialization of shader {shader_guid:?} previously \
+                 failed (cached; edit the shader to retry)"
+            ))
+        }
+
         if let Some(entry) = self.cache.get_mut(&key) {
-            if Arc::ptr_eq(&entry.shader, shader) {
-                return Ok(Arc::clone(&entry.material));
+            if Arc::ptr_eq(&entry.shader, shader)
+                || entry.broken == Some(Arc::as_ptr(shader) as usize)
+            {
+                // Same shader version, or a version already known broken:
+                // serve the cached pipeline (or the cached failure) without
+                // recompiling.
+                return match &entry.material {
+                    Some(material) => Ok(Arc::clone(material)),
+                    None => Err(cached_failure(shader_guid)),
+                };
             }
             // The shader was reloaded — recompile; keep the last-good pipeline
             // (and don't retry the same broken Arc every frame) on failure.
-            if entry.broken == Some(Arc::as_ptr(shader) as usize) {
-                return Ok(Arc::clone(&entry.material));
-            }
             match build(&self.device, shader) {
                 Ok(material) => {
                     entry.shader = Arc::clone(shader);
-                    entry.material = Arc::clone(&material);
+                    entry.material = Some(Arc::clone(&material));
                     entry.broken = None;
                     return Ok(material);
                 }
                 Err(e) => {
                     log::warn!("shader {shader_guid:?} recompile failed (keeping last-good): {e}");
                     entry.broken = Some(Arc::as_ptr(shader) as usize);
-                    return Ok(Arc::clone(&entry.material));
+                    return match &entry.material {
+                        Some(material) => Ok(Arc::clone(material)),
+                        None => Err(e),
+                    };
                 }
             }
         }
 
-        let material = build(&self.device, shader)?;
-        self.cache.insert(
-            key,
-            PipelineEntry {
-                shader: Arc::clone(shader),
-                material: Arc::clone(&material),
-                broken: None,
-            },
-        );
-        Ok(material)
+        match build(&self.device, shader) {
+            Ok(material) => {
+                self.cache.insert(
+                    key,
+                    PipelineEntry {
+                        shader: Arc::clone(shader),
+                        material: Some(Arc::clone(&material)),
+                        broken: None,
+                    },
+                );
+                Ok(material)
+            }
+            Err(e) => {
+                // Cache the failure so the draw path doesn't recompile the
+                // same broken combination every frame (#144: e.g. a pbr
+                // material on the forward path, or an opaque material on the
+                // deferred MRT pass).
+                log::warn!(
+                    "shader {shader_guid:?} pipeline specialization failed \
+                     (cached, not retried until the shader changes): {e}"
+                );
+                self.cache.insert(
+                    key,
+                    PipelineEntry {
+                        shader: Arc::clone(shader),
+                        material: None,
+                        broken: Some(Arc::as_ptr(shader) as usize),
+                    },
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Compile the pipeline for this shader source + variant + layout + formats.

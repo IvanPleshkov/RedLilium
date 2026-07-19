@@ -144,6 +144,12 @@ pub struct DrawArgs {
     /// standard external (camera) + dynamic (model) rate-classified sets;
     /// see `std-assets/shaders/depth_only.slang`.
     pub depth_override: Option<(Guid, Arc<Shader>)>,
+    /// Draw only primitives whose material uses this shader (#144). An MRT
+    /// pass needs it: a single-output shader is VALID against multiple color
+    /// attachments (it writes only target 0, leaving the rest at their clear
+    /// values), so without the filter a non-pbr material would land in the
+    /// G-buffer with garbage normals instead of being skipped.
+    pub shader_filter: Option<Guid>,
 }
 
 impl DrawArgs {
@@ -160,6 +166,7 @@ impl DrawArgs {
             depth_format,
             phase: RenderPhase::Opaque,
             depth_override: None,
+            shader_filter: None,
         }
     }
 
@@ -176,7 +183,15 @@ impl DrawArgs {
             depth_format,
             phase: RenderPhase::Opaque,
             depth_override: None,
+            shader_filter: None,
         }
+    }
+
+    /// Restrict the pass to primitives whose material uses `shader` — see
+    /// [`shader_filter`](Self::shader_filter).
+    pub fn with_shader_filter(mut self, shader: Guid) -> Self {
+        self.shader_filter = Some(shader);
+        self
     }
 
     /// Arguments for a depth-only pass (zero color attachments) drawing the
@@ -194,6 +209,7 @@ impl DrawArgs {
             depth_format,
             phase,
             depth_override: Some((shader_guid, shader)),
+            shader_filter: None,
         }
     }
 }
@@ -272,6 +288,11 @@ impl SceneDrawer {
                 continue;
             }
             for (mesh, instance) in &item.primitives {
+                if let Some(filter) = args.shader_filter
+                    && instance.shader_guid != filter
+                {
+                    continue;
+                }
                 // Specialize the pipeline for this pass' shader + the mesh's
                 // vertex layout + the target formats (built once, then
                 // cached): the primitive's own material for a color pass, or

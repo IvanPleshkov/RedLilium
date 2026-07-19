@@ -6,10 +6,15 @@
 // The key/fill light constants are a stopgap until lights come from ECS
 // components (#146). Shadows arrive with #130.
 //
-// HDR_OUTPUT gates the tonemap: on = raw linear for a linear-HDR target
-// (1.0 = SDR white), off = tonemap + gamma encode for an sRGB/LDR target.
-// Selected by the pipeline from the camera target's format.
+// Output-transform axes, selected by the pipeline from the camera target's
+// format (same scheme as the egui shader):
+//   HDR_OUTPUT       - raw linear for a linear-HDR target (1.0 = SDR white)
+//   SRGB_FRAMEBUFFER - tonemapped linear for an sRGB-typed target (the
+//                      hardware applies the linear->sRGB encode on write;
+//                      encoding manually would double-gamma the image)
+//   (both off)       - tonemap + manual gamma encode for a non-sRGB SDR target
 //#pragma variant_system HDR_OUTPUT
+//#pragma variant_system SRGB_FRAMEBUFFER
 
 import math;
 import brdf;
@@ -141,9 +146,14 @@ float4 fs_main(VsOutput input) : SV_Target {
     // decoded a second time by the display).
     result_color = clamp(result_color, float3(0.0), float3(10.0));
 #else
-    // SDR target: tonemap and gamma correct.
-    result_color = tonemap_reinhard(result_color);
+    // SDR target: tonemap (Khronos PBR Neutral — hue-preserving, so
+    // saturated albedos don't wash toward white); gamma-encode manually only
+    // when the target is not sRGB-typed (an sRGB texture encodes on write by
+    // itself).
+    result_color = tonemap_pbr_neutral(result_color);
+#ifndef SRGB_FRAMEBUFFER
     result_color = gamma_correct(result_color);
+#endif
 #endif
 
     return float4(result_color, 1.0);

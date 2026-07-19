@@ -102,11 +102,10 @@ const REGISTRY: &[ShaderSpec] = &[
         "std-assets/shaders/deferred_resolve.slang",
     ),
     vs_fs_spec("std_skybox", "std-assets/shaders/skybox.slang"),
-    // Demo shaders — baked so the demos render on the default Slang-off build too.
-    vs_fs_spec("skybox", "demos/shaders/skybox.slang"),
+    // Demo shaders — baked so the demos render on the default Slang-off build
+    // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
+    // the std deferred path now.)
     vs_fs_spec("compressed_quad", "demos/shaders/compressed_quad.slang"),
-    vs_fs_spec("deferred_gbuffer", "demos/shaders/deferred_gbuffer.slang"),
-    vs_fs_spec("deferred_resolve", "demos/shaders/deferred_resolve.slang"),
     // Meshlet demo (#111): the task/mesh entries force the whole set to
     // SPIR-V (no WGSL form); reflection still bakes (the material relies on
     // it).

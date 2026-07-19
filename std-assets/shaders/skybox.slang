@@ -2,11 +2,14 @@
 // scene background, before the deferred resolve composites lit geometry
 // over it.
 //
-// HDR_OUTPUT gates the output transform exactly like deferred_resolve.slang:
-// off = tonemap + gamma encode for an sRGB-ish SDR target, on = raw linear
-// color for a linear-HDR target (1.0 = SDR white) — encoding there would be
-// decoded a second time by the display and wash the background out.
+// Output-transform axes exactly like deferred_resolve.slang:
+//   HDR_OUTPUT       - raw linear for a linear-HDR target (1.0 = SDR white)
+//   SRGB_FRAMEBUFFER - tonemapped linear for an sRGB-typed target (the
+//                      hardware encodes on write; a manual encode would
+//                      double-gamma and wash the background out)
+//   (both off)       - tonemap + manual gamma for a non-sRGB SDR target
 //#pragma variant_system HDR_OUTPUT
+//#pragma variant_system SRGB_FRAMEBUFFER
 
 import color;
 
@@ -68,8 +71,13 @@ float4 fs_main(VsOutput input) : SV_Target {
     // Linear-HDR target: pass radiance through (same clamp as the resolve).
     float3 result = clamp(color, float3(0.0), float3(10.0));
 #else
-    // SDR target: tonemap and gamma correct using library functions
-    float3 result = gamma_correct(tonemap_reinhard(color));
+    // SDR target: tonemap (Khronos PBR Neutral — matches the resolve, so the
+    // background and lit geometry share one transform); manual gamma only for
+    // non-sRGB targets (an sRGB texture encodes on write by itself).
+    float3 result = tonemap_pbr_neutral(color);
+#ifndef SRGB_FRAMEBUFFER
+    result = gamma_correct(result);
+#endif
 #endif
 
     return float4(result, 1.0);

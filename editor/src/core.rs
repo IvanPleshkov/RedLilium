@@ -299,6 +299,13 @@ pub fn spawn_editor_camera(world: &mut World, aspect: f32) -> Entity {
 
     world.insert(editor_camera, camera).unwrap();
     world.insert(editor_camera, free_fly).unwrap();
+    // The editor renders through the standard deferred PBR/IBL path (#144).
+    world
+        .insert(
+            editor_camera,
+            redlilium_ecs::RenderPath::named(redlilium_ecs::DEFERRED_PIPELINE),
+        )
+        .unwrap();
     let transform = free_fly.to_transform();
     world.insert(editor_camera, transform).unwrap();
     world
@@ -328,12 +335,16 @@ fn spawn_demo_scene(world: &mut World, engine: &EngineContext) {
                 .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16))),
         )
     };
-    // The std `default` material instance every demo primitive binds. Bound by
-    // its stable guid (not a path lookup) so it survives a rename/move of the
-    // asset and merely fails to resolve — rather than crashing the editor — if
-    // it is deleted.
+    // The std `pbr` material instances the demo primitives bind (#144 — the
+    // editor camera renders through the deferred PBR/IBL path, so the demo
+    // scene uses the pbr shading model). Bound by stable guid (not a path
+    // lookup) so they survive a rename/move of the asset and merely fail to
+    // resolve — rather than crashing the editor — if deleted.
     let material_source = MaterialInstanceSource {
-        guid: Guid::stable("materials/default.matinst"),
+        guid: Guid::stable("materials/pbr.matinst"),
+    };
+    let metal_source = MaterialInstanceSource {
+        guid: Guid::stable("materials/pbr_metal.matinst"),
     };
 
     // --- Demo scene entities ---
@@ -385,7 +396,8 @@ fn spawn_demo_scene(world: &mut World, engine: &EngineContext) {
     }
 
     // A sphere (a different mesh + a different vertex layout) — exercises the
-    // second File asset and the layout switch.
+    // second File asset and the layout switch; metallic so the deferred
+    // path's specular IBL is visible at a glance.
     {
         let entity = world.spawn();
         let transform = Transform::from_translation(Vec3::new(2.0, 0.7, -0.5));
@@ -395,7 +407,7 @@ fn spawn_demo_scene(world: &mut World, engine: &EngineContext) {
             .unwrap();
         world.insert(entity, Visibility::VISIBLE).unwrap();
 
-        let primitive = Primitive::new(sphere_source.clone(), material_source.clone());
+        let primitive = Primitive::new(sphere_source.clone(), metal_source.clone());
         world
             .insert(entity, MeshRenderer::single(primitive))
             .unwrap();
@@ -403,7 +415,10 @@ fn spawn_demo_scene(world: &mut World, engine: &EngineContext) {
 
     // A textured sphere (generated — its layout carries UVs) binding the std
     // `textured` material instance. Only spawned if the asset exists, so the
-    // demo doesn't add an invisible entity on a stripped-down mount.
+    // demo doesn't add an invisible entity on a stripped-down mount. NOTE:
+    // `opaque_textured` has no G-buffer form yet, so this entity only renders
+    // when the camera is on the forward path (texture support in the pbr
+    // model is future #144 follow-up work).
     if let Some(guid) = {
         let db = world.resource::<AssetDb>();
         db.guid_of(&AssetPath::new("std", "materials/textured.matinst"))

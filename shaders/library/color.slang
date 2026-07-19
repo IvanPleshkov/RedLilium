@@ -34,6 +34,35 @@ float3 tonemap_reinhard(float3 color) {
     return color / (color + float3(1.0));
 }
 
+// Khronos PBR Neutral tone mapping (hue-preserving).
+//
+// Spec: https://github.com/KhronosGroup/ToneMapping — designed so saturated
+// base colors survive tonemapping. Per-channel curves (Reinhard, ACES) divide
+// the dominant channel hardest, skewing bright saturated colors toward white
+// (a red albedo renders salmon-pink); this curve compresses by the peak
+// channel instead, keeping the hue, with a controlled desaturation only near
+// the top of the range.
+float3 tonemap_pbr_neutral(float3 color) {
+    const float start_compression = 0.8 - 0.04;
+    const float desaturation = 0.15;
+
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < start_compression) {
+        return color;
+    }
+
+    float d = 1.0 - start_compression;
+    float new_peak = 1.0 - d * d / (peak + d - start_compression);
+    color *= new_peak / peak;
+
+    float g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
+    return lerp(color, float3(new_peak), g);
+}
+
 // Reinhard extended tone mapping with white point.
 float3 tonemap_reinhard_extended(float3 color, float white_point) {
     float white_sq = white_point * white_point;

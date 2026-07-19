@@ -91,7 +91,10 @@ struct ResolveUniforms {
     light_dir: [f32; 4],
 }
 
-/// Uniforms of the skybox pass (must match `skybox.slang`).
+/// Uniforms of the skybox pass (must match `skybox.slang`). The WGSL uniform
+/// layout aligns the shader's trailing `float3 _pad` to 16 bytes, rounding
+/// the cbuffer to 112 — the extra `_pad1` matches that (a 96-byte buffer
+/// fails wgpu's bind-size validation).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SkyboxUniforms {
@@ -99,6 +102,7 @@ struct SkyboxUniforms {
     camera_pos: [f32; 4],
     mip_level: f32,
     _pad: [f32; 3],
+    _pad1: [f32; 4],
 }
 
 /// The engine's built-in deferred PBR/IBL path — see the module docs.
@@ -265,13 +269,19 @@ fn create_ibl_texture(
     texture
 }
 
-/// Whether a color-target format holds linear HDR (selects the shaders'
-/// `HDR_OUTPUT` variant: raw linear out, 1.0 = SDR white).
-fn hdr_active(format: TextureFormat) -> bool {
-    matches!(
-        format,
-        TextureFormat::Rgba16Float | TextureFormat::Rgba32Float
-    )
+/// Select a fullscreen shader's output-transform variant from the
+/// color-target format (the egui renderer's scheme): linear-HDR targets get
+/// raw linear (`HDR_OUTPUT`), sRGB-typed targets get tonemapped linear and
+/// let the hardware encode (`SRGB_FRAMEBUFFER` — a manual encode would
+/// double-gamma), anything else gets tonemap + manual gamma.
+fn output_variant(source: &str, format: TextureFormat) -> Option<redlilium_graphics::VariantKey> {
+    redlilium_graphics::ShaderVariantSpace::parse(source)
+        .ok()?
+        .select()
+        .system("HDR_OUTPUT", format.is_hdr())
+        .system("SRGB_FRAMEBUFFER", format.is_srgb())
+        .build()
+        .ok()
 }
 
 impl CameraResources {
@@ -283,17 +293,10 @@ impl CameraResources {
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
         profile_scope!("DeferredPipeline::camera_create");
-        use redlilium_graphics::{BindingGroupDescriptor, ShaderVariantSpace};
-
-        let hdr = hdr_active(color_format);
+        use redlilium_graphics::BindingGroupDescriptor;
 
         // --- Resolve material ---
-        let variant = ShaderVariantSpace::parse(RESOLVE_SHADER_SLANG)
-            .ok()?
-            .select()
-            .system("HDR_OUTPUT", hdr)
-            .build()
-            .ok()?;
+        let variant = output_variant(RESOLVE_SHADER_SLANG, color_format)?;
         let resolve_material = device
             .create_material(
                 &MaterialDescriptor::new()
@@ -356,12 +359,7 @@ impl CameraResources {
         );
 
         // --- Skybox material ---
-        let variant = ShaderVariantSpace::parse(SKYBOX_SHADER_SLANG)
-            .ok()?
-            .select()
-            .system("HDR_OUTPUT", hdr)
-            .build()
-            .ok()?;
+        let variant = output_variant(SKYBOX_SHADER_SLANG, color_format)?;
         let skybox_material = device
             .create_material(
                 &MaterialDescriptor::new()
@@ -554,6 +552,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
                 mip_level: 0.0,
                 _pad: [0.0; 3],
+                _pad1: [0.0; 4],
             }));
             let resolve_offset = ring.push(bytemuck::bytes_of(&ResolveUniforms {
                 camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
@@ -601,11 +600,17 @@ impl CameraRenderPipeline for DeferredPipeline {
                 ctx.scene,
                 &ring_buffer,
                 &mut pipelines,
+                // Only pbr-model materials belong in the G-buffer: a
+                // single-output shader would be accepted by the MRT pipeline
+                // (writing only target 0) and land with garbage normals.
                 &DrawArgs::mrt(
                     camera_offset,
                     GBUFFER_FORMATS.to_vec(),
                     view.target.depth.format(),
-                ),
+                )
+                .with_shader_filter(redlilium_assets::Guid::stable(
+                    "shaders/deferred_gbuffer.slang",
+                )),
             );
         }
         graph.add_graphics_pass(gbuffer_pass);
