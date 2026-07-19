@@ -108,6 +108,20 @@ the entities mean.
   `TerrainControlPoint`. Terrain fills the regions *between* roads (faces of
   the planar road graph, projected to ground plane); control points bend the
   interpolated surface where plain filling is too flat.
+  **Terrain is the final fill** (decided 2026-07-19): it conforms to roads
+  and architecture — road edges and lot boundaries are boundary conditions
+  of the fill, never constraints on them. In particular, nothing in the
+  authoring layer assumes a ground plane: lots and buildings live in full
+  3D, and edge-anchored elements inherit height from the edge they sit on.
+- **Lot** — the parcel primitive of the architecture chapter:
+  `Lot { frontage, depth }`, a rectangle behind a straight frontage segment
+  following the socket convention (local X along the frontage, **+Z faces
+  the road network, the parcel occupies −Z**). Two states, one component:
+  *edge-anchored* (the entity also carries an `EdgeAnchor` — transform and
+  frontage derive from the interval chord, sharing all the anchored-node
+  machinery: sliding, following, undo) and *free* (transform authored by
+  hand). A building placed on a lot is a separate concern; the lot only
+  reserves and orients the parcel.
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a
   driveway/building exit crossing the sidewalk to meet the road. Not a

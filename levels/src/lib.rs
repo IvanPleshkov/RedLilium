@@ -16,11 +16,13 @@ pub mod bezier;
 mod draw;
 pub mod graph;
 pub mod junction;
+pub mod lot;
 mod tool;
 
 pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_anchors};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
+pub use lot::{AddLotAction, Lot};
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
 use redlilium_ecs::{Component, Entity, PostUpdate, Update, UpdateGlobalTransforms, World};
@@ -94,6 +96,7 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<RoadSegment>();
         world.register_inspector_default::<Junction>();
         world.register_inspector_default::<EdgeAnchor>();
+        world.register_inspector_default::<Lot>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
@@ -142,6 +145,38 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                     .collect();
                 ctx.actions
                     .push(Box::new(CreateJunctionAction::new(connectors)));
+            },
+        );
+        // "Add lot": place a parcel — glued to the road edge under the
+        // cursor, or free-standing at the ground click point.
+        view.ops.add(
+            "Add lot",
+            |ctx| {
+                ctx.cursor_ray
+                    .as_ref()
+                    .is_some_and(|ray| lot::lot_target(ctx.world, ray).is_some())
+            },
+            |ctx| {
+                let target = ctx
+                    .cursor_ray
+                    .as_ref()
+                    .and_then(|ray| lot::lot_target(ctx.world, ray));
+                match target {
+                    Some(lot::LotTarget::Edge(hit)) => {
+                        let (u_min, u_max) =
+                            anchor::interval_around(ctx.world, &hit, Lot::default().frontage);
+                        ctx.actions.push(Box::new(AddLotAction::on_edge(EdgeAnchor {
+                            parent_road: hit.road,
+                            right_edge: hit.right_edge,
+                            u_min,
+                            u_max,
+                        })));
+                    }
+                    Some(lot::LotTarget::Free(point)) => {
+                        ctx.actions.push(Box::new(AddLotAction::at_point(point)));
+                    }
+                    None => {}
+                }
             },
         );
         // Junction stamps: an N-armed template at the click point; drag the

@@ -27,8 +27,9 @@ use redlilium_ecs::{
 use crate::graph::road_patch;
 use crate::{RoadNode, RoadSegment, bezier};
 
-/// Glues the carrying [`RoadNode`] to a side edge of a road. The node's
-/// `Transform` and `half_width` are derived from the parent edge every frame
+/// Glues the carrying entity — a [`RoadNode`] or a [`crate::lot::Lot`] — to
+/// a side edge of a road. The entity's `Transform` and its width
+/// (`half_width` / `frontage`) are derived from the parent edge every frame
 /// by [`DeriveEdgeAnchors`] — author the interval, not the placement.
 #[derive(Debug, Clone, Component)]
 pub struct EdgeAnchor {
@@ -145,7 +146,7 @@ type AnchorUpdate = (Entity, Transform, f32, Option<(f32, f32)>);
 /// edge and shift the interval (sliding). A node equal to the cache whose
 /// derived state moved away follows the edge (parametric follow). Settled
 /// nodes are recorded into the cache. Empty result means settled.
-fn anchor_updates(
+pub(crate) fn anchor_updates(
     world: &World,
     cache: &mut std::collections::HashMap<Entity, Transform>,
     slide: bool,
@@ -161,16 +162,19 @@ fn anchor_updates(
         let Some((derived_t, derived_hw)) = derive_anchor_state(world, anchor) else {
             continue;
         };
-        let (current_t, current_n) = (
-            world.get::<Transform>(entity),
-            world.get::<RoadNode>(entity),
-        );
-        let (Some(t), Some(n)) = (current_t, current_n) else {
+        let Some(t) = world.get::<Transform>(entity) else {
             updates.push((entity, derived_t, derived_hw, None));
             continue;
         };
+        // Width receiver: a road node's half_width or a lot's frontage —
+        // whichever the anchored entity carries. Neither present → only the
+        // transform is derived (never a reason to stay unsettled).
+        let current_w = world
+            .get::<RoadNode>(entity)
+            .map(|n| n.half_width)
+            .or_else(|| world.get::<crate::lot::Lot>(entity).map(|l| l.frontage));
         let settled = (t.to_matrix() - derived_t.to_matrix()).norm() <= 1e-4
-            && (n.half_width - derived_hw).abs() <= 1e-4;
+            && current_w.is_none_or(|w| (w - derived_hw).abs() <= 1e-4);
         if settled {
             cache.insert(entity, *t);
             continue;
@@ -240,6 +244,10 @@ fn apply_updates(world: &mut World, updates: &[AnchorUpdate]) {
             node.half_width = *half_width;
             let _ = world.insert(*entity, node);
         }
+        if let Some(mut lot) = world.get::<crate::lot::Lot>(*entity).cloned() {
+            lot.frontage = *half_width;
+            let _ = world.insert(*entity, lot);
+        }
         if let Some((u_min, u_max)) = interval
             && let Some(mut anchor) = world.get::<EdgeAnchor>(*entity).cloned()
         {
@@ -282,27 +290,33 @@ impl System for DeriveEdgeAnchors {
                 WriteAll<Transform>,
                 WriteAll<GlobalTransform>,
                 WriteAll<RoadNode>,
+                WriteAll<crate::lot::Lot>,
                 WriteAll<EdgeAnchor>,
             )>()
-            .execute(|(mut transforms, mut globals, mut nodes, mut anchors)| {
-                for (entity, transform, half_width, interval) in &updates {
-                    if let Some(mut slot) = transforms.get_mut(entity.index()) {
-                        *slot = *transform;
+            .execute(
+                |(mut transforms, mut globals, mut nodes, mut lots, mut anchors)| {
+                    for (entity, transform, half_width, interval) in &updates {
+                        if let Some(mut slot) = transforms.get_mut(entity.index()) {
+                            *slot = *transform;
+                        }
+                        if let Some(mut global) = globals.get_mut(entity.index()) {
+                            global.0 = transform.to_matrix();
+                        }
+                        if let Some(mut node) = nodes.get_mut(entity.index()) {
+                            node.half_width = *half_width;
+                        }
+                        if let Some(mut lot) = lots.get_mut(entity.index()) {
+                            lot.frontage = *half_width;
+                        }
+                        if let Some((u_min, u_max)) = interval
+                            && let Some(mut anchor) = anchors.get_mut(entity.index())
+                        {
+                            anchor.u_min = *u_min;
+                            anchor.u_max = *u_max;
+                        }
                     }
-                    if let Some(mut global) = globals.get_mut(entity.index()) {
-                        global.0 = transform.to_matrix();
-                    }
-                    if let Some(mut node) = nodes.get_mut(entity.index()) {
-                        node.half_width = *half_width;
-                    }
-                    if let Some((u_min, u_max)) = interval
-                        && let Some(mut anchor) = anchors.get_mut(entity.index())
-                    {
-                        anchor.u_min = *u_min;
-                        anchor.u_max = *u_max;
-                    }
-                }
-            });
+                },
+            );
             for (entity, transform, _, _) in &updates {
                 cache.insert(*entity, *transform);
             }

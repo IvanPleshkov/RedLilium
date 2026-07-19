@@ -15,6 +15,8 @@ const NODE_COLOR: [f32; 4] = [1.0, 0.75, 0.1, 1.0];
 const EDGE_COLOR: [f32; 4] = [0.15, 0.85, 1.0, 1.0];
 /// Interior wireframe (dim teal).
 const GRID_COLOR: [f32; 4] = [0.05, 0.4, 0.5, 1.0];
+/// Lot parcels (green).
+const LOT_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
 
 /// Longitudinal tessellation of the preview wireframe.
 const U_STEPS: usize = 16;
@@ -64,6 +66,18 @@ impl System for DrawLevelGraph {
                             draw.draw_line(pt(&(p - out)), pt(&(p + out)), NODE_COLOR);
                         }
                     }
+                }
+            }
+
+            if let Ok(lots) = world.read_all::<crate::lot::Lot>() {
+                for (index, lot) in lots.iter() {
+                    let Some(entity) = world.entity_at_index(index) else {
+                        continue;
+                    };
+                    let Some(gt) = world.get::<GlobalTransform>(entity) else {
+                        continue;
+                    };
+                    draw_lot(&mut draw, &gt.0, lot);
                 }
             }
 
@@ -122,6 +136,22 @@ fn draw_node(draw: &mut DebugDrawerContext<'_>, world: &Mat4, half_width: f32) {
     draw.draw_line(pt(&center), pt(&tip), NODE_COLOR);
     draw.draw_line(pt(&tip), pt(&(tip - fwd * 0.5 + side * 0.3)), NODE_COLOR);
     draw.draw_line(pt(&tip), pt(&(tip - fwd * 0.5 - side * 0.3)), NODE_COLOR);
+}
+
+/// Lot parcel: the perimeter rectangle plus a short arrow out of the
+/// frontage center — +Z, toward the road network the lot faces.
+fn draw_lot(draw: &mut DebugDrawerContext<'_>, world: &Mat4, lot: &crate::lot::Lot) {
+    let corners = crate::lot::lot_corners(world, lot);
+    for i in 0..4 {
+        draw.draw_line(pt(&corners[i]), pt(&corners[(i + 1) % 4]), LOT_COLOR);
+    }
+    let front_center = (corners[0] + corners[1]) * 0.5;
+    let out = bezier::heading(world);
+    draw.draw_line(
+        pt(&front_center),
+        pt(&(front_center + out * 1.2)),
+        LOT_COLOR,
+    );
 }
 
 /// Junction boundary: corner curves in the edge color (they continue the

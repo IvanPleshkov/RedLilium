@@ -366,6 +366,22 @@ pub(crate) fn selection_pick(
             consider(dist, ROAD_HANDLE_PICK_RADIUS, t, road);
         }
     }
+    if let Ok(lots) = world.read_all::<crate::lot::Lot>() {
+        for (index, lot) in lots.iter() {
+            let Some(entity) = world.entity_at_index(index) else {
+                continue;
+            };
+            let Some(gt) = world.get::<GlobalTransform>(entity) else {
+                continue;
+            };
+            // Lots pick by their perimeter rectangle.
+            let corners = crate::lot::lot_corners(&gt.0, lot);
+            for i in 0..4 {
+                let (dist, _, t) = ray_segment_closest(ray, corners[i], corners[(i + 1) % 4]);
+                consider(dist, PICK_RADIUS, t, entity);
+            }
+        }
+    }
     let (_, t, entity) = best?;
     if let Some(point) = query.scene_point {
         let t_scene = (point - ray.origin).dot(&ray.dir) / ray.dir.dot(&ray.dir).max(1e-8);
