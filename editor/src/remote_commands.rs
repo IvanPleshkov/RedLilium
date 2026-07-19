@@ -345,9 +345,9 @@ struct ScreenshotJob {
     path: String,
     /// Filled by the GPU readback (via the frame graph).
     result: Arc<Mutex<Vec<u8>>>,
-    /// `(width, height, padded_bytes_per_row, bgra)` — set once the readback
-    /// pass is injected.
-    layout: Option<(u32, u32, u32, bool)>,
+    /// `(width, height, padded_bytes_per_row, format)` — set once the
+    /// readback pass is injected.
+    layout: Option<(u32, u32, u32, redlilium_graphics::TextureFormat)>,
     /// Keeps the readback buffer alive until the transfer completes.
     _buffer: Option<Arc<Buffer>>,
 }
@@ -517,7 +517,7 @@ pub fn assets_idle(world: &World) -> bool {
 
 fn complete_screenshot(rc: &mut RemoteCommands, world: &World) {
     let Some(job) = &rc.screenshot else { return };
-    let Some((w, h, padded_bpr, bgra)) = job.layout else {
+    let Some((w, h, padded_bpr, format)) = job.layout else {
         return; // pass not injected yet
     };
     let data = {
@@ -531,18 +531,40 @@ fn complete_screenshot(rc: &mut RemoteCommands, world: &World) {
     };
     let job = rc.screenshot.take().expect("checked above");
 
-    // Un-pad rows and encode.
+    // Un-pad rows and convert to RGBA8 for the PNG.
+    let bytes_px = screenshot_bytes_per_pixel(format);
     let mut pixels = Vec::with_capacity((w * h * 4) as usize);
     for row in 0..h {
         let start = (row * padded_bpr) as usize;
-        let end = start + (w * 4) as usize;
+        let end = start + (w * bytes_px) as usize;
         if end > data.len() {
             send_err(world, job.conn, job.id, "readback shorter than expected");
             return;
         }
-        pixels.extend_from_slice(&data[start..end]);
+        match format {
+            // Linear-HDR target (the surface is HDR): tonemap + sRGB-encode
+            // each texel — the same SDR transform the deferred resolve
+            // applies — so the PNG shows what an SDR display would.
+            redlilium_graphics::TextureFormat::Rgba16Float => {
+                use redlilium_core::color::{f16_to_f32, srgb_encode, tonemap_pbr_neutral};
+                for texel in data[start..end].chunks_exact(8) {
+                    let rgb = [
+                        f16_to_f32(u16::from_le_bytes([texel[0], texel[1]])),
+                        f16_to_f32(u16::from_le_bytes([texel[2], texel[3]])),
+                        f16_to_f32(u16::from_le_bytes([texel[4], texel[5]])),
+                    ];
+                    for c in tonemap_pbr_neutral(rgb) {
+                        pixels.push((srgb_encode(c).clamp(0.0, 1.0) * 255.0).round() as u8);
+                    }
+                    pixels.push(255);
+                }
+            }
+            // 8-bit rows copy through; sRGB-typed targets already hold
+            // display-encoded bytes (PNG's native space).
+            _ => pixels.extend_from_slice(&data[start..end]),
+        }
     }
-    if bgra {
+    if format!("{format:?}").starts_with("Bgra") {
         for px in pixels.chunks_exact_mut(4) {
             px.swap(0, 2);
         }
@@ -618,8 +640,9 @@ pub fn inject_screenshot_pass(
     };
 
     let size = color.size();
+    let format = color.format();
     let (w, h) = (size.width, size.height);
-    let padded_bpr = (w * 4).div_ceil(256) * 256;
+    let padded_bpr = (w * screenshot_bytes_per_pixel(format)).div_ceil(256) * 256;
     let total = padded_bpr as u64 * h as u64;
     let buffer = match device.create_buffer(&BufferDescriptor::new(
         total,
@@ -631,8 +654,6 @@ pub fn inject_screenshot_pass(
             return;
         }
     };
-    let bgra = format!("{:?}", color.format()).starts_with("Bgra");
-
     let region = BufferTextureCopyRegion::new(
         BufferTextureLayout::new(0, Some(padded_bpr), Some(h)),
         TextureCopyLocation::new(0, TextureOrigin::new(0, 0, 0)),
@@ -652,8 +673,18 @@ pub fn inject_screenshot_pass(
         graph.add_dependency(handle, scene_handle);
     }
 
-    job.layout = Some((w, h, padded_bpr, bgra));
+    job.layout = Some((w, h, padded_bpr, format));
     job._buffer = Some(buffer);
+}
+
+/// Bytes per texel of the formats a camera color target can be
+/// (`OutputFormat`): 8 for the linear-HDR half-float target, 4 for the 8-bit
+/// ones.
+fn screenshot_bytes_per_pixel(format: redlilium_graphics::TextureFormat) -> u32 {
+    match format {
+        redlilium_graphics::TextureFormat::Rgba16Float => 8,
+        _ => 4,
+    }
 }
 
 // ---------------------------------------------------------------------------

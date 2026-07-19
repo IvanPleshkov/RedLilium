@@ -287,31 +287,32 @@ where
         true
     }
 
-    /// Select the surface format based on HDR preference and availability.
+    /// Select the surface format: HDR preferred over sRGB (on by default,
+    /// `--no-hdr` opts out), falling back to the sRGB SDR format.
     ///
-    /// HDR is only used when explicitly requested via `args.hdr()` and the
-    /// display actually supports HDR formats.
-    /// Returns (format, hdr_active) tuple.
+    /// Only `Rgba16Float` qualifies as HDR here — it pairs with the
+    /// extended-sRGB-linear color space, the one contract the render path can
+    /// drive (shaders output linear with 1.0 = SDR white). 10-bit formats the
+    /// display may also offer (`Rgba10a2Unorm` = HDR10) require a PQ encode
+    /// no shader performs yet, so auto-selecting them would render wrong
+    /// colors — they are deliberately skipped.
+    /// Returns a (format, hdr_active) tuple.
     fn select_surface_format(&self, surface: &Surface) -> (TextureFormat, bool) {
         if self.args.hdr() {
             let hdr_formats = surface.supported_hdr_formats();
-
-            if !hdr_formats.is_empty() {
-                let preferred = surface.preferred_hdr_format();
-                if hdr_formats.contains(&preferred) {
-                    log::info!("HDR enabled: using {:?}", preferred);
-                    return (preferred, true);
-                }
-                // Fall back to first available HDR format
-                let format = hdr_formats[0];
-                log::info!("HDR enabled: using {:?}", format);
-                return (format, true);
+            if hdr_formats.contains(&TextureFormat::Rgba16Float) {
+                log::info!("HDR surface: Rgba16Float (extended linear)");
+                return (TextureFormat::Rgba16Float, true);
             }
-
-            log::warn!("HDR requested but no HDR formats available, falling back to SDR");
+            if !hdr_formats.is_empty() {
+                log::info!(
+                    "display offers HDR formats {hdr_formats:?} but not Rgba16Float; \
+                     the render path has no PQ encode — using SDR"
+                );
+            }
         }
 
-        // Use standard SDR format
+        // Standard SDR format (sRGB-typed when available).
         let format = surface.preferred_format();
         log::info!("Using SDR format: {:?}", format);
         (format, false)

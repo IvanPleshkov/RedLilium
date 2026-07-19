@@ -3,8 +3,10 @@
 
 import brdf;
 
-// Maximum mip level for pre-filtered environment map.
-static const float MAX_REFLECTION_LOD = 4.0;
+// Maximum mip level for pre-filtered environment map. Must be the baked
+// pack's mip count minus one (`PREFILTER_MIPS` in xtask/src/ibl.rs bakes
+// `roughness = mip / (mips - 1)`).
+static const float MAX_REFLECTION_LOD = 7.0;
 
 // Sample diffuse IBL from irradiance cubemap.
 float3 sample_diffuse_ibl(

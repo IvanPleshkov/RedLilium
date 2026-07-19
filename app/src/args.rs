@@ -124,15 +124,17 @@ pub trait AppArgs: Sized {
         cfg!(debug_assertions)
     }
 
-    /// Get whether HDR (High Dynamic Range) output should be enabled.
+    /// Get whether HDR (High Dynamic Range) output is preferred.
     ///
-    /// When enabled, the application will attempt to use an HDR surface format
-    /// (like Rgba10a2Unorm or Rgba16Float) if the display supports it.
-    /// If HDR is not available, it will fall back to a standard SDR format.
+    /// When enabled, the application prefers an HDR surface format over sRGB —
+    /// today that means `Rgba16Float` with the extended-linear color space
+    /// (the only HDR contract the render path can drive; 10-bit HDR10/PQ
+    /// surfaces need a PQ encode that does not exist yet). If the display
+    /// offers no usable HDR format, it falls back to a standard sRGB format.
     ///
-    /// Default: false
+    /// Default: true (HDR preferred when available)
     fn hdr(&self) -> bool {
-        false
+        true
     }
 
     /// Whether to use a custom titlebar (frameless window with custom controls).
@@ -303,7 +305,7 @@ impl Default for DefaultAppArgs {
             vsync: true,
             max_frames: None,
             validation: cfg!(debug_assertions),
-            hdr: false,
+            hdr: true,
             custom_titlebar: false,
         }
     }
@@ -349,10 +351,10 @@ impl DefaultAppArgs {
         self
     }
 
-    /// Enable or disable HDR output.
+    /// Enable or disable the HDR surface preference (on by default).
     ///
-    /// When enabled, the application will attempt to use an HDR surface format
-    /// if the display supports it.
+    /// When enabled, the application prefers an HDR surface format
+    /// (`Rgba16Float`, extended linear) over sRGB when the display supports it.
     pub fn with_hdr(mut self, hdr: bool) -> Self {
         self.hdr = hdr;
         self
@@ -434,10 +436,15 @@ mod native {
         #[arg(long, conflicts_with = "validation")]
         pub no_validation: bool,
 
-        /// Enable HDR (High Dynamic Range) output if the display supports it.
-        /// Uses 10-bit color (HDR10) for wider color gamut and higher brightness.
-        #[arg(long)]
+        /// Prefer an HDR (High Dynamic Range) surface if the display supports
+        /// it. This is the default; the flag exists as the explicit opposite
+        /// of --no-hdr.
+        #[arg(long, conflicts_with = "no_hdr")]
         pub hdr: bool,
+
+        /// Disable the HDR surface preference and use a standard sRGB format.
+        #[arg(long, conflicts_with = "hdr")]
+        pub no_hdr: bool,
     }
 
     impl From<ClapArgs> for DefaultAppArgs {
@@ -481,7 +488,7 @@ mod native {
                 vsync: !args.no_vsync,
                 max_frames: args.max_frames,
                 validation,
-                hdr: args.hdr,
+                hdr: !args.no_hdr,
                 custom_titlebar: false,
             }
         }

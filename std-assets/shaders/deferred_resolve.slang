@@ -81,8 +81,11 @@ Texture2D brdf_lut;
 [[vk::binding(3, 2)]]
 SamplerState ibl_sampler;
 
-// Highest prefiltered-environment mip the roughness axis maps onto.
-static const float MAX_REFLECTION_LOD_VAL = 4.0;
+// Highest prefiltered-environment mip the roughness axis maps onto. Must be
+// the baked pack's mip count minus one (`PREFILTER_MIPS` in xtask/src/ibl.rs
+// bakes `roughness = mip / (mips - 1)`); a lower value makes rough surfaces
+// sample too sharp a reflection. Rides the environment asset with #145.
+static const float MAX_REFLECTION_LOD_VAL = 7.0;
 
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
@@ -156,7 +159,9 @@ float4 fs_main(VsOutput input) : SV_Target {
     // itself).
     result_color = tonemap_pbr_neutral(result_color);
 #ifndef SRGB_FRAMEBUFFER
-    result_color = gamma_correct(result_color);
+    // Exact sRGB OETF — the same transfer the hardware applies on sRGB
+    // targets, so both SDR paths encode identically.
+    result_color = linear_to_srgb(result_color);
 #endif
 #endif
 

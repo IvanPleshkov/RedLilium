@@ -39,6 +39,8 @@ mod fs_watcher;
 mod game_host;
 mod gestures;
 mod gizmo_system;
+#[cfg(test)]
+mod golden;
 mod gpu_stats_panel;
 mod headless;
 mod history_panel;

@@ -54,10 +54,6 @@ name = "async_overlap_demo"
 path = "src/bin/async_overlap_demo.rs"
 
 [[bin]]
-name = "pbr_ibl_demo"
-path = "src/bin/pbr_ibl/main.rs"
-
-[[bin]]
 name = "textured_quad_demo"
 path = "src/bin/textured_quad_demo.rs"
 

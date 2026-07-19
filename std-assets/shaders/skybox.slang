@@ -76,7 +76,9 @@ float4 fs_main(VsOutput input) : SV_Target {
     // non-sRGB targets (an sRGB texture encodes on write by itself).
     float3 result = tonemap_pbr_neutral(color);
 #ifndef SRGB_FRAMEBUFFER
-    result = gamma_correct(result);
+    // Exact sRGB OETF — matches the hardware encode of sRGB targets (and the
+    // resolve pass), so both SDR paths produce identical bytes.
+    result = linear_to_srgb(result);
 #endif
 #endif
 

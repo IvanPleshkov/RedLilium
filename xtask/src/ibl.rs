@@ -6,12 +6,11 @@
 //! cargo run -p xtask -- bake-ibl       # regenerate the four KTX2 assets
 //! ```
 //!
-//! The math is a port of the pbr_ibl demo's CPU path (`demos/src/bin/
-//! pbr_ibl/ibl.rs`, LearnOpenGL conventions) so the baked set is a drop-in
-//! replacement for what the demo computed at startup (#138): same cube-face
-//! layout, same GGX importance sampling, same `roughness = mip / (levels-1)`
-//! prefilter convention. Offline we afford more samples and bilinear
-//! equirect filtering.
+//! The math is a port of the retired pbr_ibl demo's CPU path (LearnOpenGL
+//! conventions) so the baked set is a drop-in replacement for what that demo
+//! computed at startup (#138): same cube-face layout, same GGX importance
+//! sampling, same `roughness = mip / (levels-1)` prefilter convention.
+//! Offline we afford more samples and bilinear equirect filtering.
 //!
 //! Deterministic by construction: no RNG (Hammersley/radical-inverse and
 //! fixed-step integrals only), rayon parallelism over disjoint output rows

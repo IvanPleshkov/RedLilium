@@ -3,6 +3,7 @@
 //! Core crate for RedLilium Engine basic utilities.
 
 pub mod abstract_editor;
+pub mod color;
 pub mod compute;
 pub mod gltf;
 pub mod input;

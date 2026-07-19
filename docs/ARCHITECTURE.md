@@ -396,9 +396,6 @@ cargo run --features profiling
 To run any demo with profiling enabled across all crates:
 
 ```bash
-# Run PBR IBL demo with Tracy profiling
-cargo run -p redlilium-demos --bin pbr_ibl_demo --features profiling
-
 # Run window demo with profiling
 cargo run -p redlilium-demos --bin window_demo --features profiling
 

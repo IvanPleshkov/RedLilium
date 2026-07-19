@@ -52,8 +52,9 @@ VsOutput vs_main(VsInput input) {
 }
 
 struct FsOutput {
-    // RT0: albedo (rgb) + geometry marker (a = 1; the resolve treats
-    // a < 0.5 as background — the pass clears alpha to 0).
+    // RT0: albedo (rgb) + AO-as-geometry-marker (a): the untextured model
+    // has no AO map, so it writes a = 1 (full ambient); the resolve treats
+    // a < 1/128 as background — the pass clears alpha to 0 (ADR-039).
     float4 albedo : SV_Target0;
     // RT1: world normal encoded to [0,1] (rgb) + metallic (a).
     float4 normal_metallic : SV_Target1;
