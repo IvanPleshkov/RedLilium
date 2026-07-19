@@ -669,7 +669,10 @@ impl CameraResources {
                         .with_texture(3, gbuffer[3].clone())
                         .with_texture(4, gbuffer[0].clone())
                         .with_sampler(5, shared.gbuffer_sampler.clone())
-                        .with_sampler(6, shared.ibl_sampler.clone()),
+                        .with_sampler(6, shared.ibl_sampler.clone())
+                        // Camera-only velocity (adaptive blend) reprojects
+                        // world position from the position G-buffer (RT2).
+                        .with_texture(7, gbuffer[2].clone()),
                 )
                 .ok()?;
             Some(Arc::new(

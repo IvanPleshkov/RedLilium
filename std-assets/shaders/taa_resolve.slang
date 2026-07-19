@@ -75,11 +75,30 @@ Texture2D gbuffer_albedo;
 SamplerState nearest_sampler;
 [[vk::binding(6, 0)]]
 SamplerState linear_sampler;
+// World position (G-buffer RT2, xyz). Reprojected through the camera pair to
+// recover the *camera-only* screen motion at each pixel (below), independent
+// of any object's own motion.
+[[vk::binding(7, 0)]]
+Texture2D gbuffer_position;
 
 // History-rejection box width in standard deviations: the
 // ghosting-vs-flicker knob (narrow clips history aggressively and flickers
 // on thin detail; wide lets trails through).
 static const float VARIANCE_GAMMA = 1.0;
+
+// Velocity-adaptive blend (camera-only). The trail length in a moving shot is
+// set by how much of the current frame the mix keeps: `params.x` (a long,
+// stable memory) when the camera is still, ramping to `TAA_MAX_BLEND` (a
+// short memory that converges in ~1/value frames) as the camera-induced
+// screen motion grows. Driving this from the *camera* component — not the
+// per-object velocity — keeps a screen-static object (e.g. a chase-cam
+// subject) on the stable long memory while the environment it scrolls past
+// converges fast, so the environment streak shrinks without adding noise to
+// the subject.
+static const float TAA_MAX_BLEND = 0.5;
+// Pixels/frame of camera-induced motion at which the blend reaches
+// TAA_MAX_BLEND (reciprocal ramp width).
+static const float TAA_SPEED_SCALE = 1.0 / 20.0;
 
 float3 rgb_to_ycocg(float3 c) {
     return float3(
@@ -117,7 +136,10 @@ float4 fs_main(VsOutput input) : SV_Target {
 
     // Reprojected history coordinate: geometry pixels carry their own NDC
     // motion; background reprojects the view ray through the camera pair.
+    // `cam_uv` is the same pixel reprojected using *only* the camera motion
+    // (object-independent) — its screen delta drives the adaptive blend.
     float2 prev_uv;
+    float2 cam_uv;
     bool background = gbuffer_albedo.Sample(nearest_sampler, input.uv).a < 1.0 / 128.0;
     if (background) {
         float2 ndc = (input.uv - 0.5) * float2(2.0, -2.0);
@@ -127,10 +149,27 @@ float4 fs_main(VsOutput input) : SV_Target {
         float4 prev_clip = mul(prev_view_proj, far_world);
         float2 prev_ndc = prev_clip.xy / max(prev_clip.w, 1e-6);
         prev_uv = prev_ndc * float2(0.5, -0.5) + 0.5;
+        // Background carries no object motion, so its reprojection *is* the
+        // camera-only motion.
+        cam_uv = prev_uv;
     } else {
         float2 velocity = gbuffer_velocity.Sample(nearest_sampler, input.uv).xy;
         prev_uv = input.uv - velocity * float2(0.5, -0.5);
+        // Camera-only reprojection: send this pixel's world position through
+        // the previous camera. Unlike `velocity` (which folds in the object's
+        // own movement) this depends solely on the camera, so a moving object
+        // does not inflate the blend by itself.
+        float3 world_pos = gbuffer_position.Sample(nearest_sampler, input.uv).xyz;
+        float4 cam_clip = mul(prev_view_proj, float4(world_pos, 1.0));
+        float2 cam_ndc = cam_clip.xy / max(cam_clip.w, 1e-6);
+        cam_uv = cam_ndc * float2(0.5, -0.5) + 0.5;
     }
+
+    // Camera-induced screen motion in pixels/frame → adaptive current-frame
+    // weight. Still camera → params.x (long, stable memory); fast pan →
+    // TAA_MAX_BLEND (short memory), shrinking the environment streak.
+    float cam_speed = length((input.uv - cam_uv) / texel);
+    float blend = lerp(params.x, TAA_MAX_BLEND, saturate(cam_speed * TAA_SPEED_SCALE));
 
     // Neighborhood statistics in YCoCg for the variance-clipping box.
     float3 mean = float3(0.0);
@@ -172,6 +211,6 @@ float4 fs_main(VsOutput input) : SV_Target {
     float3 clipped = ycocg_to_rgb(
         clip_to_aabb(aabb_min, aabb_max, rgb_to_ycocg(history_color)));
 
-    float3 result = lerp(clipped, current, params.x);
+    float3 result = lerp(clipped, current, blend);
     return float4(result, 1.0);
 }

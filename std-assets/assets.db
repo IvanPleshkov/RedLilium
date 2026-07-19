@@ -177,7 +177,7 @@
             guid: ("6b40bc10-a24a-5adf-8933-64260a3a1147"),
             path: "shaders/taa_resolve.slang",
             kind: "shader",
-            source_hash: 464431778176854303,
+            source_hash: 14549522497664184505,
             settings: None,
             references: {},
         ),
