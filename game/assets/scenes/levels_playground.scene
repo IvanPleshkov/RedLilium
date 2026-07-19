@@ -280,6 +280,13 @@
                     ]),
                 ),
                 (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(1.4600067)),
+                    ]),
+                ),
+                (
                     type_name: "EdgeAnchor",
                     schema_version: 1,
                     data: Map([
@@ -290,13 +297,6 @@
                         ("right_edge", Bool(true)),
                         ("u_min", F32(0.35)),
                         ("u_max", F32(0.65)),
-                    ]),
-                ),
-                (
-                    type_name: "RoadNode",
-                    schema_version: 1,
-                    data: Map([
-                        ("half_width", F32(1.4600067)),
                     ]),
                 ),
             ],
@@ -793,34 +793,355 @@
                 ),
             ],
         ),
+        (
+            entity_index: 24,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(-1.4479247),
+                            F32(0.0),
+                            F32(8.718227),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.80329114),
+                            F32(0.0),
+                            F32(0.59558654),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "EdgeAnchor",
+                    schema_version: 1,
+                    data: Map([
+                        ("parent_road", Entity(
+                            index: 5,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(false)),
+                        ("u_min", F32(0.55)),
+                        ("u_max", F32(0.85)),
+                    ]),
+                ),
+                (
+                    type_name: "Building",
+                    schema_version: 1,
+                    data: Map([
+                        ("floors", U64(2)),
+                        ("floor_height", F32(3.0)),
+                        ("inset", F32(1.0)),
+                        ("seed", U64(0)),
+                        ("exits", List([
+                            Map([
+                                ("offset", F32(0.0)),
+                                ("half_width", F32(1.5)),
+                            ]),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Children",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", List([
+                            Entity(
+                                index: 25,
+                                spawn_tick: 0,
+                            ),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Lot",
+                    schema_version: 1,
+                    data: Map([
+                        ("frontage", F32(1.9196779)),
+                        ("depth", F32(8.0)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 25,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "BuildingExit",
+                    schema_version: 1,
+                    data: Map([]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(1.5)),
+                    ]),
+                ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 24,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 26,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(48.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Building",
+                    schema_version: 1,
+                    data: Map([
+                        ("floors", U64(2)),
+                        ("floor_height", F32(3.0)),
+                        ("inset", F32(1.0)),
+                        ("seed", U64(0)),
+                        ("exits", List([
+                            Map([
+                                ("offset", F32(0.0)),
+                                ("half_width", F32(1.5)),
+                            ]),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Children",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", List([
+                            Entity(
+                                index: 27,
+                                spawn_tick: 0,
+                            ),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Lot",
+                    schema_version: 1,
+                    data: Map([
+                        ("frontage", F32(4.0)),
+                        ("depth", F32(8.0)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 27,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "BuildingExit",
+                    schema_version: 1,
+                    data: Map([]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(1.5)),
+                    ]),
+                ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 28,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(48.0),
+                            F32(0.0),
+                            F32(6.999999),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(1.0),
+                            F32(0.0),
+                            F32(-0.00000004371139),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(1.199997)),
+                    ]),
+                ),
+                (
+                    type_name: "EdgeAnchor",
+                    schema_version: 1,
+                    data: Map([
+                        ("parent_road", Entity(
+                            index: 19,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(true)),
+                        ("u_min", F32(0.4)),
+                        ("u_max", F32(0.6)),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 29,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RoadSegment",
+                    schema_version: 1,
+                    data: Map([
+                        ("a", Entity(
+                            index: 27,
+                            spawn_tick: 0,
+                        )),
+                        ("b", Entity(
+                            index: 28,
+                            spawn_tick: 0,
+                        )),
+                        ("tangent_a", F32(0.0)),
+                        ("tangent_b", F32(0.0)),
+                        ("b_from_front", Bool(true)),
+                    ]),
+                ),
+            ],
+        ),
     ],
     resources: [],
     metadata: (
         engine_fingerprint: "",
-        timestamp: 1784421245,
+        timestamp: 1784460546,
         component_schemas: {
-            "FollowCamera": "21d1db18d14cff54",
-            "Visibility": "c1bac1b299fc1b84",
-            "Parent": "a91799e57333f547",
-            "RenderPath": "a423c0d36d1e6289",
-            "Children": "2bb9642f7f8700bb",
-            "CarSpawn": "c680d604bee70f02",
-            "Camera": "ad5fbce407082262",
-            "Name": "e8b72b8ee639d17d",
-            "Junction": "e7bd6fa35d204f69",
-            "CameraOutput": "ac6c44bbf8aba2c0",
-            "RoadNode": "baff4354f0b378f3",
-            "CarController": "fc41e6ec35f9fc4f",
-            "PointLight": "c2de590ad3761220",
-            "Collider3D": "a39247f1249750e7",
-            "Transform": "8438ab3d4ed5ea92",
-            "EdgeAnchor": "8bd5bd105a1910c6",
-            "EditorOnly": "c680d604bee70f02",
-            "FreeFlyCamera": "5f11e33f3f164d87",
             "DirectionalLight": "12b906e5389ce958",
-            "SpotLight": "00945c87ce2de8db",
+            "EdgeAnchor": "8bd5bd105a1910c6",
+            "FreeFlyCamera": "5f11e33f3f164d87",
+            "Visibility": "c1bac1b299fc1b84",
+            "CarController": "fc41e6ec35f9fc4f",
             "RoadSegment": "0b419cbd0c745715",
+            "Lot": "cd6a6055657f99eb",
+            "Transform": "8438ab3d4ed5ea92",
             "RigidBody3D": "4c303fe7f34110a5",
+            "FollowCamera": "21d1db18d14cff54",
+            "RenderPath": "a423c0d36d1e6289",
+            "CarSpawn": "c680d604bee70f02",
+            "EditorOnly": "c680d604bee70f02",
+            "BuildingExit": "c680d604bee70f02",
+            "RoadNode": "baff4354f0b378f3",
+            "Name": "e8b72b8ee639d17d",
+            "Children": "2bb9642f7f8700bb",
+            "Camera": "ad5fbce407082262",
+            "CameraOutput": "ac6c44bbf8aba2c0",
+            "Collider3D": "a39247f1249750e7",
+            "Building": "c69beaac0f48d999",
+            "Parent": "a91799e57333f547",
+            "PointLight": "c2de590ad3761220",
+            "SpotLight": "00945c87ce2de8db",
+            "Junction": "e7bd6fa35d204f69",
         },
     ),
 )

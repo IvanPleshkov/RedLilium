@@ -136,6 +136,16 @@ fn project_onto_edge(
     (c - half, c + half)
 }
 
+/// Turn a derived placement around: same position, yaw rotated 180° — the
+/// facing of an anchored lot relative to an anchored node.
+pub(crate) fn flip_facing(t: &Transform) -> Transform {
+    Transform::new(
+        t.translation,
+        t.rotation * quat_from_rotation_y(std::f32::consts::PI),
+        t.scale,
+    )
+}
+
 /// One planned write: derived placement, plus the shifted interval when the
 /// node is *sliding* (its transform was authored away from the derived one).
 type AnchorUpdate = (Entity, Transform, f32, Option<(f32, f32)>);
@@ -159,9 +169,18 @@ pub(crate) fn anchor_updates(
         let Some(entity) = world.entity_at_index(index) else {
             continue;
         };
-        let Some((derived_t, derived_hw)) = derive_anchor_state(world, anchor) else {
+        let Some((mut derived_t, derived_hw)) = derive_anchor_state(world, anchor) else {
             continue;
         };
+        // An anchored *lot* faces the opposite way from an anchored road
+        // node: its +Z points INTO the parent road (the frontage fronts the
+        // network, the parcel extends outward behind it), where a node's +Z
+        // points away (its network is the driveway growing outward).
+        let lot_facing = world.get::<RoadNode>(entity).is_none()
+            && world.get::<crate::lot::Lot>(entity).is_some();
+        if lot_facing {
+            derived_t = flip_facing(&derived_t);
+        }
         let Some(t) = world.get::<Transform>(entity) else {
             updates.push((entity, derived_t, derived_hw, None));
             continue;
@@ -204,6 +223,11 @@ pub(crate) fn anchor_updates(
                     ..anchor.clone()
                 };
                 let (slid_t, slid_hw) = derive_anchor_state(world, &slid)?;
+                let slid_t = if lot_facing {
+                    flip_facing(&slid_t)
+                } else {
+                    slid_t
+                };
                 Some((entity, slid_t, slid_hw, Some((new_min, new_max))))
             })();
             if let Some(update) = slid {

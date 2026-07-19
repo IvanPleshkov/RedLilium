@@ -112,9 +112,14 @@ impl AddLotAction {
 impl EditAction<World> for AddLotAction {
     fn apply(&mut self, world: &mut World) -> EditActionResult {
         let (transform, frontage) = match &self.anchor {
-            Some(anchor) => anchor::derive_anchor_state(world, anchor).ok_or_else(|| {
-                EditActionError::TargetNotFound("lot parent road missing or degenerate".into())
-            })?,
+            Some(anchor) => {
+                let (t, hw) = anchor::derive_anchor_state(world, anchor).ok_or_else(|| {
+                    EditActionError::TargetNotFound("lot parent road missing or degenerate".into())
+                })?;
+                // Lots face the opposite way from anchored nodes: +Z into
+                // the parent road, parcel extending outward behind.
+                (anchor::flip_facing(&t), hw)
+            }
             None => (self.transform, Lot::default().frontage),
         };
         let lot = world.spawn();
@@ -222,10 +227,11 @@ mod tests {
         crate::settle_edge_anchors(&mut world);
         let t = *world.get::<Transform>(lot).unwrap();
         // Right edge of a straight +Z road sits at x = +3; interval midpoint
-        // z = 10; +Z faces outward (+X), so the parcel extends toward −X.
+        // z = 10. The lot FACES the road: +Z points into it (−X), so the
+        // parcel extends outward (+X), never overlapping the surface.
         assert!((t.translation - Vec3::new(3.0, 0.0, 10.0)).norm() < 1e-3);
         let heading = bezier::heading(&t.to_matrix());
-        assert!((heading - Vec3::new(1.0, 0.0, 0.0)).norm() < 1e-3);
+        assert!((heading - Vec3::new(-1.0, 0.0, 0.0)).norm() < 1e-3);
         // Frontage derived from the chord: a fifth of a 20 m edge → half 2.
         let frontage = world.get::<Lot>(lot).unwrap().frontage;
         assert!((frontage - 2.0).abs() < 1e-2);

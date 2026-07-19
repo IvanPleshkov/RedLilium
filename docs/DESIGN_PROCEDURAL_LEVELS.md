@@ -119,8 +119,11 @@ the entities mean.
   the road network, the parcel occupies −Z**). Two states, one component:
   *edge-anchored* (the entity also carries an `EdgeAnchor` — transform and
   frontage derive from the interval chord, sharing all the anchored-node
-  machinery: sliding, following, undo) and *free* (transform authored by
-  hand). A building placed on a lot is a separate concern; the lot only
+  machinery: sliding, following, undo — but **facing flipped 180°** vs an
+  anchored node: the lot's +Z points *into* the parent road it fronts, the
+  parcel extends outward, an anchored node's +Z points away because its
+  network is the driveway growing outward) and *free* (transform authored
+  by hand). A building placed on a lot is a separate concern; the lot only
   reserves and orients the parcel.
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a

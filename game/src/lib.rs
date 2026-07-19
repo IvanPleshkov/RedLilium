@@ -690,7 +690,7 @@ pub fn spawn_levels_playground(world: &mut World) {
     let exit_north = node(world, 34.0, 30.0, 0.0);
     let exit_east = node(world, 54.0, 10.0, std::f32::consts::FRAC_PI_2);
     road(world, cross[0], exit_north);
-    road(world, cross[1], exit_east);
+    let east_road = road(world, cross[1], exit_east);
 
     // A 3-way (Y) junction: the same model at N = 3, no exits.
     let y_center = Vec3::new(-16.0, 0.0, 22.0);
@@ -708,6 +708,84 @@ pub fn spawn_levels_playground(world: &mut World) {
             },
         )
         .unwrap();
+
+    // Lots & buildings (architecture chapter). Two states of the same
+    // primitive: a lot glued to the first road's left edge (transform and
+    // frontage derive from the edge chord; it faces the road, the parcel
+    // extends outward), and a free-standing lot whose building exit drives
+    // into the cross's east road through an ordinary driveway.
+    {
+        use redlilium_core::abstract_editor::EditAction;
+        use redlilium_levels::{Building, EdgeAnchor, Lot, PlaceBuildingAction};
+
+        let anchored_lot = world.spawn();
+        let t = Transform::default();
+        world.insert(anchored_lot, t).unwrap();
+        world
+            .insert(anchored_lot, GlobalTransform(t.to_matrix()))
+            .unwrap();
+        world.insert(anchored_lot, Lot::default()).unwrap();
+        world
+            .insert(
+                anchored_lot,
+                EdgeAnchor {
+                    parent_road: r1,
+                    right_edge: false,
+                    u_min: 0.55,
+                    u_max: 0.85,
+                },
+            )
+            .unwrap();
+        // Settle before placing the building so the materialized exit
+        // inherits the on-edge transform.
+        redlilium_levels::settle_edge_anchors(world);
+        PlaceBuildingAction::new(anchored_lot, Building::default())
+            .apply(world)
+            .unwrap();
+
+        let free_lot = world.spawn();
+        let t = Transform::new(
+            Vec3::new(48.0, 0.0, 0.0),
+            redlilium_core::math::quat_from_rotation_y(0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(free_lot, t).unwrap();
+        world
+            .insert(free_lot, GlobalTransform(t.to_matrix()))
+            .unwrap();
+        world.insert(free_lot, Lot::default()).unwrap();
+        PlaceBuildingAction::new(free_lot, Building::default())
+            .apply(world)
+            .unwrap();
+        let exit_socket = world.get::<redlilium_ecs::Children>(free_lot).unwrap().0[0];
+
+        // Driveway: departs the exit socket along its +Z (toward the east
+        // road) and lands on a node glued to that road's south edge.
+        let landing = node(world, 0.0, 0.0, 0.0);
+        world
+            .insert(
+                landing,
+                EdgeAnchor {
+                    parent_road: east_road,
+                    right_edge: true,
+                    u_min: 0.4,
+                    u_max: 0.6,
+                },
+            )
+            .unwrap();
+        let driveway = world.spawn();
+        world
+            .insert(
+                driveway,
+                RoadSegment {
+                    a: exit_socket,
+                    b: landing,
+                    b_from_front: true,
+                    ..RoadSegment::default()
+                },
+            )
+            .unwrap();
+    }
 
     // Bake the edge-anchored nodes' derived transforms so the scene ships
     // settled — the editor's derive system then has nothing to rewrite.
