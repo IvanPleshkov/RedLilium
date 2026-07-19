@@ -146,7 +146,12 @@ the entities mean.
   its own yard.
   **Parcel-as-prefab is the point**: content lives in the parcel's local
   space as its subtree, so "parcel with a villa" or "parcel with a whole
-  factory" is one reusable prefab.
+  factory" is one reusable prefab. Concretely today: *Duplicate parcel*
+  clones the subtree through the generic `extract_prefab`/`instantiate`
+  machinery with every internal reference (boundary lists, hierarchy,
+  internal-road endpoints) remapped; the copy drops its edge anchor and
+  starts free. Prefab *assets* (a villa recipe on disk) ride the existing
+  prefab-serialization machinery in a later chapter.
   A parcel may carry an optional single `EdgeAnchor` gluing it to a road
   edge with **inverted derivation**: the rigid prefab dictates its
   frontage length (the local distance between its first two boundary

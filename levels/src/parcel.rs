@@ -409,6 +409,83 @@ impl EditAction<World> for AddGateAction {
     }
 }
 
+/// Undoable "duplicate a parcel at a point": extracts the parcel's subtree
+/// as a [`Prefab`](redlilium_ecs::Prefab) — boundary vertices, gates,
+/// buildings, internal roads, everything — and instantiates the copy with
+/// its root at `point`. This is the parcel-as-prefab payoff: "one villa
+/// recipe, ten placements" without an asset file yet.
+#[derive(Debug)]
+pub struct DuplicateParcelAction {
+    source: Entity,
+    point: Vec3,
+    created: Vec<Entity>,
+}
+
+impl DuplicateParcelAction {
+    pub fn new(source: Entity, point: Vec3) -> Self {
+        Self {
+            source,
+            point,
+            created: Vec::new(),
+        }
+    }
+}
+
+impl EditAction<World> for DuplicateParcelAction {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        if world.get::<Parcel>(self.source).is_none() {
+            return Err(EditActionError::TargetNotFound(
+                "duplicate source is not a parcel".into(),
+            ));
+        }
+        let prefab = world.extract_prefab(self.source);
+        if prefab.is_empty() {
+            return Err(EditActionError::TargetNotFound(
+                "parcel subtree extraction came back empty".into(),
+            ));
+        }
+        self.created = prefab.instantiate(world);
+        let root = self.created[0];
+
+        // Place the copy: keep the source's rotation, move to the click
+        // point. A copied edge anchor would fight the authored placement —
+        // the duplicate starts free (re-glue it explicitly if wanted).
+        let _ = world.remove::<crate::anchor::EdgeAnchor>(root);
+        let rotation = world
+            .get::<Transform>(root)
+            .map(|t| t.rotation)
+            .unwrap_or_else(|| quat_from_rotation_y(0.0));
+        let t = Transform::new(self.point, rotation, Vec3::new(1.0, 1.0, 1.0));
+        let _ = world.insert(root, t);
+        // Refresh world matrices down the copied subtree (extraction is
+        // BFS, so parents precede children in `created`).
+        let _ = world.insert(root, GlobalTransform(t.to_matrix()));
+        let members: std::collections::HashSet<Entity> = self.created.iter().copied().collect();
+        for &e in self.created.iter().skip(1) {
+            let parent_m = world
+                .get::<redlilium_ecs::Parent>(e)
+                .filter(|p| members.contains(&p.0))
+                .and_then(|p| world.get::<GlobalTransform>(p.0).map(|gt| gt.0));
+            if let (Some(parent_m), Some(local)) = (parent_m, world.get::<Transform>(e).copied()) {
+                let _ = world.insert(e, GlobalTransform(parent_m * local.to_matrix()));
+            }
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        for e in self.created.drain(..).rev() {
+            remove_parent(world, e);
+            world.despawn(e);
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "Duplicate parcel"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,6 +868,151 @@ mod tests {
 
         action.undo(&mut world).unwrap();
         assert!(!world.is_alive(gate));
+    }
+
+    #[test]
+    fn parcel_prefab_duplicates_with_all_content_remapped() {
+        let mut world = world();
+        world.register_inspector_default::<crate::RoadNode>();
+        world.register_inspector_default::<crate::RoadSegment>();
+        world.register_inspector_default::<crate::building::Building>();
+
+        // Parcel with a gate, a building, and an internal road from an
+        // inner node to the gate (meeting it from behind).
+        AddParcelAction::at_point(Vec3::new(0.0, 0.0, 0.0))
+            .apply(&mut world)
+            .unwrap();
+        let (parcel, _) = spawned_parcel(&world);
+        let gate_local = Transform::new(
+            Vec3::zeros(),
+            quat_from_rotation_y(0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        let mut add_gate = AddGateAction::new(parcel, gate_local);
+        add_gate.apply(&mut world).unwrap();
+        let gate = world
+            .read_all::<ParcelGate>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, _)| world.entity_at_index(index))
+            .next()
+            .unwrap();
+        crate::building::PlaceBuildingAction::new(
+            parcel,
+            Transform::new(
+                Vec3::new(0.0, 0.0, -5.0),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ),
+            crate::building::Building::default(),
+        )
+        .apply(&mut world)
+        .unwrap();
+        let inner = world.spawn();
+        let inner_t = Transform::new(
+            Vec3::new(0.0, 0.0, -6.0),
+            quat_from_rotation_y(0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(inner, inner_t).unwrap();
+        world
+            .insert(inner, GlobalTransform(inner_t.to_matrix()))
+            .unwrap();
+        world.insert(inner, crate::RoadNode::default()).unwrap();
+        set_parent(&mut world, inner, parcel);
+        let internal_road = world.spawn();
+        world
+            .insert(
+                internal_road,
+                crate::RoadSegment {
+                    a: inner,
+                    b: gate,
+                    ..crate::RoadSegment::default()
+                },
+            )
+            .unwrap();
+        set_parent(&mut world, internal_road, parcel);
+
+        // Duplicate the whole thing 30 m to the east.
+        let mut dup = DuplicateParcelAction::new(parcel, Vec3::new(30.0, 0.0, 0.0));
+        dup.apply(&mut world).unwrap();
+
+        let parcels: Vec<(Entity, Parcel)> = world
+            .read_all::<Parcel>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, p)| Some((world.entity_at_index(index)?, p.clone())))
+            .collect();
+        assert_eq!(parcels.len(), 2);
+        let (copy, copy_parcel) = parcels
+            .iter()
+            .find(|(e, _)| *e != parcel)
+            .expect("the duplicate");
+
+        // Boundary references remapped: the copy points at its own fresh
+        // vertices, none shared with the source.
+        let source_boundary: std::collections::HashSet<Entity> = parcels
+            .iter()
+            .find(|(e, _)| *e == parcel)
+            .unwrap()
+            .1
+            .boundary
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(copy_parcel.boundary.len(), 4);
+        for v in &copy_parcel.boundary {
+            assert!(!source_boundary.contains(v), "vertex remapped, not shared");
+            assert_eq!(world.get::<redlilium_ecs::Parent>(*v).unwrap().0, *copy);
+        }
+        // The copied loop is the source loop shifted by (+30, 0, 0).
+        let src_loop = parcel_loop(&world, &parcels[0].1).unwrap();
+        let copy_loop = parcel_loop(&world, copy_parcel).unwrap();
+        assert_eq!(src_loop.len(), copy_loop.len());
+        for (a, b) in src_loop.iter().zip(&copy_loop) {
+            assert!((*a + Vec3::new(30.0, 0.0, 0.0) - *b).norm() < 1e-3);
+        }
+        // The copied internal road references the COPY's inner node and
+        // gate — entity refs inside the subtree remapped.
+        let roads: Vec<crate::RoadSegment> = world
+            .read_all::<crate::RoadSegment>()
+            .unwrap()
+            .iter()
+            .map(|(_, s)| s.clone())
+            .collect();
+        assert_eq!(roads.len(), 2);
+        let copy_road = roads
+            .iter()
+            .find(|s| s.a != inner)
+            .expect("copied internal road");
+        assert_ne!(copy_road.b, gate, "gate reference remapped");
+        assert_eq!(
+            world.get::<redlilium_ecs::Parent>(copy_road.b).unwrap().0,
+            *copy,
+            "the copied road ends at the copy's own gate"
+        );
+        // Two buildings, two gates total.
+        assert_eq!(
+            world
+                .read_all::<crate::building::Building>()
+                .unwrap()
+                .iter()
+                .count(),
+            2
+        );
+
+        // Undo removes the whole copied subtree; the source is intact.
+        dup.undo(&mut world).unwrap();
+        assert_eq!(world.read_all::<Parcel>().unwrap().iter().count(), 1);
+        assert!(world.is_alive(parcel) && world.is_alive(gate) && world.is_alive(inner));
+        assert_eq!(
+            world
+                .read_all::<crate::RoadSegment>()
+                .unwrap()
+                .iter()
+                .count(),
+            1
+        );
     }
 
     #[test]

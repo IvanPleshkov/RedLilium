@@ -24,7 +24,10 @@ pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_an
 pub use building::{Building, PlaceBuildingAction};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
-pub use parcel::{AddGateAction, AddParcelAction, Parcel, ParcelGate, ParcelVertex, parcel_loop};
+pub use parcel::{
+    AddGateAction, AddParcelAction, DuplicateParcelAction, Parcel, ParcelGate, ParcelVertex,
+    parcel_loop,
+};
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
 use redlilium_ecs::{Component, Entity, PostUpdate, Update, UpdateGlobalTransforms, World};
@@ -206,6 +209,30 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                             .push(Box::new(parcel::AddGateAction::new(entity, local)));
                         break;
                     }
+                }
+            },
+        );
+        // "Duplicate parcel": the prefab payoff — clone the selected
+        // parcel's whole subtree (boundary, gates, buildings, internal
+        // roads) at the ground click point. The copy starts free-standing.
+        view.ops.add(
+            "Duplicate parcel",
+            |ctx| {
+                ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some()
+                    && ctx
+                        .selection
+                        .iter()
+                        .any(|&e| ctx.world.get::<Parcel>(e).is_some())
+            },
+            |ctx| {
+                if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit)
+                    && let Some(&source) = ctx
+                        .selection
+                        .iter()
+                        .find(|&&e| ctx.world.get::<Parcel>(e).is_some())
+                {
+                    ctx.actions
+                        .push(Box::new(DuplicateParcelAction::new(source, point)));
                 }
             },
         );
