@@ -377,16 +377,19 @@ pub(crate) fn selection_pick(
             let Some(lp) = crate::parcel::parcel_loop(world, parcel) else {
                 continue;
             };
-            // The parcel picks by its boundary polyline; the vertex handle
-            // cubes pick the vertex entities themselves (they win by being
-            // strictly closer to the ray than the segments through them).
+            // The parcel picks by its (tessellated) boundary polyline; the
+            // vertex handle cubes pick the vertex entities themselves (they
+            // win by being strictly closer to the ray than the segments
+            // through them).
             for i in 0..lp.len() {
                 let (dist, _, t) = ray_segment_closest(ray, lp[i], lp[(i + 1) % lp.len()]);
                 consider(dist, PICK_RADIUS, t, entity);
             }
-            for (&vertex, p) in parcel.boundary.iter().zip(&lp) {
-                let (dist, _, t) = ray_segment_closest(ray, *p, *p);
-                consider(dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
+            if let Some(corners) = crate::parcel::parcel_corners(world, parcel) {
+                for (vertex, p, _, _) in corners {
+                    let (dist, _, t) = ray_segment_closest(ray, p, p);
+                    consider(dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
+                }
             }
         }
     }

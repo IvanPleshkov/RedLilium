@@ -749,7 +749,7 @@ pub fn spawn_levels_playground(world: &mut World) {
                             Vec3::new(1.0, 1.0, 1.0),
                         ),
                     );
-                    world.insert(v, ParcelVertex).unwrap();
+                    world.insert(v, ParcelVertex::default()).unwrap();
                     v
                 })
                 .collect();
@@ -801,6 +801,29 @@ pub fn spawn_levels_playground(world: &mut World) {
                 [-7.0, 0.0, -5.0],
             ],
         );
+        // Curved boundary showcase: the NE corner rounds with mirrored
+        // (C1) handles; the SW vertex curves one-sidedly — a corner joint.
+        {
+            let boundary = world.get::<Parcel>(a).unwrap().boundary.clone();
+            world
+                .insert(
+                    boundary[2],
+                    ParcelVertex {
+                        handle_in: Vec3::new(-0.5, 0.0, 1.8),
+                        handle_out: Vec3::new(0.5, 0.0, -1.8),
+                    },
+                )
+                .unwrap();
+            world
+                .insert(
+                    boundary[4],
+                    ParcelVertex {
+                        handle_in: Vec3::new(2.0, 0.0, -2.0),
+                        handle_out: Vec3::zeros(),
+                    },
+                )
+                .unwrap();
+        }
         building_at(world, a, -2.0, -4.5, Building::default());
         building_at(
             world,

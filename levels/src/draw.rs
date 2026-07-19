@@ -79,10 +79,19 @@ impl System for DrawLevelGraph {
                     for i in 0..lp.len() {
                         draw.draw_line(pt(&lp[i]), pt(&lp[(i + 1) % lp.len()]), PARCEL_COLOR);
                     }
-                    // Vertex handles: the clickable proxies for the boundary
-                    // vertex entities (drag them to reshape the parcel).
-                    for p in &lp {
-                        draw_handle_cube(&mut draw, *p, HANDLE_HALF, PARCEL_COLOR);
+                    // Vertex handles: clickable proxies for the boundary
+                    // vertex entities (drag to reshape), plus antennae for
+                    // nonzero curve handles (the pen model made visible).
+                    let Some(corners) = crate::parcel::parcel_corners(world, parcel) else {
+                        continue;
+                    };
+                    for (_, p, h_out, h_in) in corners {
+                        draw_handle_cube(&mut draw, p, HANDLE_HALF, PARCEL_COLOR);
+                        for h in [h_out, h_in] {
+                            if (h - p).norm() > 1e-3 {
+                                draw.draw_line(pt(&p), pt(&h), GRID_COLOR);
+                            }
+                        }
                     }
                 }
             }

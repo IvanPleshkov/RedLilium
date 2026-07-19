@@ -10,9 +10,14 @@
 //!
 //! - **Boundary**: ordered child [`ParcelVertex`] entities referenced by
 //!   [`Parcel::boundary`]. Order is explicit — boundaries may be concave,
-//!   so no re-derivation by angle (unlike junction loops). Segments are
-//!   straight for now; curved segments with optional C1 joints are the
-//!   next slice.
+//!   so no re-derivation by angle (unlike junction loops). Each segment is
+//!   a cubic Bézier steered by the **pen model**: every vertex carries two
+//!   local handle vectors (`handle_out` toward the next vertex,
+//!   `handle_in` toward the previous). Both adjacent handles zero → a
+//!   straight segment; mirrored collinear handles → a **C1** joint;
+//!   arbitrary handles → curves meeting at a corner. Handles live in the
+//!   vertex's local space, so rotating a vertex with the gizmo steers its
+//!   curve.
 //! - **Gates** ([`ParcelGate`]): parcel-owned connection sockets on the
 //!   boundary — child `RoadNode`s, +Z facing outward. Two-sided: a network
 //!   road arrives at a gate from the front (`b_from_front`), the parcel's
@@ -38,11 +43,22 @@ pub struct Parcel {
     pub boundary: Vec<Entity>,
 }
 
-/// Marker on a boundary-vertex entity (a child of the parcel; its local
-/// translation is the vertex position, heights included — parcels are not
-/// flat in general).
+/// A boundary vertex (a child of the parcel; its local translation is the
+/// vertex position, heights included — parcels are not flat in general).
+///
+/// The handles make the adjacent segments curve (pen model): the segment
+/// leaving this vertex uses `handle_out` as its first Bézier control
+/// offset, the segment arriving uses `handle_in` as its last. Zero handle
+/// = straight approach on that side. Handles are **vertex-local** vectors:
+/// rotating the vertex rotates its curve. C1 is authored by mirroring
+/// (`handle_out = -handle_in`); anything else is a corner.
 #[derive(Debug, Clone, Default, Component)]
-pub struct ParcelVertex;
+pub struct ParcelVertex {
+    /// Bézier control offset of the departing segment, vertex-local.
+    pub handle_out: Vec3,
+    /// Bézier control offset of the arriving segment, vertex-local.
+    pub handle_in: Vec3,
+}
 
 /// Marker on a parcel-owned connection socket: a child `RoadNode` sitting
 /// on the boundary, +Z outward. Network roads meet it from the front,
@@ -50,19 +66,71 @@ pub struct ParcelVertex;
 #[derive(Debug, Clone, Default, Component)]
 pub struct ParcelGate;
 
-/// The parcel's boundary polyline in world space (live vertices, perimeter
-/// order). `None` with fewer than 3 live vertices.
-pub fn parcel_loop(world: &World, parcel: &Parcel) -> Option<Vec<Vec3>> {
-    let points: Vec<Vec3> = parcel
+/// Tessellation of one curved boundary segment.
+const CURVE_STEPS: usize = 12;
+
+/// Handles below this length (meters) count as absent — the approach on
+/// that side is straight.
+const HANDLE_EPS: f32 = 1e-3;
+
+/// The live boundary corners in world space: `(vertex entity, position,
+/// world handle_out, world handle_in)`, perimeter order. `None` with fewer
+/// than 3 live vertices.
+pub(crate) fn parcel_corners(
+    world: &World,
+    parcel: &Parcel,
+) -> Option<Vec<(Entity, Vec3, Vec3, Vec3)>> {
+    let corners: Vec<(Entity, Vec3, Vec3, Vec3)> = parcel
         .boundary
         .iter()
         .filter_map(|&v| {
-            world.get::<ParcelVertex>(v)?;
+            let vertex = world.get::<ParcelVertex>(v)?;
             let gt = world.get::<GlobalTransform>(v)?;
-            Some(Vec3::new(gt.0[(0, 3)], gt.0[(1, 3)], gt.0[(2, 3)]))
+            let point = |local: Vec3| {
+                let p = gt.0 * redlilium_core::math::Vec4::new(local.x, local.y, local.z, 1.0);
+                Vec3::new(p.x, p.y, p.z)
+            };
+            Some((
+                v,
+                point(Vec3::zeros()),
+                point(vertex.handle_out),
+                point(vertex.handle_in),
+            ))
         })
         .collect();
-    (points.len() >= 3).then_some(points)
+    (corners.len() >= 3).then_some(corners)
+}
+
+/// The parcel's boundary in world space, tessellated: straight segments
+/// contribute their start vertex, curved segments a cubic-Bézier fan of
+/// [`CURVE_STEPS`] samples. Closed — the last point connects back to the
+/// first. `None` with fewer than 3 live vertices.
+pub fn parcel_loop(world: &World, parcel: &Parcel) -> Option<Vec<Vec3>> {
+    let corners = parcel_corners(world, parcel)?;
+    let n = corners.len();
+    let mut points = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let (_, p0, h_out, _) = corners[i];
+        let (_, p3, _, h_in) = corners[(i + 1) % n];
+        points.push(p0);
+        let straight = (h_out - p0).norm() < HANDLE_EPS && (h_in - p3).norm() < HANDLE_EPS;
+        if straight {
+            continue;
+        }
+        // Cubic p0 → h_out → h_in → p3; interior samples only (endpoints
+        // are the vertices themselves).
+        for step in 1..CURVE_STEPS {
+            let t = step as f32 / CURVE_STEPS as f32;
+            let s = 1.0 - t;
+            points.push(
+                p0 * (s * s * s)
+                    + h_out * (3.0 * t * s * s)
+                    + h_in * (3.0 * t * t * s)
+                    + p3 * (t * t * t),
+            );
+        }
+    }
+    Some(points)
 }
 
 /// Default boundary for a freshly stamped parcel: an 8×8 rectangle in
@@ -126,7 +194,7 @@ impl EditAction<World> for AddParcelAction {
                         GlobalTransform(self.transform.to_matrix() * local.to_matrix()),
                     )
                 })
-                .and_then(|_| world.insert(vertex, ParcelVertex));
+                .and_then(|_| world.insert(vertex, ParcelVertex::default()));
             if let Err(e) = inserted {
                 undo_partial(world, &mut self.created);
                 return Err(EditActionError::Custom(e.to_string()));
@@ -226,6 +294,119 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn handles_curve_segments_straight_by_default() {
+        let mut world = world();
+        let mut action = AddParcelAction::at_point(Vec3::zeros());
+        action.apply(&mut world).unwrap();
+        let component: Parcel = world
+            .read_all::<Parcel>()
+            .unwrap()
+            .iter()
+            .map(|(_, p)| p.clone())
+            .next()
+            .unwrap();
+
+        // All handles zero → pure polyline: exactly one point per vertex.
+        assert_eq!(parcel_loop(&world, &component).unwrap().len(), 4);
+
+        // Give the front edge (v0 → v1, from (−4,0,0) to (4,0,0)) a bulge:
+        // mirrored-style handles pushing toward +Z.
+        let v0 = component.boundary[0];
+        let v1 = component.boundary[1];
+        world
+            .insert(
+                v0,
+                ParcelVertex {
+                    handle_out: Vec3::new(2.0, 0.0, 2.0),
+                    handle_in: Vec3::zeros(),
+                },
+            )
+            .unwrap();
+        world
+            .insert(
+                v1,
+                ParcelVertex {
+                    handle_in: Vec3::new(-2.0, 0.0, 2.0),
+                    handle_out: Vec3::zeros(),
+                },
+            )
+            .unwrap();
+
+        let lp = parcel_loop(&world, &component).unwrap();
+        // One curved segment → CURVE_STEPS−1 extra samples.
+        assert_eq!(lp.len(), 4 + (CURVE_STEPS - 1));
+        // The curve bulges toward +Z at its middle (cubic midpoint z =
+        // 3/4 · 2 = 1.5), while the straight segments stay put.
+        let mid = lp[CURVE_STEPS / 2];
+        assert!((mid.z - 1.5).abs() < 1e-3, "bulged to z=1.5, got {}", mid.z);
+        assert!(mid.x.abs() < 1e-3);
+    }
+
+    #[test]
+    fn mirrored_handles_make_a_c1_joint_and_rotation_steers_the_curve() {
+        let mut world = world();
+        let mut action = AddParcelAction::at_point(Vec3::zeros());
+        action.apply(&mut world).unwrap();
+        let component: Parcel = world
+            .read_all::<Parcel>()
+            .unwrap()
+            .iter()
+            .map(|(_, p)| p.clone())
+            .next()
+            .unwrap();
+
+        // Curve both segments around v1 with mirrored handles: C1 — the
+        // arriving and departing tangents at v1 are collinear.
+        let v0 = component.boundary[0];
+        let v1 = component.boundary[1];
+        let v2 = component.boundary[2];
+        let h = Vec3::new(0.0, 0.0, -2.5);
+        world
+            .insert(
+                v1,
+                ParcelVertex {
+                    handle_in: -h,
+                    handle_out: h,
+                },
+            )
+            .unwrap();
+        // Far ends stay straight (zero handles on v0.out / v2.in sides are
+        // already the default).
+        let _ = (v0, v2);
+
+        let lp = parcel_loop(&world, &component).unwrap();
+        // Both segments around v1 curved → two fans; v1 itself is a sample.
+        let idx_v1 = CURVE_STEPS; // v0 + (CURVE_STEPS−1) samples, then v1
+        assert!((lp[idx_v1] - Vec3::new(4.0, 0.0, 0.0)).norm() < 1e-4);
+        // Tangent continuity at the vertex, measured analytically: the
+        // arriving Bézier tangent is p − handle_in, the departing one is
+        // handle_out − p — mirrored handles make them identical.
+        let corners = parcel_corners(&world, &component).unwrap();
+        let (_, p, h_out, h_in) = corners[1];
+        let arrive = (p - h_in).normalize();
+        let depart = (h_out - p).normalize();
+        assert!(
+            (arrive - depart).norm() < 1e-5,
+            "C1 at the mirrored vertex: {arrive:?} vs {depart:?}"
+        );
+
+        // Rotating the vertex steers the curve: yaw v1 by 90° and the
+        // world-space handles rotate with it.
+        let yaw = Transform::new(
+            Vec3::new(4.0, 0.0, 0.0),
+            quat_from_rotation_y(std::f32::consts::FRAC_PI_2),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(v1, yaw).unwrap();
+        world.insert(v1, GlobalTransform(yaw.to_matrix())).unwrap();
+        let corners = parcel_corners(&world, &component).unwrap();
+        let (_, p, h_out, _) = corners[1];
+        let dir = (h_out - p).normalize();
+        // Local (0,0,−2.5) under yaw +90° → world −X.
+        assert!((dir - Vec3::new(-1.0, 0.0, 0.0)).norm() < 1e-3);
     }
 
     #[test]

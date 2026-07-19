@@ -127,9 +127,12 @@ the entities mean.
   (boundaries may be concave — never re-derived by angle, unlike junction
   loops); vertex local translations carry heights, parcels are **not flat
   in the general case** — flatness is a legitimate special case (a parking
-  pad cut/filled into a slope). Boundary segments are straight today;
-  curved segments with optional C1 joints (auto tangents as on roads) are
-  planned.
+  pad cut/filled into a slope). Boundary segments follow the **pen model**:
+  each vertex carries two vertex-local Bézier handles (`handle_out` /
+  `handle_in`); both adjacent handles zero → a straight segment, mirrored
+  collinear handles → a **C1 joint**, arbitrary handles → curves meeting
+  at a corner (both requested cases, one mechanism). Handles being
+  vertex-local means rotating a vertex with the gizmo steers its curve.
   **Gates** (`ParcelGate`): the parcel owns **any number of connection
   sockets** on its boundary — child `RoadNode`s, +Z outward, standard
   socket rule. A gate is two-sided: a network road arrives at it from the
