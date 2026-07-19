@@ -63,6 +63,7 @@ const CROSS_OUTLIERS: f64 = 0.02;
 
 #[test]
 fn deferred_golden_images_across_output_formats() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let instance = GraphicsInstance::new().expect("graphics instance");
     let device = instance.create_device().expect("graphics device");
     if device.name() == "Dummy Adapter" {
@@ -156,6 +157,7 @@ fn deferred_golden_images_across_output_formats() {
 /// stops (prev-model history caught up).
 #[test]
 fn deferred_velocity_buffer_tracks_motion() {
+    let _ = env_logger::builder().is_test(true).try_init();
     let instance = GraphicsInstance::new().expect("graphics instance");
     let device = instance.create_device().expect("graphics device");
     if device.name() == "Dummy Adapter" {
@@ -323,6 +325,115 @@ fn deferred_velocity_buffer_tracks_motion() {
     assert!(
         jittered_max < 1e-4,
         "jitter leaked into velocity: {jittered_max}"
+    );
+}
+
+/// TAA (#148) on a static jittered scene must converge to an image close to
+/// the non-TAA golden (same scene, edges anti-aliased) and then hold it:
+/// two reads a couple frames apart must be nearly identical — a broken
+/// history (bad reprojection, leaking jitter, no clipping) shows up as
+/// flicker or drift long before it is visible in a single image.
+#[test]
+fn deferred_taa_accumulates_stably() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping TAA test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+    spawn_golden_scene(&mut ew.world);
+
+    let output_guid = redlilium_assets::Guid::stable("test/taa_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+    ew.world
+        .insert(camera, redlilium_ecs::TemporalJitter::default())
+        .unwrap();
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+
+    // Converge: blend 0.1 remembers ~10 frames; 24 is comfortably settled.
+    for _ in 0..24 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let converged = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+
+    // Convergence sanity: close to the non-TAA golden. Edges legitimately
+    // differ (anti-aliasing is the point), so the thresholds are loose —
+    // this guards against explosions, black frames, and runaway feedback,
+    // not pixel identity.
+    if std::env::var("REDLILIUM_TAA_DUMP").is_ok() {
+        let dump = std::env::temp_dir().join("redlilium_taa_dump.png");
+        converged.save(&dump).expect("dump");
+        eprintln!("TAA debug dump: {}", dump.display());
+    }
+    let golden = image::open(Path::new(GOLDEN_DIR).join("deferred_srgb.png"))
+        .expect("deferred_srgb golden exists")
+        .to_rgba8();
+    assert_images_close(
+        &golden,
+        &converged,
+        8,
+        0.10,
+        200,
+        "TAA-converged image far from the reference",
+    );
+
+    // Stability: with the scene static, two frames at different jitter
+    // phases must agree — the accumulated history dominates. High-contrast
+    // edge texels legitimately re-clip between jitter phases (variance
+    // clipping at gamma 1), so the peak cap is looser than the goldens' —
+    // it guards against gross flicker and feedback, not edge shimmer.
+    for _ in 0..2 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let later = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+    assert_images_close(
+        &converged,
+        &later,
+        3,
+        0.02,
+        48,
+        "converged TAA output flickers between frames",
     );
 }
 

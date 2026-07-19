@@ -314,12 +314,31 @@ impl InstanceParameters {
         self
     }
 
-    /// Apply the `REDLILIUM_ADAPTER`, `REDLILIUM_BREADCRUMBS`, and
-    /// `REDLILIUM_SYNC_VALIDATION` environment overrides, if set.
+    /// Apply the `REDLILIUM_ADAPTER`, `REDLILIUM_BREADCRUMBS`,
+    /// `REDLILIUM_VALIDATION`, and `REDLILIUM_SYNC_VALIDATION` environment
+    /// overrides, if set.
     ///
     /// Called by instance creation so the overrides work regardless of how
     /// the application built its parameters.
     fn with_env_overrides(mut self) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(value) = std::env::var("REDLILIUM_VALIDATION") {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "on" | "yes" => {
+                    log::info!("GPU validation forced ON via REDLILIUM_VALIDATION");
+                    self.validation = true;
+                }
+                "0" | "false" | "off" | "no" => {
+                    log::info!("GPU validation forced OFF via REDLILIUM_VALIDATION");
+                    self.validation = false;
+                }
+                "" => {}
+                other => log::warn!(
+                    "ignoring unrecognized REDLILIUM_VALIDATION value {other:?} \
+                     (expected 1/true/on or 0/false/off)"
+                ),
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Ok(value) = std::env::var("REDLILIUM_ADAPTER")
             && !value.is_empty()

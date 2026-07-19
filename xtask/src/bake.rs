@@ -112,6 +112,8 @@ const REGISTRY: &[ShaderSpec] = &[
         "std_display_output",
         "std-assets/shaders/display_output.slang",
     ),
+    // TAA resolve (#148): history accumulation with variance clipping.
+    vs_fs_spec("std_taa_resolve", "std-assets/shaders/taa_resolve.slang"),
     // Demo shaders — baked so the demos render on the default Slang-off build
     // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
     // the std deferred path now.)

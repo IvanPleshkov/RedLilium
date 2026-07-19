@@ -2,22 +2,26 @@
 //!
 //! [`DeferredPipeline`] is the engine's second built-in
 //! [`CameraRenderPipeline`], registered under
-//! [`DEFERRED_PIPELINE`](super::DEFERRED_PIPELINE). Per camera it records
-//! four passes:
+//! [`DEFERRED_PIPELINE`](super::DEFERRED_PIPELINE). Per camera it records:
 //!
-//! 1. `gbuffer` — MRT (albedo, normal+metallic, position+roughness) + the
-//!    camera's depth, drawing every visible `pbr`-model primitive via the
-//!    shared [`SceneDrawer`];
+//! 1. `gbuffer` — MRT (albedo, normal+metallic, position+roughness,
+//!    velocity #147) + the camera's depth, drawing every visible
+//!    `pbr`-model primitive via the shared [`SceneDrawer`];
 //! 2. `skybox` — the environment cubemap as background into the
 //!    scene-referred [`SCENE_COLOR`] intermediate;
 //! 3. `deferred_resolve` — a fullscreen pass reading the G-buffer + IBL set,
 //!    compositing lit geometry over the background, still scene-referred
 //!    linear;
-//! 4. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
-//!    tonemap, and display encoding from [`SCENE_COLOR`] into the camera's
-//!    color target (returned as the camera's main pass — the
-//!    [`ScenePass`](super::ScenePass) contract). The scene/UI white-point
-//!    contract on EDR surfaces is 1.0 = SDR white, shared with egui.
+//! 4. `taa_resolve` (#148, only for cameras with
+//!    [`TemporalJitter`](super::TemporalJitter)) — accumulates the jittered
+//!    frames into the [`TAA_HISTORY`] ping-pong (variance clipping in
+//!    YCoCg; frame parity picks read/write);
+//! 5. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
+//!    tonemap, and display encoding from [`SCENE_COLOR`] (or the fresh TAA
+//!    history) into the camera's color target (returned as the camera's
+//!    main pass — the [`ScenePass`](super::ScenePass) contract). The
+//!    scene/UI white-point contract on EDR surfaces is 1.0 = SDR white,
+//!    shared with egui.
 //!
 //! The G-buffer textures live in the camera's
 //! [`PipelineTargets`](super::PipelineTargets), re-derived on resize by
@@ -63,6 +67,7 @@ const RESOLVE_SHADER_SLANG: &str =
 const SKYBOX_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/skybox.slang");
 const DISPLAY_SHADER_SLANG: &str =
     include_str!("../../../../std-assets/shaders/display_output.slang");
+const TAA_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/taa_resolve.slang");
 
 // Baked IBL set (#137) — embedded stopgap until #145 loads it through the
 // asset system.
@@ -87,9 +92,19 @@ pub const GBUFFER_VELOCITY: &str = "gbuffer_velocity";
 /// post effects (TAA, bloom) slot in between.
 pub const SCENE_COLOR: &str = "scene_color";
 
+/// [`PipelineTargets`] keys of the TAA accumulation ping-pong (#148):
+/// frame parity selects which one is read (last frame's accumulation) and
+/// which is written; the display pass then reads the written one. Only
+/// cameras with [`TemporalJitter`](super::TemporalJitter) touch them.
+pub const TAA_HISTORY: [&str; 2] = ["taa_history_a", "taa_history_b"];
+
 /// Format of the [`SCENE_COLOR`] intermediate — linear f16 radiance,
 /// 1.0 = SDR white.
 const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
+/// Fraction of the current frame in the TAA blend (history keeps the rest —
+/// an exponential average remembering ~1/value frames).
+const TAA_BLEND: f32 = 0.1;
 
 /// G-buffer attachment formats, in attachment order (must match
 /// `deferred_gbuffer.slang`'s `FsOutput`).
@@ -233,6 +248,18 @@ struct DisplayOutputUniforms {
     exposure: [f32; 4],
 }
 
+/// Uniforms of the TAA resolve pass (must match `taa_resolve.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct TaaUniforms {
+    /// Inverse of the current unjittered view-projection.
+    inv_view_proj: [[f32; 4]; 4],
+    /// Previous frame's unjittered view-projection.
+    prev_view_proj: [[f32; 4]; 4],
+    /// x = current-frame blend, y = history validity, zw = texel size.
+    params: [f32; 4],
+}
+
 /// Uniforms of the skybox pass (must match `skybox.slang`). The WGSL uniform
 /// layout aligns the shader's trailing `float3 _pad` to 16 bytes, rounding
 /// the cbuffer to 112 — the extra `_pad1` matches that (a 96-byte buffer
@@ -281,9 +308,19 @@ struct SharedResources {
 struct CameraResources {
     resolve: Arc<MaterialInstance>,
     skybox: Arc<MaterialInstance>,
-    /// The display-output pass (#142): scene-referred `scene_color` →
-    /// exposure → tonemap/encode into the camera's color target.
-    display: Arc<MaterialInstance>,
+    /// The display-output pass (#142) reading `scene_color` directly — the
+    /// TAA-off path.
+    display_scene: Arc<MaterialInstance>,
+    /// Display-output instances reading each TAA history texture — the
+    /// TAA-on path reads the one the TAA pass just wrote.
+    display_history: [Arc<MaterialInstance>; 2],
+    /// TAA resolve instances (#148): instance `i` reads history `i` (and
+    /// writes the other one — frame parity picks).
+    taa: [Arc<MaterialInstance>; 2],
+    /// Whether the TAA history holds a real frame yet — false right after
+    /// (re)creation (resize/format change); the first TAA frame then takes
+    /// the current frame wholesale instead of blending with garbage.
+    history_primed: bool,
     /// `Arc::as_ptr` of the G-buffer albedo the binding groups reference —
     /// resize re-derives the G-buffer (and `scene_color` with it),
     /// invalidating these materials.
@@ -434,8 +471,9 @@ impl CameraResources {
     fn create(
         device: &Arc<GraphicsDevice>,
         shared: &SharedResources,
-        gbuffer: [&Arc<Texture>; 3],
+        gbuffer: [&Arc<Texture>; 4],
         scene_color: &Arc<Texture>,
+        history: [&Arc<Texture>; 2],
         color_format: TextureFormat,
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
@@ -566,27 +604,87 @@ impl CameraResources {
             )
             .inspect_err(|e| log::error!("deferred: display-output material failed: {e}"))
             .ok()?;
-        let display_group = device
-            .create_binding_group(
-                display_material.binding_layouts()[0].clone(),
-                BindingGroupDescriptor::new()
-                    .with_buffer_range(
-                        0,
-                        ring_buffer.clone(),
-                        0,
-                        std::mem::size_of::<DisplayOutputUniforms>() as u64,
-                    )
-                    .with_texture(1, scene_color.clone())
-                    .with_sampler(2, shared.gbuffer_sampler.clone()),
+        // One instance per possible source: scene_color (TAA off) or either
+        // history texture (TAA on — the one the TAA pass just wrote).
+        let display_instance = |source: &Arc<Texture>| -> Option<Arc<MaterialInstance>> {
+            let group = device
+                .create_binding_group(
+                    display_material.binding_layouts()[0].clone(),
+                    BindingGroupDescriptor::new()
+                        .with_buffer_range(
+                            0,
+                            ring_buffer.clone(),
+                            0,
+                            std::mem::size_of::<DisplayOutputUniforms>() as u64,
+                        )
+                        .with_texture(1, source.clone())
+                        .with_sampler(2, shared.gbuffer_sampler.clone()),
+                )
+                .ok()?;
+            Some(Arc::new(
+                MaterialInstance::new(display_material.clone()).with_binding_group(group),
+            ))
+        };
+        let display_scene = display_instance(scene_color)?;
+        let display_history = [display_instance(history[0])?, display_instance(history[1])?];
+
+        // --- TAA resolve material (#148): scene-referred in and out ---
+        let taa_material = device
+            .create_material(
+                &MaterialDescriptor::new()
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Vertex,
+                        TAA_SHADER_SLANG.as_bytes().to_vec(),
+                        "vs_main",
+                        vec![],
+                    ))
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Fragment,
+                        TAA_SHADER_SLANG.as_bytes().to_vec(),
+                        "fs_main",
+                        vec![],
+                    ))
+                    .with_color_format(SCENE_COLOR_FORMAT)
+                    .with_dynamic_uniform(0, 0)
+                    .with_label("deferred_taa_resolve"),
             )
+            .inspect_err(|e| log::error!("deferred: TAA material failed: {e}"))
             .ok()?;
-        let display =
-            Arc::new(MaterialInstance::new(display_material).with_binding_group(display_group));
+        // Instance i reads history[i]; frame parity writes the other one.
+        // History reprojection samples bilinearly (sub-pixel motion), the
+        // rest nearest.
+        let taa_instance = |read: &Arc<Texture>| -> Option<Arc<MaterialInstance>> {
+            let group = device
+                .create_binding_group(
+                    taa_material.binding_layouts()[0].clone(),
+                    BindingGroupDescriptor::new()
+                        .with_buffer_range(
+                            0,
+                            ring_buffer.clone(),
+                            0,
+                            std::mem::size_of::<TaaUniforms>() as u64,
+                        )
+                        .with_texture(1, scene_color.clone())
+                        .with_texture(2, read.clone())
+                        .with_texture(3, gbuffer[3].clone())
+                        .with_texture(4, gbuffer[0].clone())
+                        .with_sampler(5, shared.gbuffer_sampler.clone())
+                        .with_sampler(6, shared.ibl_sampler.clone()),
+                )
+                .ok()?;
+            Some(Arc::new(
+                MaterialInstance::new(taa_material.clone()).with_binding_group(group),
+            ))
+        };
+        let taa = [taa_instance(history[0])?, taa_instance(history[1])?];
 
         Some(Self {
             resolve,
             skybox,
-            display,
+            display_scene,
+            display_history,
+            taa,
+            history_primed: false,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
             color_format,
         })
@@ -635,12 +733,16 @@ impl CameraRenderPipeline for DeferredPipeline {
                 GBUFFER_POSITION_ROUGHNESS,
                 GBUFFER_VELOCITY,
                 SCENE_COLOR,
+                TAA_HISTORY[0],
+                TAA_HISTORY[1],
             ];
             let formats = [
                 GBUFFER_FORMATS[0],
                 GBUFFER_FORMATS[1],
                 GBUFFER_FORMATS[2],
                 GBUFFER_FORMATS[3],
+                SCENE_COLOR_FORMAT,
+                SCENE_COLOR_FORMAT,
                 SCENE_COLOR_FORMAT,
             ];
             for (&name, format) in names.iter().zip(formats) {
@@ -661,12 +763,24 @@ impl CameraRenderPipeline for DeferredPipeline {
 
         // (Re-)build the camera's materials when the targets or the color
         // format changed.
-        let (Some(albedo), Some(normal), Some(position), Some(scene_color)) = (
+        let (
+            Some(albedo),
+            Some(normal),
+            Some(position),
+            Some(velocity),
+            Some(scene_color),
+            Some(history_a),
+            Some(history_b),
+        ) = (
             targets.get(GBUFFER_ALBEDO),
             targets.get(GBUFFER_NORMAL_METALLIC),
             targets.get(GBUFFER_POSITION_ROUGHNESS),
+            targets.get(GBUFFER_VELOCITY),
             targets.get(SCENE_COLOR),
-        ) else {
+            targets.get(TAA_HISTORY[0]),
+            targets.get(TAA_HISTORY[1]),
+        )
+        else {
             return;
         };
         let albedo_ptr = Arc::as_ptr(albedo) as usize;
@@ -679,8 +793,9 @@ impl CameraRenderPipeline for DeferredPipeline {
             match CameraResources::create(
                 &device,
                 shared,
-                [albedo, normal, position],
+                [albedo, normal, position, velocity],
                 scene_color,
+                [history_a, history_b],
                 color_format,
                 &ring_buffer,
             ) {
@@ -708,8 +823,8 @@ impl CameraRenderPipeline for DeferredPipeline {
             .lock()
             .expect("deferred shared resources poisoned");
         let shared = shared_slot.as_mut()?;
-        let cameras = self.cameras.lock().expect("deferred camera map poisoned");
-        let camera_resources = cameras.get(&view.entity)?;
+        let mut cameras = self.cameras.lock().expect("deferred camera map poisoned");
+        let camera_resources = cameras.get_mut(&view.entity)?;
         let targets = world.get::<PipelineTargets>(view.entity)?;
         let (Some(albedo), Some(normal), Some(position), Some(velocity), Some(scene_color)) = (
             targets.get(GBUFFER_ALBEDO),
@@ -750,8 +865,15 @@ impl CameraRenderPipeline for DeferredPipeline {
             .get::<super::CameraExposure>(view.entity)
             .map_or(1.0, |e| e.exposure);
 
+        // TAA (#148) runs for cameras that opted into the temporal contract;
+        // frame parity picks the history ping-pong direction (read this
+        // index, write the other).
+        let taa_read_index = (world.get::<super::TemporalJitter>(view.entity).is_some()
+            && world.has_resource::<super::TemporalState>())
+        .then(|| (world.resource::<super::TemporalState>().frame() % 2) as usize);
+
         // Push this view's uniform slots into the frame ring.
-        let (camera_offset, skybox_offset, resolve_offset, display_offset, ring_buffer) = {
+        let (camera_offset, skybox_offset, resolve_offset, display_offset, taa_offset, ring_buffer) = {
             let mut ring = world.resource_mut::<FrameRing>();
             let camera_offset = ring.push(bytemuck::bytes_of(&shaders::CameraUniforms {
                 view_projection: view.view_projection,
@@ -769,11 +891,33 @@ impl CameraRenderPipeline for DeferredPipeline {
             let display_offset = ring.push(bytemuck::bytes_of(&DisplayOutputUniforms {
                 exposure: [exposure, 0.0, 0.0, 0.0],
             }));
+            let taa_offset = taa_read_index.map(|_| {
+                // Reprojection math runs on the unjittered pair (the raster
+                // inverse would bake the sub-pixel offset into every ray).
+                let unjittered = Mat4::from(view.view_projection_unjittered);
+                let inv_unjittered = unjittered.try_inverse().unwrap_or(unjittered);
+                let size = scene_color.size();
+                ring.push(bytemuck::bytes_of(&TaaUniforms {
+                    inv_view_proj: redlilium_core::math::mat4_to_cols_array_2d(&inv_unjittered),
+                    prev_view_proj: view.prev_view_projection,
+                    params: [
+                        TAA_BLEND,
+                        if camera_resources.history_primed {
+                            1.0
+                        } else {
+                            0.0
+                        },
+                        1.0 / size.width.max(1) as f32,
+                        1.0 / size.height.max(1) as f32,
+                    ],
+                }))
+            });
             (
                 camera_offset,
                 skybox_offset,
                 resolve_offset,
                 display_offset,
+                taa_offset,
                 ring.buffer().clone(),
             )
         };
@@ -864,7 +1008,41 @@ impl CameraRenderPipeline for DeferredPipeline {
         // direction — order them explicitly (background first).
         graph.add_dependency(resolve_handle, skybox_handle);
 
-        // --- 4. Display output (#142): scene-referred -> the camera target ---
+        // --- 4. TAA resolve (#148), when the camera opted in: accumulate
+        // scene_color into the history ping-pong; display then reads the
+        // freshly written history instead of scene_color.
+        let (display_source, taa_handle) = match (taa_read_index, taa_offset) {
+            (Some(read), Some(taa_offset)) => {
+                let write = 1 - read;
+                let history_write = targets.get(TAA_HISTORY[write])?;
+                let mut taa_pass = GraphicsPass::new("taa_resolve".into());
+                taa_pass.set_render_targets(
+                    RenderTargetConfig::new().with_color(
+                        ColorAttachment::from_texture(history_write.clone())
+                            .with_clear_color(0.0, 0.0, 0.0, 1.0),
+                    ),
+                );
+                taa_pass.add_draw_command(
+                    DrawCommand::new(
+                        shared.fullscreen_mesh.clone(),
+                        camera_resources.taa[read].clone(),
+                    )
+                    .with_dynamic_offsets(vec![vec![taa_offset]]),
+                );
+                let taa_handle = graph.add_graphics_pass(taa_pass);
+                // TAA reads scene_color, which has two writers — anchor on
+                // the last (the resolve), like the display pass does.
+                graph.add_dependency(taa_handle, resolve_handle);
+                camera_resources.history_primed = true;
+                (
+                    camera_resources.display_history[write].clone(),
+                    Some(taa_handle),
+                )
+            }
+            _ => (camera_resources.display_scene.clone(), None),
+        };
+
+        // --- 5. Display output (#142): scene-referred -> the camera target ---
         let mut display_pass = GraphicsPass::new("display_output".into());
         display_pass.set_render_targets(
             RenderTargetConfig::new().with_color(
@@ -873,17 +1051,15 @@ impl CameraRenderPipeline for DeferredPipeline {
             ),
         );
         display_pass.add_draw_command(
-            DrawCommand::new(
-                shared.fullscreen_mesh.clone(),
-                camera_resources.display.clone(),
-            )
-            .with_dynamic_offsets(vec![vec![display_offset]]),
+            DrawCommand::new(shared.fullscreen_mesh.clone(), display_source)
+                .with_dynamic_offsets(vec![vec![display_offset]]),
         );
         let display_handle = graph.add_graphics_pass(display_pass);
         // scene_color has two writers above; anchor the read explicitly on
         // the last of them (the graph would otherwise derive an order against
-        // *a* writer, not necessarily the resolve).
-        graph.add_dependency(display_handle, resolve_handle);
+        // *a* writer, not necessarily the resolve). With TAA the display
+        // reads the history the TAA pass just wrote instead.
+        graph.add_dependency(display_handle, taa_handle.unwrap_or(resolve_handle));
 
         Some(display_handle)
     }

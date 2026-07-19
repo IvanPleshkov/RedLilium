@@ -387,12 +387,16 @@ impl Plugin for CarGamePlugin {
         world
             .insert(camera, Camera::perspective(FRAC_PI_4, aspect, 0.1, 500.0))
             .unwrap();
-        // The game renders through the standard deferred PBR/IBL path (#144).
+        // The game renders through the standard deferred PBR/IBL path (#144)
+        // with TAA (#148: jitter + accumulation ride the same opt-in).
         world
             .insert(
                 camera,
                 redlilium_ecs::RenderPath::named(redlilium_ecs::DEFERRED_PIPELINE),
             )
+            .unwrap();
+        world
+            .insert(camera, redlilium_ecs::TemporalJitter::default())
             .unwrap();
         world.insert(camera, cam_transform).unwrap();
         world
