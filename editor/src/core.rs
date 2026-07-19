@@ -266,6 +266,13 @@ pub fn create_editor_world_base(
     // Insert Selection resource for tracking selected entities
     world.insert_resource(redlilium_ecs::ui::Selection::new());
 
+    // Viewport extension registries: right-click menu ops (editor built-ins
+    // now; game plugins append via Plugin::build_editing_view) and
+    // interactive viewport tools.
+    world.insert_resource(redlilium_ecs::ui::ViewportOps::with_builtins());
+    world.insert_resource(redlilium_ecs::ui::ViewportTools::default());
+    world.insert_resource(redlilium_ecs::ui::ViewportPickers::default());
+
     // Translate gizmo (#85): interaction state + focus/dots + the scene-rect
     // mapping the shells publish each frame. The GPU renderer resource is
     // shell-owned (needs device/format) and inserted next to
@@ -570,6 +577,19 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
         .get_mut::<PostUpdate>()
         .add_edge::<crate::gizmo_system::GizmoInteract, HotReload>()
         .expect("GizmoInteract -> HotReload edge");
+    // Viewport tool driver: raw world like the gizmo, chained right after it
+    // (tool previews want the same fresh camera matrices; #54 total order).
+    schedules
+        .get_mut::<PostUpdate>()
+        .add(crate::tool_system::RunViewportTool);
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<crate::gizmo_system::GizmoInteract, crate::tool_system::RunViewportTool>()
+        .expect("GizmoInteract -> RunViewportTool edge");
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<crate::tool_system::RunViewportTool, HotReload>()
+        .expect("RunViewportTool -> HotReload edge");
     schedules
         .get_mut::<PostUpdate>()
         .add_edge::<UpdateCameraMatrices, HotReload>()

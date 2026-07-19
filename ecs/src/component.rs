@@ -209,20 +209,21 @@ mod tests {
         fn inspect_ui(
             &self,
             ui: &mut egui::Ui,
-            _world: &crate::World,
+            world: &crate::World,
             entity: crate::Entity,
         ) -> crate::InspectResult {
             #[allow(unused_imports)]
             use crate::inspect::InspectFallback as _;
+            let ctx = &crate::FieldInspectCtx { world, entity };
             let mut _changed = false;
-            let value = match crate::inspect::Inspect(&self.value).show("value", ui) {
+            let value = match crate::inspect::Inspect(&self.value).show("value", ui, ctx) {
                 Some(v) => {
                     _changed = true;
                     v
                 }
                 None => self.value,
             };
-            let count = match crate::inspect::Inspect(&self.count).show("count", ui) {
+            let count = match crate::inspect::Inspect(&self.count).show("count", ui, ctx) {
                 Some(v) => {
                     _changed = true;
                     v
@@ -275,20 +276,21 @@ mod tests {
         fn inspect_ui(
             &self,
             ui: &mut egui::Ui,
-            _world: &crate::World,
+            world: &crate::World,
             entity: crate::Entity,
         ) -> crate::InspectResult {
             #[allow(unused_imports)]
             use crate::inspect::InspectFallback as _;
+            let ctx = &crate::FieldInspectCtx { world, entity };
             let mut _changed = false;
-            let label = match crate::inspect::Inspect(&self.label).show("label", ui) {
+            let label = match crate::inspect::Inspect(&self.label).show("label", ui, ctx) {
                 Some(v) => {
                     _changed = true;
                     v
                 }
                 None => self.label.clone(),
             };
-            let _data = match crate::inspect::Inspect(&self._data).show("data", ui) {
+            let _data = match crate::inspect::Inspect(&self._data).show("data", ui, ctx) {
                 Some(v) => {
                     _changed = true;
                     v

@@ -111,6 +111,16 @@ pub struct Editor {
     // Scene view interaction
     /// Scene view rect in physical pixels (x, y, w, h).
     scene_view_rect_phys: Option<[f32; 4]>,
+    /// Window-space position of the click that requested the in-flight GPU
+    /// pick — kept so a miss can fall back to the CPU pickers' ray test.
+    pending_cpu_pick: Option<[f32; 2]>,
+    /// Open viewport context menu: anchor position in window physical pixels.
+    /// Set by a clean RMB click over the scene view, cleared on op/close.
+    viewport_menu: Option<[f32; 2]>,
+    /// True on the frame the menu opened: the opening RMB release registers
+    /// as a "click elsewhere" in egui and would close the menu on the same
+    /// frame it appeared — close conditions skip that first frame.
+    viewport_menu_fresh: bool,
     /// Scene-view mouse gesture state machine (cursor, click-pick vs
     /// box-select vs gizmo ownership) — see `gestures.rs`.
     gestures: crate::gestures::SceneGestures,
@@ -234,6 +244,9 @@ impl Editor {
             egui_wants_pointer: false,
             egui_wants_keyboard: false,
             scene_view_rect_phys: None,
+            pending_cpu_pick: None,
+            viewport_menu: None,
+            viewport_menu_fresh: false,
             gestures: crate::gestures::SceneGestures::default(),
             fps: 0.0,
             pending_import: None,
@@ -247,6 +260,53 @@ impl Editor {
         }
     }
 
+    /// Distance along `ray` to the entry point of `entity`'s world-space
+    /// AABB — the pick query's approximate scene hit for depth comparison.
+    /// Conservative: the AABB face is at or in front of the mesh surface.
+    fn ray_entity_bounds_entry(
+        world: &World,
+        entity: Entity,
+        ray: &redlilium_ecs::ui::ViewportRay,
+    ) -> Option<f32> {
+        let aabb = world.entity_aabb(entity)?;
+        let gt = world.get::<redlilium_ecs::GlobalTransform>(entity)?;
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for i in 0..8 {
+            let corner = redlilium_core::math::Vec4::new(
+                if i & 1 == 0 { aabb.min[0] } else { aabb.max[0] },
+                if i & 2 == 0 { aabb.min[1] } else { aabb.max[1] },
+                if i & 4 == 0 { aabb.min[2] } else { aabb.max[2] },
+                1.0,
+            );
+            let p = gt.0 * corner;
+            for (k, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                min[k] = min[k].min(v);
+                max[k] = max[k].max(v);
+            }
+        }
+        let origin = [ray.origin.x, ray.origin.y, ray.origin.z];
+        let dir = [ray.dir.x, ray.dir.y, ray.dir.z];
+        let (mut t_near, mut t_far) = (0.0f32, f32::MAX);
+        for k in 0..3 {
+            if dir[k].abs() < 1e-9 {
+                if origin[k] < min[k] || origin[k] > max[k] {
+                    return None;
+                }
+                continue;
+            }
+            let a = (min[k] - origin[k]) / dir[k];
+            let b = (max[k] - origin[k]) / dir[k];
+            let (near, far) = if a < b { (a, b) } else { (b, a) };
+            t_near = t_near.max(near);
+            t_far = t_far.min(far);
+            if t_near > t_far {
+                return None;
+            }
+        }
+        Some(t_near)
+    }
+
     /// Resolve last frame's GPU pick / rect-pick readbacks into the entity
     /// selection (or into a pending remote pick response).
     fn resolve_pick_readbacks(&mut self) {
@@ -254,6 +314,8 @@ impl Editor {
         if let Some(scene_view) = &mut self.scene_view
             && let Some(hit) = scene_view.resolve_pick()
         {
+            let cpu_pos = self.pending_cpu_pick.take();
+            let rect = self.scene_view_rect_phys;
             let ew = self.world.as_mut().unwrap();
             // A remote `pick` owns this readback — answer it, don't select.
             if self
@@ -274,6 +336,35 @@ impl Editor {
                 // Reconstruct full Entity from world (need spawn_tick etc.)
                 let target_entity =
                     target.and_then(|entity_index| ew.world.entity_at_index(entity_index));
+                // Plugin pickers may override the click: each one sees the
+                // editor's resolution — the scene entity and an approximate
+                // world-space hit point on it — and decides whether its
+                // overlay control (in front? behind?) wins the click.
+                let target_entity = (|| {
+                    let pos = cpu_pos?;
+                    let [rx, ry, rw, rh] = rect?;
+                    let cam = crate::gizmo_system::gizmo_camera(&ew.world, (rw, rh))?;
+                    let ray = cam.ray_from_screen((pos[0] - rx, pos[1] - ry))?;
+                    let ray = redlilium_ecs::ui::ViewportRay {
+                        origin: ray.origin,
+                        dir: ray.dir,
+                    };
+                    let scene_point = target_entity.and_then(|entity| {
+                        let t = Self::ray_entity_bounds_entry(&ew.world, entity, &ray)?;
+                        Some(ray.origin + ray.dir * t)
+                    });
+                    let query = redlilium_ecs::ui::ViewportPickQuery {
+                        ray,
+                        scene_entity: target_entity,
+                        scene_point,
+                    };
+                    Some(
+                        ew.world
+                            .resource::<redlilium_ecs::ui::ViewportPickers>()
+                            .resolve(&ew.world, &query),
+                    )
+                })()
+                .unwrap_or(target_entity);
                 let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
                     if let Some(entity) = target_entity {
                         Box::new(SelectAction::single(entity))
@@ -556,6 +647,120 @@ impl Editor {
                     .resource::<redlilium_gizmo::TransformGizmo>()
                     .wants_cursor()
         })
+    }
+
+    /// Whether a viewport tool is active this frame — scene clicks then
+    /// belong to the tool, not to selection or the gizmo.
+    fn tool_active(&self) -> bool {
+        self.world.as_ref().is_some_and(|ew| {
+            ew.world.has_resource::<redlilium_ecs::ui::ViewportTools>()
+                && ew
+                    .world
+                    .resource::<redlilium_ecs::ui::ViewportTools>()
+                    .is_active()
+        })
+    }
+
+    /// Draw the viewport right-click context menu when open: editor
+    /// built-ins plus plugin ops from the `ViewportOps` resource. Ops push
+    /// `EditAction`s or request a viewport tool — the menu itself mutates
+    /// nothing directly.
+    fn show_viewport_menu(&mut self, egui_ctx: &egui::Context, pixels_per_point: f32) {
+        use redlilium_core::abstract_editor::ActionQueue;
+        use redlilium_ecs::ui::{Selection, ViewportOpCtx, ViewportOps, ViewportTools};
+
+        let Some(pos_phys) = self.viewport_menu else {
+            return;
+        };
+        let Some(ew) = &self.world else {
+            self.viewport_menu = None;
+            return;
+        };
+        let world = &ew.world;
+        if !world.has_resource::<ViewportOps>()
+            || !world.has_resource::<ActionQueue<World>>()
+            || !world.has_resource::<Selection>()
+        {
+            self.viewport_menu = None;
+            return;
+        }
+
+        let inv = 1.0 / pixels_per_point;
+        let pos = egui::pos2(pos_phys[0] * inv, pos_phys[1] * inv);
+        // World ray under the menu anchor, for "add X here" ops. The menu
+        // position is window-space physical pixels; the camera unprojects
+        // scene-image coordinates.
+        let cursor_ray = self.scene_view_rect_phys.and_then(|[rx, ry, rw, rh]| {
+            let local = (pos_phys[0] - rx, pos_phys[1] - ry);
+            let inside = local.0 >= 0.0 && local.1 >= 0.0 && local.0 < rw && local.1 < rh;
+            inside
+                .then(|| crate::gizmo_system::gizmo_camera(world, (rw, rh)))
+                .flatten()
+                .and_then(|cam| cam.ray_from_screen(local))
+                .map(|r| redlilium_ecs::ui::ViewportRay {
+                    origin: r.origin,
+                    dir: r.dir,
+                })
+        });
+        let mut close = false;
+        let mut request_tool = None;
+        let mut exit_tool = false;
+        let area = egui::Area::new(egui::Id::new("viewport_context_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(egui_ctx, |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(150.0);
+                    // A live tool mode gets an explicit exit entry on top —
+                    // Escape works too, but the way out must be visible.
+                    let active = world
+                        .resource::<ViewportTools>()
+                        .active_label()
+                        .map(str::to_owned);
+                    if let Some(label) = active {
+                        if ui.button(format!("Exit {label}")).clicked() {
+                            exit_tool = true;
+                            close = true;
+                        }
+                        ui.separator();
+                    }
+                    let selection = world.resource::<Selection>().entities().to_vec();
+                    let actions = world.resource::<ActionQueue<World>>();
+                    let ops = world.resource::<ViewportOps>();
+                    for op in ops.iter() {
+                        let mut ctx = ViewportOpCtx {
+                            world,
+                            actions: &actions,
+                            selection: &selection,
+                            cursor_ray,
+                            request_tool: None,
+                        };
+                        let enabled = op.is_enabled(&ctx);
+                        if ui
+                            .add_enabled(enabled, egui::Button::new(op.label()))
+                            .clicked()
+                        {
+                            op.run(&mut ctx);
+                            request_tool = ctx.request_tool.take();
+                            close = true;
+                        }
+                    }
+                });
+            });
+        if exit_tool {
+            world.resource_mut::<ViewportTools>().deactivate_active();
+        }
+        if let Some(label) = request_tool {
+            world.resource_mut::<ViewportTools>().request(label);
+        }
+        let fresh = std::mem::take(&mut self.viewport_menu_fresh);
+        if close
+            || (!fresh
+                && (area.response.clicked_elsewhere()
+                    || egui_ctx.input(|i| i.key_pressed(egui::Key::Escape))))
+        {
+            self.viewport_menu = None;
+        }
     }
 
     /// Get the active editor world (immutable).
@@ -1578,7 +1783,17 @@ impl AppHandler for Editor {
 
             // Status bar (bottom) — hidden during Play, visible during Pause and Edit
             if !is_playing {
-                status_bar::draw_status_bar(&egui_ctx, self.fps);
+                let tool_status = self.world.as_ref().and_then(|ew| {
+                    ew.world
+                        .has_resource::<redlilium_ecs::ui::ViewportTools>()
+                        .then(|| {
+                            ew.world
+                                .resource::<redlilium_ecs::ui::ViewportTools>()
+                                .active_status()
+                        })
+                        .flatten()
+                });
+                status_bar::draw_status_bar(&egui_ctx, self.fps, tool_status);
             }
 
             // Dock area fills remaining space (transparent, no margin so it spans edge-to-edge)
@@ -1664,6 +1879,11 @@ impl AppHandler for Editor {
                         }
                     }
                 });
+
+            // Viewport right-click menu rides over the dock in the same pass.
+            if !is_playing {
+                self.show_viewport_menu(&egui_ctx, pixels_per_point);
+            }
 
             // Modal "Unsaved Changes" dialog
             if self.show_close_dialog {
@@ -2048,8 +2268,8 @@ impl AppHandler for Editor {
 
             // LMB gestures over the scene view (blocked while a play session
             // exists — the image is the play world's). The routing decision —
-            // egui / gizmo / select — is a pure function in `gestures.rs`;
-            // this block only acts on it.
+            // egui / tool / gizmo / select — is a pure function in
+            // `gestures.rs`; this block only acts on it.
             if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !in_session {
                 use crate::gestures::ReleaseAction;
                 if pressed {
@@ -2060,7 +2280,10 @@ impl AppHandler for Editor {
                     let in_view = self.cursor_in_scene_view();
                     let egui_owns = self.egui_wants_pointer;
                     let gizmo_owns = self.gizmo_wants_cursor();
-                    let _ = self.gestures.on_press(in_view, egui_owns, gizmo_owns);
+                    let tool_owns = self.tool_active();
+                    let _ = self
+                        .gestures
+                        .on_press(in_view, egui_owns, gizmo_owns, tool_owns);
                 } else {
                     let gizmo_owns = self.gizmo_wants_cursor();
                     match self.gestures.on_release(gizmo_owns) {
@@ -2070,10 +2293,33 @@ impl AppHandler for Editor {
                         ReleaseAction::ClickPick { x, y } => {
                             if let Some(scene_view) = &mut self.scene_view {
                                 scene_view.request_pick(x, y);
+                                self.pending_cpu_pick = Some([x as f32, y as f32]);
+                            }
+                        }
+                        ReleaseAction::ToolClick { .. } => {
+                            // Deliver the click to the active tool; the
+                            // runner system consumes the flag next tick.
+                            if let Some(ew) = &self.world {
+                                ew.world
+                                    .resource_mut::<redlilium_ecs::ui::ViewportTools>()
+                                    .pending_click = true;
                             }
                         }
                         ReleaseAction::GizmoOwned | ReleaseAction::Nothing => {}
                     }
+                }
+            }
+
+            // RMB over the scene view: a clean click (no fly-camera drag)
+            // opens the viewport context menu at the cursor.
+            if button == MouseButton::Right && self.scene_view_rect_phys.is_some() && !in_session {
+                if pressed {
+                    let in_view = self.cursor_in_scene_view();
+                    let egui_owns = self.egui_wants_pointer;
+                    self.gestures.on_secondary_press(in_view, egui_owns);
+                } else if let Some(pos) = self.gestures.on_secondary_release() {
+                    self.viewport_menu = Some(pos);
+                    self.viewport_menu_fresh = true;
                 }
             }
         }

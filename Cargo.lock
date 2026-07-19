@@ -541,6 +541,7 @@ dependencies = [
  "redlilium-core",
  "redlilium-ecs",
  "redlilium-graphics",
+ "redlilium-levels",
  "redlilium-runtime",
  "redlilium-vfs",
  "wasm-bindgen",
@@ -4499,6 +4500,16 @@ dependencies = [
  "web-time",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "redlilium-levels"
+version = "0.1.0"
+dependencies = [
+ "redlilium-core",
+ "redlilium-debug-drawer",
+ "redlilium-ecs",
+ "redlilium-runtime",
 ]
 
 [[package]]

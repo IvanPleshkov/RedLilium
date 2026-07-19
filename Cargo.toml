@@ -11,6 +11,7 @@ members = [
     "editor",
     "game",
     "game-editor",
+    "levels",
     "debug_drawer",
     "gizmo",
     "vfs",

@@ -11,7 +11,7 @@
 //! ```
 #![recursion_limit = "256"]
 
-use car_game::{LEVEL_SCENE, MENU_SCENE};
+use car_game::{LEVEL_SCENE, MENU_SCENE, PLAYGROUND_SCENE};
 use redlilium_assets::{AssetDb, AssetLoader, AssetPath, AssetRecord, Guid};
 use redlilium_ecs::{
     SceneLoader, World, register_rendering_components, register_std_components, serialize_scene_ron,
@@ -32,6 +32,8 @@ fn authoring_world() -> World {
     let mut world = World::new();
     register_std_components(&mut world);
     register_rendering_components(&mut world);
+    use redlilium_runtime::Plugin;
+    redlilium_levels::LevelsPlugin.register_types(&mut world);
     world.register_inspector::<car_game::CarController>();
     world.register_inspector::<car_game::FollowCamera>();
     world.register_inspector::<car_game::CarSpawn>();
@@ -46,6 +48,8 @@ fn main() {
         // spawns the chassis at the marker when the scene loads.
         (LEVEL_SCENE, car_game::spawn_level_scene),
         (MENU_SCENE, car_game::spawn_menu_backdrop),
+        // Road-graph playground (docs/DESIGN_PROCEDURAL_LEVELS.md prototype).
+        (PLAYGROUND_SCENE, car_game::spawn_levels_playground),
     ];
 
     std::fs::create_dir_all("game/assets/scenes").expect("create scenes dir");

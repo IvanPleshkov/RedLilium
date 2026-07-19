@@ -25,6 +25,7 @@ redlilium-graphics = { path = "../graphics", default-features = false, features 
 ] }
 redlilium-ecs = { path = "../ecs", features = ["physics", "rendering", "serialize-ron"] }
 redlilium-runtime = { path = "../runtime" }
+redlilium-levels = { path = "../levels" }
 redlilium-assets = { path = "../assets" }
 redlilium-vfs = { path = "../vfs" }
 log.workspace = true

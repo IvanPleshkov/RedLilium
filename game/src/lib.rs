@@ -35,6 +35,7 @@ use redlilium_runtime::AppControl;
 /// the editor persists scenes, #2).
 pub const MENU_SCENE: &str = "scenes/menu.scene";
 pub const LEVEL_SCENE: &str = "scenes/level1.scene";
+pub const PLAYGROUND_SCENE: &str = "scenes/levels_playground.scene";
 
 /// Build stamp (#135): crate version + git commit, e.g. `0.1.0+1a2b3c4d5`
 /// (`-dirty` marks uncommitted changes, `unknown` a git-less build). Printed
@@ -319,9 +320,17 @@ pub struct CarGamePlugin;
 
 impl Plugin for CarGamePlugin {
     fn register_types(&self, world: &mut World) {
+        // Level-graph components (roads/terrain authoring) come from the
+        // levels crate; forwarding here is what makes every hosting world —
+        // editor included — understand them.
+        redlilium_levels::LevelsPlugin.register_types(world);
         world.register_inspector::<CarController>();
         world.register_inspector::<FollowCamera>();
         world.register_inspector::<CarSpawn>();
+    }
+
+    fn build_editing_view(&self, view: &mut redlilium_runtime::EditingView<'_>) {
+        redlilium_levels::LevelsPlugin.build_editing_view(view);
     }
 
     fn build(&self, app: &mut App) {
@@ -554,6 +563,146 @@ pub fn spawn_menu_backdrop(world: &mut World) {
         );
         spawn_box(world, material.clone(), transform);
     }
+}
+
+/// Road-graph playground (docs/DESIGN_PROCEDURAL_LEVELS.md, prototype): a
+/// short S-curve of [`RoadNode`](redlilium_levels::RoadNode) cross-sections
+/// joined by [`RoadSegment`](redlilium_levels::RoadSegment)s, plus one lone
+/// node. No geometry — the levels editing-view overlay draws the graph; move
+/// and rotate nodes with the gizmo and the patches follow.
+pub fn spawn_levels_playground(world: &mut World) {
+    use redlilium_levels::{RoadNode, RoadSegment};
+
+    let node = |world: &mut World, x: f32, z: f32, yaw: f32| {
+        let entity = world.spawn();
+        let transform = Transform::new(
+            Vec3::new(x, 0.0, z),
+            redlilium_core::math::quat_from_rotation_y(yaw),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(entity, transform).unwrap();
+        world
+            .insert(entity, GlobalTransform(transform.to_matrix()))
+            .unwrap();
+        world.insert(entity, RoadNode::default()).unwrap();
+        entity
+    };
+
+    let n1 = node(world, 0.0, 0.0, 0.0);
+    let n2 = node(world, 2.5, 11.0, 0.4);
+    let n3 = node(world, 9.2, 19.8, 0.9);
+    let n4 = node(world, 19.2, 24.3, 1.4);
+    // A lone cross-section: what a node looks like before it is connected.
+    node(world, -8.0, 6.0, -0.5);
+
+    let road = |world: &mut World, a, b| {
+        let road = world.spawn();
+        world
+            .insert(
+                road,
+                RoadSegment {
+                    a,
+                    b,
+                    ..RoadSegment::default()
+                },
+            )
+            .unwrap();
+        road
+    };
+    let r1 = road(world, n1, n2);
+    road(world, n2, n3);
+    road(world, n3, n4);
+
+    // A driveway: a node glued to part of the first road's right edge (its
+    // transform is derived from the parent edge — see
+    // `redlilium_levels::EdgeAnchor`) plus an ordinary road from it to an
+    // outer exit node. Socket convention: the exit's +Z faces the road; the
+    // future building fills the −Z side behind it.
+    let glued = node(world, 0.0, 0.0, 0.0);
+    world
+        .insert(
+            glued,
+            redlilium_levels::EdgeAnchor {
+                parent_road: r1,
+                right_edge: true,
+                u_min: 0.35,
+                u_max: 0.65,
+            },
+        )
+        .unwrap();
+    let exit = node(world, 9.0, 5.5, -std::f32::consts::FRAC_PI_2);
+    let driveway = world.spawn();
+    world
+        .insert(
+            driveway,
+            RoadSegment {
+                a: glued,
+                b: exit,
+                b_from_front: true,
+                ..RoadSegment::default()
+            },
+        )
+        .unwrap();
+
+    // Junction examples (docs/DESIGN_PROCEDURAL_LEVELS.md): connectors are
+    // ordinary nodes with +Z outward; the loop re-derives on every edit.
+    use redlilium_levels::Junction;
+    use redlilium_levels::junction::stamp_connector_transform;
+    let connector = |world: &mut World, transform: Transform| {
+        let e = world.spawn();
+        world.insert(e, transform).unwrap();
+        world
+            .insert(e, GlobalTransform(transform.to_matrix()))
+            .unwrap();
+        world
+            .insert(e, redlilium_levels::RoadNode::default())
+            .unwrap();
+        e
+    };
+
+    // A 4-way cross with two exit roads.
+    let cross_center = Vec3::new(34.0, 0.0, 10.0);
+    let cross: Vec<_> = (0..4)
+        .map(|i| {
+            let yaw = i as f32 * std::f32::consts::FRAC_PI_2;
+            connector(world, stamp_connector_transform(cross_center, yaw, 8.0))
+        })
+        .collect();
+    let j = world.spawn();
+    world
+        .insert(
+            j,
+            Junction {
+                connectors: cross.clone(),
+                ..Junction::default()
+            },
+        )
+        .unwrap();
+    let exit_north = node(world, 34.0, 30.0, 0.0);
+    let exit_east = node(world, 54.0, 10.0, std::f32::consts::FRAC_PI_2);
+    road(world, cross[0], exit_north);
+    road(world, cross[1], exit_east);
+
+    // A 3-way (Y) junction: the same model at N = 3, no exits.
+    let y_center = Vec3::new(-16.0, 0.0, 22.0);
+    let y: Vec<_> = [0.0f32, 2.094, -2.094]
+        .into_iter()
+        .map(|yaw| connector(world, stamp_connector_transform(y_center, yaw, 6.0)))
+        .collect();
+    let j = world.spawn();
+    world
+        .insert(
+            j,
+            Junction {
+                connectors: y,
+                ..Junction::default()
+            },
+        )
+        .unwrap();
+
+    // Bake the edge-anchored nodes' derived transforms so the scene ships
+    // settled — the editor's derive system then has nothing to rewrite.
+    redlilium_levels::settle_edge_anchors(world);
 }
 
 fn spawn_box(

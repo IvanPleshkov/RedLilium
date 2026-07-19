@@ -15,7 +15,7 @@
 //!
 //! ```ignore
 //! impl ComponentField for MyColor {
-//!     fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+//!     fn inspect_field(&self, name: &str, ui: &mut egui::Ui, _ctx: &FieldInspectCtx<'_>) -> Option<Self> {
 //!         let mut value = *self;
 //!         let changed = ui.horizontal(|ui| {
 //!             ui.label(name);
@@ -48,6 +48,17 @@ use redlilium_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 
 use crate::serialize::{DeserializeContext, DeserializeError, SerializeContext, SerializeError};
 
+/// Context handed to [`ComponentField::inspect_field`]: read-only world
+/// access plus the entity owning the inspected component. This is what lets
+/// field widgets query world state — the entity picker lists live entities;
+/// future asset pickers can browse the asset DB the same way (#73).
+pub struct FieldInspectCtx<'a> {
+    /// The world the inspected component lives in (read-only).
+    pub world: &'a crate::World,
+    /// The entity owning the inspected component.
+    pub entity: crate::Entity,
+}
+
 /// Unified field-level inspection + serialization trait.
 ///
 /// Implement this for any type you want to use as a field inside a
@@ -60,8 +71,15 @@ pub trait ComponentField: Send + Sync + 'static {
     /// Render an inspector UI widget for this field value.
     ///
     /// Takes an immutable reference and returns `Some(new_value)` if the
-    /// user edited the value in the UI, or `None` if unchanged.
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self>
+    /// user edited the value in the UI, or `None` if unchanged. `ctx` gives
+    /// world-aware widgets (entity pickers, asset browsers) read access to
+    /// the world; plain value widgets ignore it.
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self>
     where
         Self: Sized;
 
@@ -97,7 +115,12 @@ pub trait ComponentField: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 impl ComponentField for f32 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut value = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -126,7 +149,12 @@ impl ComponentField for f32 {
 }
 
 impl ComponentField for f64 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut value = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -155,7 +183,12 @@ impl ComponentField for f64 {
 }
 
 impl ComponentField for bool {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut value = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -183,7 +216,12 @@ impl ComponentField for bool {
 }
 
 impl ComponentField for u8 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut v = *self as i32;
         let changed = ui
             .horizontal(|ui| {
@@ -212,7 +250,12 @@ impl ComponentField for u8 {
 }
 
 impl ComponentField for u32 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut v = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -240,7 +283,12 @@ impl ComponentField for u32 {
 }
 
 impl ComponentField for i32 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut value = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -268,7 +316,12 @@ impl ComponentField for i32 {
 }
 
 impl ComponentField for u64 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         // Native u64 backing: the old cast through i64 silently rewrote
         // values above i64::MAX on edit. DragValue still goes through f64
         // internally, so drags on values above 2^53 remain imprecise.
@@ -299,7 +352,12 @@ impl ComponentField for u64 {
 }
 
 impl ComponentField for usize {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut v = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -327,7 +385,12 @@ impl ComponentField for usize {
 }
 
 impl ComponentField for String {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut value = self.clone();
         let changed = ui
             .horizontal(|ui| {
@@ -358,13 +421,75 @@ impl ComponentField for String {
 // Entity types
 // ---------------------------------------------------------------------------
 
+/// Display label for an entity in the picker: `Name (index@tick)` when a
+/// [`Name`](crate::Name) is present, bare `index@tick` otherwise.
+fn entity_label(world: &crate::World, entity: crate::Entity) -> String {
+    if entity == crate::Entity::DANGLING {
+        return "dangling".to_owned();
+    }
+    if !world.is_alive(entity) {
+        return format!("dead ({}@{})", entity.index(), entity.spawn_tick());
+    }
+    match world.get::<crate::Name>(entity) {
+        Some(name) if !name.0.is_empty() => {
+            format!("{} ({}@{})", name.0, entity.index(), entity.spawn_tick())
+        }
+        _ => format!("{}@{}", entity.index(), entity.spawn_tick()),
+    }
+}
+
+/// Entity dropdown shared by the `Entity`-family field impls. Lists live,
+/// non-editor entities (editor-owned entities like the camera must never be
+/// referenced from scene data — the reference would dangle on load).
+/// Returns `Some(selection)` when the user picks an item; the inner `None`
+/// is the "no entity" choice (offered only when `allow_none`).
+fn entity_picker(
+    current: Option<crate::Entity>,
+    none_label: &str,
+    allow_none: bool,
+    name: &str,
+    ui: &mut egui::Ui,
+    ctx: &FieldInspectCtx<'_>,
+) -> Option<Option<crate::Entity>> {
+    let mut picked = None;
+    let selected = match current {
+        Some(e) => entity_label(ctx.world, e),
+        None => none_label.to_owned(),
+    };
+    egui::ComboBox::from_id_salt(ui.id().with((name, "entity_picker")))
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            if allow_none && ui.selectable_label(current.is_none(), none_label).clicked() {
+                picked = Some(None);
+            }
+            for e in ctx.world.iter_entities() {
+                let flags = ctx.world.get_entity_flags(e);
+                if flags & (crate::Entity::EDITOR | crate::Entity::INHERITED_EDITOR) != 0 {
+                    continue;
+                }
+                let label = entity_label(ctx.world, e);
+                if ui.selectable_label(current == Some(e), label).clicked() {
+                    picked = Some(Some(e));
+                }
+            }
+        });
+    picked
+}
+
 impl ComponentField for crate::Entity {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
+        let current = (*self != crate::Entity::DANGLING).then_some(*self);
         ui.horizontal(|ui| {
             ui.label(name);
-            ui.label(format!("Entity({}@{})", self.index(), self.spawn_tick()));
-        });
-        None // read-only
+            entity_picker(current, "dangling", false, name, ui, ctx)
+        })
+        .inner
+        .map(|picked| picked.unwrap_or(crate::Entity::DANGLING))
     }
 
     fn serialize_field(
@@ -384,12 +509,41 @@ impl ComponentField for crate::Entity {
 }
 
 impl ComponentField for Vec<crate::Entity> {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.label(format!("[{} entities]", self.len()));
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
+        let mut edited: Option<Self> = None;
+        ui.vertical(|ui| {
+            ui.label(format!("{name} [{}]", self.len()));
+            for (i, entity) in self.iter().enumerate() {
+                let element = format!("{name}[{i}]");
+                ui.horizontal(|ui| {
+                    ui.label(format!("[{i}]"));
+                    let current = (*entity != crate::Entity::DANGLING).then_some(*entity);
+                    if let Some(picked) =
+                        entity_picker(current, "dangling", false, &element, ui, ctx)
+                    {
+                        let mut v = self.clone();
+                        v[i] = picked.unwrap_or(crate::Entity::DANGLING);
+                        edited = Some(v);
+                    }
+                    if ui.small_button("✕").clicked() {
+                        let mut v = self.clone();
+                        v.remove(i);
+                        edited = Some(v);
+                    }
+                });
+            }
+            if ui.small_button("+").clicked() {
+                let mut v = self.clone();
+                v.push(crate::Entity::DANGLING);
+                edited = Some(v);
+            }
         });
-        None // read-only
+        edited
     }
 
     fn serialize_field(
@@ -409,15 +563,17 @@ impl ComponentField for Vec<crate::Entity> {
 }
 
 impl ComponentField for Option<crate::Entity> {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
-            match self {
-                Some(e) => ui.label(format!("Entity({}@{})", e.index(), e.spawn_tick())),
-                None => ui.weak("None"),
-            };
-        });
-        None // read-only
+            entity_picker(*self, "None", true, name, ui, ctx)
+        })
+        .inner
     }
 
     fn serialize_field(
@@ -441,7 +597,12 @@ impl ComponentField for Option<crate::Entity> {
 // ---------------------------------------------------------------------------
 
 impl ComponentField for Vec2 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut v = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -475,7 +636,12 @@ impl ComponentField for Vec2 {
 }
 
 impl ComponentField for Vec3 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut v = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -512,7 +678,12 @@ impl ComponentField for Vec3 {
 }
 
 impl ComponentField for Vec4 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut v = *self;
         let changed = ui
             .horizontal(|ui| {
@@ -552,7 +723,12 @@ impl ComponentField for Vec4 {
 }
 
 impl ComponentField for Quat {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.label(format!(
@@ -580,7 +756,12 @@ impl ComponentField for Quat {
 }
 
 impl ComponentField for Mat4 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.label("(matrix)");
@@ -611,7 +792,12 @@ impl ComponentField for Mat4 {
 impl<T: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> ComponentField
     for Arc<T>
 {
-    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _ctx: &FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.weak(format!("({})", std::any::type_name::<Self>()));

@@ -51,7 +51,7 @@ const DOT_PICK_RADIUS_PX: f32 = 14.0;
 
 /// The scene camera as the gizmo sees it: first `Camera` component (the
 /// editor camera in editor mode), eye recovered from the view matrix.
-fn gizmo_camera(world: &World, viewport: (f32, f32)) -> Option<GizmoCamera> {
+pub(crate) fn gizmo_camera(world: &World, viewport: (f32, f32)) -> Option<GizmoCamera> {
     let cameras = world.read_all::<Camera>().ok()?;
     let (_, cam) = cameras.iter().next()?;
     let eye = cam

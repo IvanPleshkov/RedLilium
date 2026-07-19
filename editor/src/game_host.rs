@@ -291,9 +291,13 @@ impl GameHost {
     }
 
     /// Run `Plugin::register_types` against `ew`'s world, scoped to this
-    /// host's generation. This is the editing world's *entire* exposure to
-    /// the game module: type registrations for inspection and serialization.
-    /// `Plugin::build`/`spawn_scene` run only in game worlds (`App::boot`).
+    /// host's generation, then `Plugin::build_editing_view` against its
+    /// schedules. This is the editing world's *entire* exposure to the game
+    /// module: type registrations for inspection/serialization plus
+    /// read-only view systems. `Plugin::build`/`spawn_scene` run only in
+    /// game worlds (`App::boot`). Every caller hands in a *fresh*
+    /// `EditorWorld` (startup or reload), so view systems never stack
+    /// across generations.
     pub fn register_into(&self, ew: &mut EditorWorld) {
         let module = self.module.as_ref().expect("module present outside swap");
         let mut world = std::mem::take(&mut ew.world);
@@ -301,6 +305,19 @@ impl GameHost {
             module.plugin().register_types(scoped);
         });
         ew.world = world;
+        let mut ops = ew.world.resource_mut::<redlilium_ecs::ui::ViewportOps>();
+        let mut tools = ew.world.resource_mut::<redlilium_ecs::ui::ViewportTools>();
+        let mut pickers = ew
+            .world
+            .resource_mut::<redlilium_ecs::ui::ViewportPickers>();
+        module
+            .plugin()
+            .build_editing_view(&mut redlilium_runtime::EditingView {
+                schedules: &mut ew.schedules,
+                ops: &mut ops,
+                tools: &mut tools,
+                pickers: &mut pickers,
+            });
     }
 
     /// Swap in a freshly built image: unmap the old module and load a new

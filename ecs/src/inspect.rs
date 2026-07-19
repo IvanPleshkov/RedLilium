@@ -6,7 +6,9 @@
 //! displays unknown types as opaque.
 //!
 //! The `#[derive(Component)]` macro generates `inspect_ui` by wrapping each
-//! field in `Inspect(&self.field).show("field", ui)`.
+//! field in `Inspect(&self.field).show("field", ui, ctx)`, where `ctx` is the
+//! [`FieldInspectCtx`](crate::FieldInspectCtx) built from the `inspect_ui`
+//! world/entity arguments — world-aware widgets (entity pickers) read it.
 //!
 //! # Adding a new inspectable type
 //!
@@ -15,7 +17,12 @@
 //!
 //! ```ignore
 //! impl ComponentField for MyVec2 {
-//!     fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+//!     fn inspect_field(
+//!         &self,
+//!         name: &str,
+//!         ui: &mut egui::Ui,
+//!         _ctx: &crate::FieldInspectCtx<'_>,
+//!     ) -> Option<Self> {
 //!         let mut v = *self;
 //!         let changed = ui.horizontal(|ui| {
 //!             ui.label(name);
@@ -43,11 +50,11 @@ pub struct Inspect<'a, T: ?Sized>(pub &'a T);
 /// (no edit possible). Rust's method resolution ensures this is only used
 /// when no inherent `show()` method exists on `Inspect<'_, T>`.
 pub trait InspectFallback<T> {
-    fn show(&self, name: &str, ui: &mut egui::Ui) -> Option<T>;
+    fn show(&self, name: &str, ui: &mut egui::Ui, ctx: &crate::FieldInspectCtx<'_>) -> Option<T>;
 }
 
 impl<T: Clone + 'static> InspectFallback<T> for Inspect<'_, T> {
-    fn show(&self, name: &str, ui: &mut egui::Ui) -> Option<T> {
+    fn show(&self, name: &str, ui: &mut egui::Ui, _ctx: &crate::FieldInspectCtx<'_>) -> Option<T> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.weak(format!("({})", std::any::type_name::<T>()));
@@ -61,7 +68,12 @@ impl<T: Clone + 'static> InspectFallback<T> for Inspect<'_, T> {
 // ---------------------------------------------------------------------------
 
 impl<T: crate::component_field::ComponentField> Inspect<'_, T> {
-    pub fn show(&self, name: &str, ui: &mut egui::Ui) -> Option<T> {
-        self.0.inspect_field(name, ui)
+    pub fn show(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        ctx: &crate::FieldInspectCtx<'_>,
+    ) -> Option<T> {
+        self.0.inspect_field(name, ui, ctx)
     }
 }

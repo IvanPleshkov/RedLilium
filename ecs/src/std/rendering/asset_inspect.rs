@@ -12,13 +12,18 @@ use crate::serialize::{DeserializeContext, DeserializeError, SerializeContext, S
 // is local to ecs. Serialization delegates to serde (the layout is entity-free,
 // so it needs no World).
 impl ComponentField for VertexLayout {
-    fn inspect_field(&self, _name: &str, ui: &mut egui::Ui) -> Option<Self> {
+    fn inspect_field(
+        &self,
+        _name: &str,
+        ui: &mut egui::Ui,
+        ctx: &crate::FieldInspectCtx<'_>,
+    ) -> Option<Self> {
         let mut layout = self.clone();
         let mut changed = false;
 
         // Editable label (reuses the String field widget).
         let label = layout.label.clone().unwrap_or_default();
-        if let Some(new_label) = label.inspect_field("label", ui) {
+        if let Some(new_label) = label.inspect_field("label", ui, ctx) {
             layout.label = (!new_label.is_empty()).then_some(new_label);
             changed = true;
         }
@@ -85,7 +90,13 @@ pub fn inspect_asset_settings(
                     return None;
                 }
             };
-            let edited = layout.inspect_field("vertex_layout", ui)?;
+            // Asset settings have no owning entity; the ctx carries a
+            // dangling one (entity-free fields never look at it).
+            let ctx = &crate::FieldInspectCtx {
+                world,
+                entity: crate::Entity::DANGLING,
+            };
+            let edited = layout.inspect_field("vertex_layout", ui, ctx)?;
             ron::to_string(&edited).ok()
         }
         _ => {

@@ -115,6 +115,20 @@ pub trait Plugin {
         let _ = app;
     }
 
+    /// Extend the *editing world's* view layer: preview/overlay systems,
+    /// viewport context-menu operations, and viewport tools for the plugin's
+    /// own components. Called by editor hosts right after
+    /// [`register_types`](Plugin::register_types), and again after every
+    /// reload against a fresh [`EditingView`] (so generations never stack).
+    /// Unlike [`build`](Plugin::build) this runs in a world the plugin does
+    /// not own: systems added here must be read-only observers, and every
+    /// mutation — from menu ops and tools alike — goes through the
+    /// `ActionQueue` (the contexts don't even expose a mutable world).
+    /// Default: no-op.
+    fn build_editing_view(&self, view: &mut EditingView<'_>) {
+        let _ = view;
+    }
+
     /// Reload cleanup: called before World drop during reload.
     ///
     /// Runs after scene serialization but **before** World drop and before dylib
@@ -132,6 +146,21 @@ pub trait Plugin {
     fn on_unload(&self, app: &mut App) {
         let _ = app;
     }
+}
+
+/// Mutable view of the editing world's extension points, handed to
+/// [`Plugin::build_editing_view`]. The editor owns the underlying storage
+/// (schedules + world resources); this struct only groups the borrows so the
+/// hook signature can grow without breaking implementors again.
+pub struct EditingView<'a> {
+    /// The editing world's schedule graph (add read-only view systems).
+    pub schedules: &'a mut redlilium_ecs::Schedules,
+    /// Right-click viewport menu operations.
+    pub ops: &'a mut redlilium_ecs::ui::ViewportOps,
+    /// Interactive viewport tools (activated from ops or the shell).
+    pub tools: &'a mut redlilium_ecs::ui::ViewportTools,
+    /// CPU pick fallback for click-selection of meshless entities.
+    pub pickers: &'a mut redlilium_ecs::ui::ViewportPickers,
 }
 
 /// One embedded asset pack: `(pack-relative path, verbatim bytes)` for every
