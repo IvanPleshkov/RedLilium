@@ -13,11 +13,18 @@
 import engine;
 
 struct CameraParams {
+    // Rasterization matrix — sub-pixel jittered when the camera runs a
+    // temporal technique (#147).
     column_major float4x4 view_projection;
+    // Unjittered pair for velocity: jitter in velocity would smear statics.
+    column_major float4x4 view_projection_unjittered;
+    column_major float4x4 prev_view_projection;
 };
 
 struct ModelParams {
     column_major float4x4 model;
+    // Previous frame's model matrix (equals model on first visible frame).
+    column_major float4x4 prev_model;
 };
 
 struct MaterialParams {
@@ -52,6 +59,10 @@ struct VsOutput {
     float3 world_position : TEXCOORD0;
     float3 world_normal : NORMAL;
     float2 uv : TEXCOORD1;
+    // Unjittered clip positions of this and the previous frame — the
+    // fragment stage derives NDC velocity from the pair (#147).
+    float4 curr_clip : TEXCOORD2;
+    float4 prev_clip : TEXCOORD3;
 };
 
 [shader("vertex")]
@@ -62,6 +73,9 @@ VsOutput vs_main(VsInput input) {
     output.world_position = world_pos.xyz;
     output.world_normal = mul(gModel.model, float4(input.normal, 0.0)).xyz;
     output.uv = input.uv;
+    output.curr_clip = mul(gCamera.view_projection_unjittered, world_pos);
+    float4 prev_world = mul(gModel.prev_model, float4(input.position, 1.0));
+    output.prev_clip = mul(gCamera.prev_view_projection, prev_world);
     return output;
 }
 
@@ -75,6 +89,8 @@ struct FsOutput {
     float4 normal_metallic : SV_Target1;
     // RT2: world position (rgb) + roughness (a).
     float4 position_roughness : SV_Target2;
+    // RT3: NDC motion current -> previous frame, both unjittered (#147).
+    float2 velocity : SV_Target3;
 };
 
 [shader("fragment")]
@@ -94,5 +110,7 @@ FsOutput fs_main(VsOutput input) {
     output.albedo = float4(albedo, max(ao, 1.0 / 64.0));
     output.normal_metallic = float4(normal * 0.5 + 0.5, metallic);
     output.position_roughness = float4(input.world_position, roughness);
+    output.velocity = input.curr_clip.xy / input.curr_clip.w
+        - input.prev_clip.xy / input.prev_clip.w;
     return output;
 }

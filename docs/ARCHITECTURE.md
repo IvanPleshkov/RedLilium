@@ -542,6 +542,45 @@ let render_size = resize_manager.render_size();
 - `wait_current_slot()` waits for ONE slot (~16ms)
 - Result: 2-3x faster resize response
 
+## Temporal Contract (#147)
+
+The interface every temporal technique consumes — TAA (#148) first,
+FSR2-class upscalers later. Four pieces, designed once:
+
+- **Velocity** — the deferred G-buffer's `gbuffer_velocity` target
+  (`Rg16Float`): per-pixel NDC motion `current − previous`, both computed
+  from **unjittered** matrices (jitter in velocity would smear static
+  imagery by the jitter amplitude). Cleared to zero; background pixels stay
+  zero — the TAA resolve reprojects them from camera matrices alone.
+  Previous-frame model matrices live in the `TemporalState` resource,
+  rotated once per frame by `CameraRender` and filled by
+  `VisibleScene::gather`; an entity's first visible frame reads
+  `prev = current` (zero velocity, no spawn smear).
+- **Jitter** — a camera opts in with the `TemporalJitter` component. The
+  dispatcher offsets the projection by a Halton(2,3) sub-pixel amount
+  (±0.5 px — fixed by the geometry of temporal supersampling, not a
+  tunable; the cycle length is the only knob, stretched by upscalers).
+  Applied as a clip-space translation `T(jx, jy) · VP`, so every object
+  shifts by the same on-screen amount regardless of depth. Cameras without
+  the component render **bit-identically** to the pre-temporal path —
+  picking, gizmos, and the editor camera's goldens are untouched.
+- **Depth** — the camera target's depth buffer (reversed-Z, ADR-038),
+  already per-camera.
+- **Exposure** — manual `CameraExposure` (#142), applied only in the
+  `display_output` pass; everything upstream (including future TAA) works
+  on pre-exposure scene-referred linear.
+
+Uniform plumbing: `CameraUniforms` carries the jittered `view_projection`
+(what rasterization uses) plus the unjittered current/previous pair;
+`ModelUniforms` carries `model` + `prev_model`. Shaders that only rasterize
+declare just the leading fields — a prefix of the block is a valid smaller
+cbuffer.
+
+The contract is guarded by `editor/src/golden.rs`: velocity must be exactly
+zero on static frames (including with jitter enabled — the leak trap),
+match the projected NDC delta while an entity moves, and return to zero the
+frame after motion stops.
+
 ## Coordinate System
 
 RedLilium uses the **D3D/wgpu coordinate system convention** for consistency across backends:

@@ -150,6 +150,201 @@ fn deferred_golden_images_across_output_formats() {
     }
 }
 
+/// The temporal contract's observable (#147): the G-buffer velocity target
+/// is exactly zero for a static scene, matches the projected NDC delta on
+/// the frame an entity moves, and returns to zero the frame after motion
+/// stops (prev-model history caught up).
+#[test]
+fn deferred_velocity_buffer_tracks_motion() {
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping velocity test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+
+    // One cube front and center — the golden scene's hero position.
+    let start = Vec3::new(0.0, 0.5, 0.0);
+    let moved = Vec3::new(0.25, 0.5, 0.0);
+    let cube = ew.world.spawn();
+    let transform = Transform::from_translation(start);
+    ew.world.insert(cube, transform).unwrap();
+    ew.world
+        .insert(cube, GlobalTransform(transform.to_matrix()))
+        .unwrap();
+    ew.world.insert(cube, Visibility::VISIBLE).unwrap();
+    ew.world
+        .insert(
+            cube,
+            MeshRenderer::single(Primitive::new(
+                MeshSource::Generated(MeshGenerator::cube(0.5)),
+                MaterialInstanceSource {
+                    guid: redlilium_assets::Guid::stable("materials/pbr.matinst"),
+                },
+            )),
+        )
+        .unwrap();
+
+    let output_guid = redlilium_assets::Guid::stable("test/velocity_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+
+    let velocity_texture = ew
+        .world
+        .get::<redlilium_ecs::PipelineTargets>(camera)
+        .expect("deferred targets derived")
+        .get(redlilium_ecs::rendering::deferred::GBUFFER_VELOCITY)
+        .expect("velocity target derived")
+        .clone();
+
+    // Static scene: history equals current everywhere — exact zeros.
+    let static_velocity = decode_velocity(&read_back_texture(
+        &device,
+        &mut pipeline,
+        velocity_texture.clone(),
+        4,
+    ));
+    let static_max = max_magnitude(&static_velocity);
+    assert!(
+        static_max < 1e-4,
+        "static scene must be still: {static_max}"
+    );
+
+    // Move the cube one frame's worth: the velocity texels on it must match
+    // the NDC delta of the projected cube center.
+    let expected = {
+        let vp = ew
+            .world
+            .get::<redlilium_ecs::Camera>(camera)
+            .expect("camera")
+            .view_projection();
+        let project = |p: Vec3| {
+            let clip = vp * redlilium_core::math::Vec4::new(p.x, p.y, p.z, 1.0);
+            [clip.x / clip.w, clip.y / clip.w]
+        };
+        let curr = project(moved);
+        let prev = project(start);
+        [curr[0] - prev[0], curr[1] - prev[1]]
+    };
+    ew.world
+        .insert(cube, Transform::from_translation(moved))
+        .unwrap();
+    tick(&mut ew, &mut pipeline, &runner);
+    let moving_velocity = decode_velocity(&read_back_texture(
+        &device,
+        &mut pipeline,
+        velocity_texture.clone(),
+        4,
+    ));
+    let hot: Vec<[f32; 2]> = moving_velocity
+        .iter()
+        .copied()
+        .filter(|v| (v[0] * v[0] + v[1] * v[1]).sqrt() > 1e-4)
+        .collect();
+    assert!(hot.len() > 50, "moving cube covers texels: {}", hot.len());
+    let mean = [
+        hot.iter().map(|v| v[0]).sum::<f32>() / hot.len() as f32,
+        hot.iter().map(|v| v[1]).sum::<f32>() / hot.len() as f32,
+    ];
+    let dot = mean[0] * expected[0] + mean[1] * expected[1];
+    let norm = |v: [f32; 2]| (v[0] * v[0] + v[1] * v[1]).sqrt();
+    let cosine = dot / (norm(mean) * norm(expected)).max(1e-12);
+    assert!(
+        cosine > 0.95,
+        "velocity direction disagrees: mean {mean:?}, expected {expected:?}"
+    );
+    let ratio = norm(mean) / norm(expected).max(1e-12);
+    assert!(
+        (0.5..2.0).contains(&ratio),
+        "velocity magnitude off: mean {mean:?}, expected {expected:?} (ratio {ratio})"
+    );
+
+    // Motion stopped: history caught up next frame — zeros again.
+    tick(&mut ew, &mut pipeline, &runner);
+    let settled = decode_velocity(&read_back_texture(
+        &device,
+        &mut pipeline,
+        velocity_texture.clone(),
+        4,
+    ));
+    let settled_max = max_magnitude(&settled);
+    assert!(settled_max < 1e-4, "history must catch up: {settled_max}");
+
+    // The contract's central trap: with jitter enabled, a static scene must
+    // STILL read zero velocity — velocity math uses the unjittered pair, so
+    // sub-pixel sampling never masquerades as motion.
+    ew.world
+        .insert(camera, redlilium_ecs::TemporalJitter::default())
+        .unwrap();
+    for _ in 0..2 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let jittered = decode_velocity(&read_back_texture(
+        &device,
+        &mut pipeline,
+        velocity_texture,
+        4,
+    ));
+    let jittered_max = max_magnitude(&jittered);
+    assert!(
+        jittered_max < 1e-4,
+        "jitter leaked into velocity: {jittered_max}"
+    );
+}
+
+/// Decode an Rg16Float readback into per-texel `[vx, vy]`.
+fn decode_velocity(raw: &[u8]) -> Vec<[f32; 2]> {
+    raw.chunks_exact(4)
+        .map(|texel| {
+            [
+                f16_to_f32(u16::from_le_bytes([texel[0], texel[1]])),
+                f16_to_f32(u16::from_le_bytes([texel[2], texel[3]])),
+            ]
+        })
+        .collect()
+}
+
+fn max_magnitude(velocity: &[[f32; 2]]) -> f32 {
+    velocity
+        .iter()
+        .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())
+        .fold(0.0, f32::max)
+}
+
 /// The fixed scene: everything the color path exercises, nothing that moves.
 fn spawn_golden_scene(world: &mut redlilium_ecs::World) {
     let pbr = MaterialInstanceSource {
@@ -296,6 +491,16 @@ fn read_back(
         OutputFormat::Hdr => 8,
         _ => 4,
     };
+    read_back_texture(device, pipeline, texture, bytes_px)
+}
+
+/// Read any COPY_SRC texture of the test's SIZE back to the CPU.
+fn read_back_texture(
+    device: &Arc<redlilium_graphics::GraphicsDevice>,
+    pipeline: &mut FramePipeline,
+    texture: Arc<redlilium_graphics::Texture>,
+    bytes_px: u64,
+) -> Vec<u8> {
     let byte_size = u64::from(SIZE) * u64::from(SIZE) * bytes_px;
     let buffer = device
         .create_buffer(&BufferDescriptor::new(

@@ -14,6 +14,7 @@ mod pipeline_cache;
 mod render_schedule;
 #[cfg(feature = "rendering")]
 mod shader_manager;
+mod temporal;
 mod texture_manager;
 #[cfg(feature = "rendering")]
 mod vertex_layout_manager;
@@ -32,6 +33,7 @@ pub use pipeline_cache::PipelineCache;
 pub use render_schedule::RenderSchedule;
 #[cfg(feature = "rendering")]
 pub use shader_manager::ShaderManager;
+pub use temporal::{TemporalState, jitter_pixels};
 pub use texture_manager::{ResolvedTexture, TextureManager};
 #[cfg(feature = "rendering")]
 pub use vertex_layout_manager::VertexLayoutManager;

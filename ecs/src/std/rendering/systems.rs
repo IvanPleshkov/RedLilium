@@ -19,9 +19,20 @@ use super::scene_drawer::VisibleScene;
 use super::{
     CameraOutput, CameraTarget, CameraTargetSpec, FORWARD_PIPELINE, FrameRing, MainViewport,
     MaterialAssetManager, MaterialInstanceManager, MeshManager, PipelineCache, RenderPath,
-    RenderSchedule, ShaderManager, ShadingRegistry, SizePolicy, TextureManager,
-    VertexLayoutManager,
+    RenderSchedule, ShaderManager, ShadingRegistry, SizePolicy, TemporalJitter, TemporalState,
+    TextureManager, VertexLayoutManager, jitter_pixels,
 };
+
+/// Apply a sub-pixel jitter to a view-projection: a clip-space translation
+/// `T(jx, jy) * VP` — post-projection, so every object shifts by the same
+/// on-screen amount regardless of depth (jittering the camera *position*
+/// would parallax near geometry). Offsets are in NDC units.
+fn apply_jitter(view_projection: &redlilium_core::math::Mat4, jx: f32, jy: f32) -> [[f32; 4]; 4] {
+    let mut translation = redlilium_core::math::Mat4::identity();
+    translation[(0, 3)] = jx;
+    translation[(1, 3)] = jy;
+    mat4_to_cols_array_2d(&(translation * view_projection))
+}
 
 /// Holds the scene's main pass handle so other passes (an egui overlay,
 /// debug lines) can depend on it. Written by [`CameraRender`] each frame (set to
@@ -55,6 +66,12 @@ impl ExclusiveSystem for EnsureCameraTargets {
 
         if !world.has_resource::<TextureManager>() {
             return Ok(());
+        }
+        // The temporal contract's history resource (#147) — ensured here (an
+        // exclusive barrier every render host already runs) so CameraRender
+        // and VisibleScene::gather can rely on it without host wiring.
+        if !world.has_resource::<TemporalState>() {
+            world.insert_resource(TemporalState::default());
         }
         let viewport = world
             .has_resource::<MainViewport>()
@@ -285,6 +302,15 @@ impl System for CameraRender {
         }
         world.resource_mut::<ScenePass>().0 = None;
 
+        // Rotate the temporal history exactly once per frame (#147): current
+        // matrices become "previous" for velocity; the frame index advances
+        // the jitter sequence.
+        let temporal_frame = world.has_resource::<TemporalState>().then(|| {
+            let mut state = world.resource_mut::<TemporalState>();
+            state.begin_frame();
+            state.frame()
+        });
+
         // Every entity with a Camera AND a CameraTarget renders (ADR-029):
         // its RenderPath's pipeline records into its own target. Offscreen
         // cameras are emitted first, the primary (screen) camera last — so
@@ -304,6 +330,7 @@ impl System for CameraRender {
             };
             let outputs = world.read_all::<CameraOutput>().ok();
             let paths = world.read_all::<RenderPath>().ok();
+            let jitters = world.read_all::<TemporalJitter>().ok();
             let registry = world.resource::<PipelineRegistry>();
             targets
                 .iter()
@@ -324,10 +351,42 @@ impl System for CameraRender {
                         .and_then(|p| p.get(idx))
                         .map_or(FORWARD_PIPELINE, |path| path.pipeline.as_str());
                     let pipeline = registry.resolve(name)?;
+
+                    // The temporal contract's camera matrices (#147): raster
+                    // uses the (optionally jittered) view-projection; the
+                    // unjittered pair feeds velocity. Cameras without
+                    // TemporalJitter rasterize the unjittered matrix —
+                    // bit-identical to the pre-temporal path.
+                    let unjittered = mat4_to_cols_array_2d(&cam.view_projection());
+                    let (jittered, prev) =
+                        match (temporal_frame, world.has_resource::<TemporalState>()) {
+                            (Some(frame), true) => {
+                                let mut state = world.resource_mut::<TemporalState>();
+                                let prev = state.prev_view_proj(entity).unwrap_or(unjittered);
+                                state.record_view_proj(entity, unjittered);
+                                let jittered = jitters
+                                    .as_ref()
+                                    .and_then(|j| j.get(idx))
+                                    .map(|jitter| {
+                                        let size = target.color.size();
+                                        let [jx, jy] = jitter_pixels(frame, jitter.cycle);
+                                        apply_jitter(
+                                            &cam.view_projection(),
+                                            jx * 2.0 / size.width.max(1) as f32,
+                                            jy * 2.0 / size.height.max(1) as f32,
+                                        )
+                                    })
+                                    .unwrap_or(unjittered);
+                                (jittered, prev)
+                            }
+                            _ => (unjittered, unjittered),
+                        };
                     Some(PlannedView {
                         view: CameraView {
                             entity,
-                            view_projection: mat4_to_cols_array_2d(&cam.view_projection()),
+                            view_projection: jittered,
+                            view_projection_unjittered: unjittered,
+                            prev_view_projection: prev,
                             target: target.clone(),
                             primary,
                         },

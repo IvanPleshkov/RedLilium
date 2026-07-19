@@ -77,6 +77,10 @@ const SKY_KTX2: &[u8] = include_bytes!("../../../../std-assets/textures/ibl/sky_
 pub const GBUFFER_ALBEDO: &str = "gbuffer_albedo";
 pub const GBUFFER_NORMAL_METALLIC: &str = "gbuffer_normal_metallic";
 pub const GBUFFER_POSITION_ROUGHNESS: &str = "gbuffer_position_roughness";
+/// NDC-space motion current→previous frame, both unjittered (#147). Cleared
+/// to zero; background pixels keep it (camera-only reprojection is the TAA
+/// resolve's job, #148). `COPY_SRC` so tests can read the contract back.
+pub const GBUFFER_VELOCITY: &str = "gbuffer_velocity";
 
 /// [`PipelineTargets`] key of the scene-referred linear intermediate (#142):
 /// skybox + resolve render here; the display-output pass reads it. Future
@@ -89,10 +93,11 @@ const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 /// G-buffer attachment formats, in attachment order (must match
 /// `deferred_gbuffer.slang`'s `FsOutput`).
-const GBUFFER_FORMATS: [TextureFormat; 3] = [
+const GBUFFER_FORMATS: [TextureFormat; 4] = [
     TextureFormat::Rgba8UnormSrgb,
     TextureFormat::Rgba16Float,
     TextureFormat::Rgba16Float,
+    TextureFormat::Rg16Float,
 ];
 
 /// Uniform-array capacities of the resolve pass — must match the
@@ -621,30 +626,32 @@ impl CameraRenderPipeline for DeferredPipeline {
             .get(GBUFFER_ALBEDO)
             .map(|t| t.size().width != width || t.size().height != height)
             .unwrap_or(true)
-            || targets.get(SCENE_COLOR).is_none();
+            || targets.get(SCENE_COLOR).is_none()
+            || targets.get(GBUFFER_VELOCITY).is_none();
         if stale {
             let names = [
                 GBUFFER_ALBEDO,
                 GBUFFER_NORMAL_METALLIC,
                 GBUFFER_POSITION_ROUGHNESS,
+                GBUFFER_VELOCITY,
                 SCENE_COLOR,
             ];
             let formats = [
                 GBUFFER_FORMATS[0],
                 GBUFFER_FORMATS[1],
                 GBUFFER_FORMATS[2],
+                GBUFFER_FORMATS[3],
                 SCENE_COLOR_FORMAT,
             ];
             for (&name, format) in names.iter().zip(formats) {
+                let mut usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING;
+                if name == GBUFFER_VELOCITY {
+                    // The temporal contract's observable — tests read it back.
+                    usage |= TextureUsage::COPY_SRC;
+                }
                 let texture = device
                     .create_texture(
-                        &TextureDescriptor::new_2d(
-                            width,
-                            height,
-                            format,
-                            TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
-                        )
-                        .with_label(name),
+                        &TextureDescriptor::new_2d(width, height, format, usage).with_label(name),
                     )
                     .expect("create G-buffer texture");
                 targets.set(name, texture);
@@ -704,10 +711,11 @@ impl CameraRenderPipeline for DeferredPipeline {
         let cameras = self.cameras.lock().expect("deferred camera map poisoned");
         let camera_resources = cameras.get(&view.entity)?;
         let targets = world.get::<PipelineTargets>(view.entity)?;
-        let (Some(albedo), Some(normal), Some(position), Some(scene_color)) = (
+        let (Some(albedo), Some(normal), Some(position), Some(velocity), Some(scene_color)) = (
             targets.get(GBUFFER_ALBEDO),
             targets.get(GBUFFER_NORMAL_METALLIC),
             targets.get(GBUFFER_POSITION_ROUGHNESS),
+            targets.get(GBUFFER_VELOCITY),
             targets.get(SCENE_COLOR),
         ) else {
             return None;
@@ -747,6 +755,8 @@ impl CameraRenderPipeline for DeferredPipeline {
             let mut ring = world.resource_mut::<FrameRing>();
             let camera_offset = ring.push(bytemuck::bytes_of(&shaders::CameraUniforms {
                 view_projection: view.view_projection,
+                view_projection_unjittered: view.view_projection_unjittered,
+                prev_view_projection: view.prev_view_projection,
             }));
             let skybox_offset = ring.push(bytemuck::bytes_of(&SkyboxUniforms {
                 inv_view_proj: redlilium_core::math::mat4_to_cols_array_2d(&inv_view_proj),
@@ -783,6 +793,11 @@ impl CameraRenderPipeline for DeferredPipeline {
                 )
                 .with_color(
                     ColorAttachment::from_texture(position.clone())
+                        .with_clear_color(0.0, 0.0, 0.0, 0.0),
+                )
+                .with_color(
+                    // Velocity clears to zero — background pixels stay still.
+                    ColorAttachment::from_texture(velocity.clone())
                         .with_clear_color(0.0, 0.0, 0.0, 0.0),
                 )
                 .with_depth_stencil(

@@ -86,6 +86,12 @@ impl VisibleScene {
             return None;
         };
         let mut ring = world.resource_mut::<FrameRing>();
+        // Last frame's model matrices for velocity (#147); an entity absent
+        // from the history (fresh spawn, first frame) gets prev = current —
+        // zero velocity. The dispatcher rotated the state before gathering.
+        let mut temporal = world
+            .has_resource::<super::TemporalState>()
+            .then(|| world.resource_mut::<super::TemporalState>());
         let mut items = Vec::new();
         for (idx, renderer) in renderers.iter() {
             if let Some(vis) = visibilities.get(idx)
@@ -107,7 +113,18 @@ impl VisibleScene {
                 .get(idx)
                 .map(|g| mat4_to_cols_array_2d(&g.0))
                 .unwrap_or_else(|| mat4_to_cols_array_2d(&Mat4::identity()));
-            let model_offset = ring.push(bytemuck::bytes_of(&shaders::ModelUniforms { model }));
+            let prev_model = match (&mut temporal, world.entity_at_index(idx)) {
+                (Some(state), Some(entity)) => {
+                    let prev = state.prev_model(entity).unwrap_or(model);
+                    state.record_model(entity, model);
+                    prev
+                }
+                _ => model,
+            };
+            let model_offset = ring.push(bytemuck::bytes_of(&shaders::ModelUniforms {
+                model,
+                prev_model,
+            }));
             items.push(SceneItem {
                 model_offset,
                 casts_shadows: renderer.casts_shadows,

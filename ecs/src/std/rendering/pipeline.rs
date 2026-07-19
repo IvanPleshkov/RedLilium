@@ -38,9 +38,16 @@ pub struct CameraView {
     /// The camera entity — pipelines read their own components off it
     /// (settings, [`PipelineTargets`](super::PipelineTargets)).
     pub entity: Entity,
-    /// The camera's view-projection matrix, ready for
-    /// [`CameraUniforms`](shaders::CameraUniforms).
+    /// The camera's rasterization view-projection matrix, ready for
+    /// [`CameraUniforms`](shaders::CameraUniforms) — sub-pixel jittered when
+    /// the camera carries [`TemporalJitter`](super::TemporalJitter) (#147).
     pub view_projection: [[f32; 4]; 4],
+    /// This frame's view-projection without jitter (velocity math).
+    pub view_projection_unjittered: [[f32; 4]; 4],
+    /// Previous frame's unjittered view-projection (equals
+    /// [`view_projection_unjittered`](Self::view_projection_unjittered) on
+    /// the camera's first frame).
+    pub prev_view_projection: [[f32; 4]; 4],
     /// The camera's derived color+depth target.
     pub target: CameraTarget,
     /// Whether this is the primary camera — the one whose surface the host
@@ -177,6 +184,8 @@ impl CameraRenderPipeline for ForwardPipeline {
             let mut ring = world.resource_mut::<FrameRing>();
             let offset = ring.push(bytemuck::bytes_of(&shaders::CameraUniforms {
                 view_projection: view.view_projection,
+                view_projection_unjittered: view.view_projection_unjittered,
+                prev_view_projection: view.prev_view_projection,
             }));
             (offset, ring.buffer().clone())
         };
