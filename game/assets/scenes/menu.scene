@@ -6,33 +6,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "MeshRenderer",
-                    schema_version: 1,
-                    data: Map([
-                        ("primitives", List([
-                            Map([
-                                ("mesh", Map([
-                                    ("Generated", Map([
-                                        ("Cube", Map([
-                                            ("half_bits", U64(1056964608)),
-                                        ])),
-                                    ])),
-                                ])),
-                                ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
-                                ])),
-                            ]),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -54,13 +27,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 1,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -75,19 +48,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 1,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -110,13 +84,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 2,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -131,19 +105,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 2,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -166,13 +141,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 3,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -187,19 +162,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 3,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -222,13 +198,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 4,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -243,19 +219,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 4,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -278,13 +255,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 5,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -299,19 +276,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 5,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -334,13 +312,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 6,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -355,19 +333,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 6,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -390,13 +369,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 7,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -411,19 +390,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 7,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -446,13 +426,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 8,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -467,19 +447,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 8,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -502,13 +483,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 9,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -523,19 +504,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 9,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -558,13 +540,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 10,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -579,19 +561,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 10,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -614,13 +597,13 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 11,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -635,19 +618,20 @@
                                     ])),
                                 ])),
                                 ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
                                 ])),
                             ]),
                         ])),
+                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 11,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -670,13 +654,64 @@
                         ])),
                     ]),
                 ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
+                                ])),
+                            ]),
+                        ])),
+                        ("casts_shadows", Bool(true)),
+                    ]),
+                ),
             ],
         ),
     ],
     resources: [],
     metadata: (
         engine_fingerprint: "",
-        timestamp: 1784142989,
-        component_schemas: {},
+        timestamp: 1784421245,
+        component_schemas: {
+            "FreeFlyCamera": "5f11e33f3f164d87",
+            "EditorOnly": "c680d604bee70f02",
+            "CameraOutput": "ac6c44bbf8aba2c0",
+            "FollowCamera": "21d1db18d14cff54",
+            "CarSpawn": "c680d604bee70f02",
+            "Children": "2bb9642f7f8700bb",
+            "RoadNode": "baff4354f0b378f3",
+            "PointLight": "c2de590ad3761220",
+            "CarController": "fc41e6ec35f9fc4f",
+            "Camera": "ad5fbce407082262",
+            "RigidBody3D": "4c303fe7f34110a5",
+            "Name": "e8b72b8ee639d17d",
+            "Junction": "e7bd6fa35d204f69",
+            "Transform": "8438ab3d4ed5ea92",
+            "RenderPath": "a423c0d36d1e6289",
+            "RoadSegment": "0b419cbd0c745715",
+            "EdgeAnchor": "8bd5bd105a1910c6",
+            "Visibility": "c1bac1b299fc1b84",
+            "Collider3D": "a39247f1249750e7",
+            "Parent": "a91799e57333f547",
+            "SpotLight": "00945c87ce2de8db",
+            "DirectionalLight": "12b906e5389ce958",
+        },
     ),
 )

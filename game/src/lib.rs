@@ -387,6 +387,13 @@ impl Plugin for CarGamePlugin {
         world
             .insert(camera, Camera::perspective(FRAC_PI_4, aspect, 0.1, 500.0))
             .unwrap();
+        // The game renders through the standard deferred PBR/IBL path (#144).
+        world
+            .insert(
+                camera,
+                redlilium_ecs::RenderPath::named(redlilium_ecs::DEFERRED_PIPELINE),
+            )
+            .unwrap();
         world.insert(camera, cam_transform).unwrap();
         world
             .insert(camera, GlobalTransform(cam_transform.to_matrix()))
@@ -422,8 +429,10 @@ pub fn spawn_level_scene(world: &mut World) {
 /// Near-frictionless collider: grip is modeled by `DriveCar`'s lateral
 /// velocity bleed (see [`LATERAL_GRIP`]).
 pub fn spawn_car(world: &mut World, position: Vec3) -> redlilium_ecs::Entity {
+    // Glossy red pbr paint (game-mount asset, parented on the std pbr
+    // material) — the standard deferred path draws pbr-model materials.
     let material = MaterialInstanceSource {
-        guid: Guid::stable("materials/default.matinst"),
+        guid: Guid::stable("materials/car.matinst"),
     };
     let car_transform = Transform::new(position, Quat::identity(), Vec3::new(1.0, 0.6, 2.0));
     let car = spawn_box(world, material, car_transform);
@@ -509,7 +518,7 @@ impl redlilium_ecs::ExclusiveSystem for SpawnCarAtMarkers {
 /// Used by the scene generator ([`spawn_level_scene`]).
 pub fn spawn_level_geometry(world: &mut World) {
     let material = MaterialInstanceSource {
-        guid: Guid::stable("materials/default.matinst"),
+        guid: Guid::stable("materials/pbr.matinst"),
     };
 
     // Ground slab: static body, 40×0.2×40 m. Frictionless: rapier averages
@@ -548,7 +557,7 @@ pub fn spawn_level_geometry(world: &mut World) {
 /// at while the menu is up. Authored into [`MENU_SCENE`] by `gen_scenes`.
 pub fn spawn_menu_backdrop(world: &mut World) {
     let material = MaterialInstanceSource {
-        guid: Guid::stable("materials/default.matinst"),
+        guid: Guid::stable("materials/pbr.matinst"),
     };
     for i in 0..12 {
         let angle = i as f32 / 12.0 * std::f32::consts::TAU;

@@ -544,6 +544,7 @@ dependencies = [
  "redlilium-levels",
  "redlilium-runtime",
  "redlilium-vfs",
+ "ron",
  "wasm-bindgen",
  "winresource",
 ]

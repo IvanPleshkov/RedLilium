@@ -13,8 +13,10 @@
 
 use car_game::{LEVEL_SCENE, MENU_SCENE, PLAYGROUND_SCENE};
 use redlilium_assets::{AssetDb, AssetLoader, AssetPath, AssetRecord, Guid};
+use redlilium_ecs::rendering::{MaterialInstanceData, PropValue};
 use redlilium_ecs::{
-    SceneLoader, World, register_rendering_components, register_std_components, serialize_scene_ron,
+    MaterialInstanceLoader, SceneLoader, World, register_rendering_components,
+    register_std_components, serialize_scene_ron,
 };
 
 /// FNV-1a, matching the asset scanner's content hash (`assets::scan`), so an
@@ -73,6 +75,38 @@ fn main() {
         .expect("db insert");
         println!("wrote game/assets/{path}");
     }
+
+    // The car's paint (#144): a pbr material instance parented on the std
+    // pbr material. The asset is an empty file — the settings live in the
+    // db record, like the std material pack.
+    let car_matinst = "materials/car.matinst";
+    let car_paint = MaterialInstanceData {
+        parent: Guid::stable("materials/pbr.material"),
+        overrides: vec![
+            (
+                "base_color".to_owned(),
+                PropValue::Vec4([0.72, 0.06, 0.05, 1.0]),
+            ),
+            (
+                "pbr_params".to_owned(),
+                PropValue::Vec4([0.9, 0.35, 0.0, 0.0]),
+            ),
+        ],
+    };
+    std::fs::create_dir_all("game/assets/materials").expect("create materials dir");
+    std::fs::write(format!("game/assets/{car_matinst}"), "").expect("write car.matinst");
+    db.insert(
+        Guid::stable(car_matinst),
+        AssetRecord {
+            path: AssetPath::new("game", car_matinst),
+            kind: MaterialInstanceLoader::NAME.to_string(),
+            source_hash: fnv1a(b""),
+            settings: Some(ron::to_string(&car_paint).expect("car paint -> ron")),
+            references: Default::default(),
+        },
+    )
+    .expect("db insert");
+    println!("wrote game/assets/{car_matinst}");
 
     std::fs::write(
         "game/assets/assets.db",
