@@ -21,10 +21,10 @@ use redlilium_ecs::physics::components3d::{Collider3D, RigidBody3D};
 use redlilium_ecs::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
 use redlilium_ecs::physics::systems3d::{StepPhysics3D, SyncPhysicsBodies3D};
 use redlilium_ecs::{
-    Camera, CameraBloom, Component, DirectionalLight, Entity, ExclusiveSystem, GlobalTransform,
-    MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, Name, PostUpdate, Primitive,
-    Read, Res, ResMut, SceneManager, System, SystemContext, SystemError, Time, Transform, Update,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, WriteAll,
+    Camera, CameraAutoExposure, CameraBloom, Component, DirectionalLight, Entity, ExclusiveSystem,
+    GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, Name,
+    PostUpdate, Primitive, Read, Res, ResMut, SceneManager, System, SystemContext, SystemError,
+    Time, Transform, Update, UpdateGlobalTransforms, Visibility, WindowInput, World, WriteAll,
 };
 use redlilium_runtime::{App, GameUi, Plugin};
 // The Quit button is native-only (a browser tab has no "exit").
@@ -268,13 +268,15 @@ impl ExclusiveSystem for GameFlowUi {
             } else {
                 0.0
             };
-            // Bloom toggle (#151): the checkbox state is derived from whether
-            // the game camera carries a CameraBloom; a change inserts/removes
-            // it after the panel (so the bloom passes truly stop when off).
+            // Post-FX toggles: the checkbox states are derived from whether the
+            // game camera carries the component; a change inserts/removes it
+            // after the panel (so the passes truly stop when off). Bloom (#151),
+            // auto-exposure (#153).
             let camera = world
                 .has_resource::<GameCamera>()
                 .then(|| world.resource::<GameCamera>().0);
             let mut bloom_on = camera.map(|c| world.get::<CameraBloom>(c).is_some());
+            let mut auto_exposure_on = camera.map(|c| world.get::<CameraAutoExposure>(c).is_some());
             egui::Window::new("Car Game — dev")
                 .default_pos([10.0, 10.0])
                 .resizable(false)
@@ -284,6 +286,9 @@ impl ExclusiveSystem for GameFlowUi {
                     if let Some(on) = bloom_on.as_mut() {
                         ui.checkbox(on, "Bloom");
                     }
+                    if let Some(on) = auto_exposure_on.as_mut() {
+                        ui.checkbox(on, "Auto-exposure");
+                    }
                     ui.label("WASD — drive, Esc — menu");
                 });
             if let (Some(camera), Some(on)) = (camera, bloom_on) {
@@ -292,6 +297,14 @@ impl ExclusiveSystem for GameFlowUi {
                     let _ = world.insert(camera, CameraBloom::default());
                 } else if !on && has {
                     let _ = world.remove::<CameraBloom>(camera);
+                }
+            }
+            if let (Some(camera), Some(on)) = (camera, auto_exposure_on) {
+                let has = world.get::<CameraAutoExposure>(camera).is_some();
+                if on && !has {
+                    let _ = world.insert(camera, CameraAutoExposure::default());
+                } else if !on && has {
+                    let _ = world.remove::<CameraAutoExposure>(camera);
                 }
             }
             if world
@@ -433,6 +446,12 @@ impl Plugin for CarGamePlugin {
         // HDR bloom (#151) — a subtle default glow on highlights.
         world
             .insert(camera, redlilium_ecs::CameraBloom::default())
+            .unwrap();
+        // Auto-exposure (#153) — the compute metering adapts the exposure to
+        // the scene (drives it in place of a manual CameraExposure); the dev
+        // HUD can toggle it off to compare.
+        world
+            .insert(camera, redlilium_ecs::CameraAutoExposure::default())
             .unwrap();
         world.insert(camera, cam_transform).unwrap();
         world

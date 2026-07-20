@@ -74,6 +74,12 @@ SamplerState scene_sampler;
 Texture2D bloom;
 [[vk::binding(4, 0)]]
 SamplerState bloom_sampler;
+// Auto-exposure (#153): the metered/adapted exposure multiplier the compute
+// passes wrote, or a 1x1 neutral 1.0 buffer when the camera has no
+// CameraAutoExposure — so the multiply is a no-op there and exposure.x (the
+// manual CameraExposure) stands alone.
+[[vk::binding(5, 0)]]
+StructuredBuffer<float> auto_exposure;
 
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
@@ -84,7 +90,11 @@ float4 fs_main(VsOutput input) : SV_Target {
     // when the camera has no CameraBloom.
     float3 scene = scene_color.Sample(scene_sampler, input.uv).rgb;
     float3 glow = bloom.Sample(bloom_sampler, input.uv).rgb;
-    float3 result_color = lerp(scene, glow, exposure.y) * exposure.x;
+    // Manual exposure (exposure.x) times the auto-exposure multiplier (1.0 when
+    // the camera has no CameraAutoExposure, #153). When auto is on, exposure.x
+    // carries only the compensation bias so the metered value drives.
+    float exposure_mul = exposure.x * auto_exposure[0];
+    float3 result_color = lerp(scene, glow, exposure.y) * exposure_mul;
 
 #ifdef HDR_OUTPUT
     // Linear-HDR target: pass radiance through (encoding here would be

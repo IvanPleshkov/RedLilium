@@ -69,6 +69,20 @@ const fn vs_fs_spec(name: &'static str, path: &'static str) -> ShaderSpec {
     }
 }
 
+const CS: &[(&str, ShaderStage)] = &[("cs_main", ShaderStage::Compute)];
+
+/// A compute spec (single `cs_main` entry) with default handling — bakes to
+/// WGSL (the Vulkan backend cross-compiles it via naga at load).
+const fn cs_spec(name: &'static str, path: &'static str) -> ShaderSpec {
+    ShaderSpec {
+        name,
+        path,
+        entry_points: CS,
+        force_spirv: false,
+        skip_reflection: false,
+    }
+}
+
 const REGISTRY: &[ShaderSpec] = &[
     vs_fs_spec("egui", "shaders/library/egui.slang"),
     vs_fs_spec("blit", "runtime/shaders/blit.slang"),
@@ -120,6 +134,16 @@ const REGISTRY: &[ShaderSpec] = &[
     // HDR bloom (#151): Jimenez dual-filter down (KARIS variant) + tent up.
     vs_fs_spec("std_bloom_down", "std-assets/shaders/bloom_down.slang"),
     vs_fs_spec("std_bloom_up", "std-assets/shaders/bloom_up.slang"),
+    // Auto-exposure / eye adaptation (#153): the two compute passes — build a
+    // luminance histogram of the scene, then meter an adapting exposure.
+    cs_spec(
+        "std_histogram_build",
+        "std-assets/shaders/histogram_build.slang",
+    ),
+    cs_spec(
+        "std_histogram_resolve",
+        "std-assets/shaders/histogram_resolve.slang",
+    ),
     // Demo shaders — baked so the demos render on the default Slang-off build
     // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
     // the std deferred path now.)

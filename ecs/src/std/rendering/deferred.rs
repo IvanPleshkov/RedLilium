@@ -25,7 +25,12 @@
 //!    [`CameraBloom`](super::CameraBloom)) — the Jimenez dual-filter mip
 //!    chain over `scene_color`; the display composites the accumulated glow.
 //!    Absent ⇒ the display binds a 1×1 black bloom and the image is unchanged;
-//! 7. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
+//! 7. `histogram_build`/`histogram_resolve` (#153, only for cameras with a
+//!    [`CameraAutoExposure`](super::CameraAutoExposure)) — two compute passes
+//!    that build a luminance histogram of `scene_color` and meter an adapting
+//!    exposure the display multiplies in. Absent ⇒ the display binds a neutral
+//!    1.0 exposure buffer and the manual [`CameraExposure`] stands alone;
+//! 8. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
 //!    tonemap, and display encoding from [`SCENE_COLOR`] (or the fresh TAA
 //!    history) into the camera's color target (returned as the camera's
 //!    main pass — the [`ScenePass`](super::ScenePass) contract). The
@@ -54,11 +59,12 @@ use redlilium_core::math::{Mat4, Vec3};
 use redlilium_core::profiling::profile_scope;
 use redlilium_core::texture::ktx2::parse_ktx2;
 use redlilium_graphics::{
-    Buffer, ColorAttachment, CpuSampler, CpuTexture, DepthConvention, DepthStencilAttachment,
-    DrawCommand, GraphicsDevice, GraphicsPass, LoadOp, MaterialDescriptor, MaterialInstance, Mesh,
-    MeshDescriptor, PassHandle, RenderGraph, RenderTargetConfig, Sampler, ShaderSource,
-    ShaderStage, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsage,
-    TransferConfig, TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
+    Buffer, BufferDescriptor, BufferUsage, ColorAttachment, ComputePass, CpuSampler, CpuTexture,
+    DepthConvention, DepthStencilAttachment, DrawCommand, GraphicsDevice, GraphicsPass, LoadOp,
+    MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, PassHandle, RenderGraph,
+    RenderTargetConfig, Sampler, ShaderSource, ShaderStage, Texture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass,
+    VertexBufferLayout, VertexLayout,
 };
 
 use crate::{Entity, World};
@@ -84,6 +90,10 @@ const SSAO_BLUR_SHADER_SLANG: &str = include_str!("../../../../std-assets/shader
 const BLOOM_DOWN_SHADER_SLANG: &str =
     include_str!("../../../../std-assets/shaders/bloom_down.slang");
 const BLOOM_UP_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/bloom_up.slang");
+const HISTOGRAM_BUILD_SHADER_SLANG: &str =
+    include_str!("../../../../std-assets/shaders/histogram_build.slang");
+const HISTOGRAM_RESOLVE_SHADER_SLANG: &str =
+    include_str!("../../../../std-assets/shaders/histogram_resolve.slang");
 
 // The BRDF integration LUT (#137) stays embedded: it is environment-
 // independent (the same table for every sky), so it is a device-wide resource
@@ -134,6 +144,20 @@ fn bloom_mip_count(width: u32, height: u32) -> usize {
     }
     n
 }
+
+/// Auto-exposure metering range (#153), log2 luminance. 24 stops spans a night
+/// scene to bright daylight; the histogram's bin 0 collects everything below
+/// `2^AE_LOG_MIN` (so a dark background does not pull exposure down).
+const AE_LOG_MIN: f32 = -8.0;
+const AE_LOG_MAX: f32 = 16.0;
+/// Side of the square grid the histogram build samples the scene over — the
+/// metering work is resolution-independent (512×512 = 256k samples). A
+/// multiple of the 16×16 workgroup so the dispatch tiles exactly.
+const AE_SAMPLE_DIM: u32 = 512;
+/// Histogram bin count — must match `histogram_build`/`histogram_resolve`.
+const AE_BINS: usize = 256;
+/// Middle-grey key the metered average luminance targets (#153).
+const AE_KEY: f32 = 0.18;
 
 /// [`PipelineTargets`] key of the scene-referred linear intermediate (#142):
 /// skybox + resolve render here; the display-output pass reads it. Future
@@ -363,6 +387,28 @@ struct BloomUniforms {
     params: [f32; 4],
 }
 
+/// Uniforms of the auto-exposure histogram build (must match
+/// `histogram_build.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AeBuildUniforms {
+    /// x = [`AE_LOG_MIN`], y = [`AE_LOG_MAX`], z = [`AE_SAMPLE_DIM`], w unused.
+    params: [f32; 4],
+}
+
+/// Uniforms of the auto-exposure histogram resolve (must match
+/// `histogram_resolve.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AeResolveUniforms {
+    /// x = [`AE_LOG_MIN`], y = [`AE_LOG_MAX`], z = brighten rate (this frame),
+    /// w = [`AE_KEY`].
+    params: [f32; 4],
+    /// x = min multiplier (`2^min_ev`), y = max (`2^max_ev`), z = darken rate,
+    /// w unused.
+    limits: [f32; 4],
+}
+
 /// The engine's built-in deferred PBR/IBL path — see the module docs.
 #[derive(Default)]
 pub struct DeferredPipeline {
@@ -393,6 +439,11 @@ struct SharedResources {
     /// camera has no [`CameraBloom`](super::CameraBloom) (#151) — the composite
     /// adds zero, so the no-bloom image is byte-identical.
     black_bloom: Arc<Texture>,
+    /// Single-`f32` storage buffer holding `1.0`, bound to the display pass's
+    /// exposure slot when a camera has no
+    /// [`CameraAutoExposure`](super::CameraAutoExposure) (#153) — the multiply
+    /// is a no-op, so the manual exposure stands alone.
+    neutral_exposure: Arc<Buffer>,
     ibl_sampler: Arc<Sampler>,
     gbuffer_sampler: Arc<Sampler>,
     /// Fullscreen triangle (the shaders use `SV_VertexID` only; the buffer
@@ -401,6 +452,30 @@ struct SharedResources {
     /// Staged one-time uploads (BRDF LUT, fallback cube, dummy vertex buffer),
     /// drained into the first recorded frame's graph.
     pending_uploads: Vec<TransferOperation>,
+}
+
+/// One camera's auto-exposure compute resources (#153), present only when it
+/// has a [`CameraAutoExposure`](super::CameraAutoExposure). The `exposure`
+/// buffer is also bound (read-only) by the display pass; the histogram and
+/// uniform buffers are compute-internal.
+struct AutoExposureResources {
+    /// [`AE_BINS`] × `u32` luminance histogram (`STORAGE | COPY_DST`): the
+    /// build pass accumulates into it, the resolve pass reads it, the prep
+    /// transfer clears it each frame.
+    histogram: Arc<Buffer>,
+    /// Single `f32` persistent exposure multiplier the resolve pass smooths
+    /// and the display multiplies in. Survives frames (eye adaptation).
+    exposure: Arc<Buffer>,
+    /// Per-frame uniform buffers (the compute dispatch has no dynamic offset,
+    /// so these can't ride the ring — they're written each frame by the prep
+    /// transfer).
+    build_uniform: Arc<Buffer>,
+    resolve_uniform: Arc<Buffer>,
+    build: Arc<MaterialInstance>,
+    resolve: Arc<MaterialInstance>,
+    /// Whether the persistent `exposure` slot has been seeded to neutral yet —
+    /// false right after (re)creation, like [`CameraResources::history_primed`].
+    primed: bool,
 }
 
 /// One camera's fullscreen-pass materials and the identities they were built
@@ -437,6 +512,13 @@ struct CameraResources {
     /// Whether bloom is on — part of the fresh-check (toggling rebuilds the
     /// display's bloom binding and the bloom materials).
     bloom_enabled: bool,
+    /// Auto-exposure compute resources (#153), present only when the camera has
+    /// a [`CameraAutoExposure`](super::CameraAutoExposure). `None` ⇒ the display
+    /// binds the shared neutral (1.0) exposure buffer and no compute pass runs.
+    auto_exposure: Option<AutoExposureResources>,
+    /// Whether auto-exposure is on — part of the fresh-check (toggling rebuilds
+    /// the display's exposure binding and the compute materials).
+    auto_enabled: bool,
     /// Whether the TAA history holds a real frame yet — false right after
     /// (re)creation (resize/format change); the first TAA frame then takes
     /// the current frame wholesale instead of blending with garbage.
@@ -478,6 +560,7 @@ impl SharedResources {
         let fallback_cube = create_black_cube(device, &mut pending_uploads);
         let white_ao = create_white_ao(device, &mut pending_uploads);
         let black_bloom = create_black_bloom(device, &mut pending_uploads);
+        let neutral_exposure = create_neutral_exposure(device, &mut pending_uploads);
 
         let ibl_sampler = device
             .create_sampler_from_cpu(&CpuSampler::linear().with_name("ibl_sampler"))
@@ -515,6 +598,7 @@ impl SharedResources {
             fallback_cube,
             white_ao,
             black_bloom,
+            neutral_exposure,
             ibl_sampler,
             gbuffer_sampler,
             fullscreen_mesh,
@@ -592,6 +676,31 @@ fn create_black_bloom(
     texture
 }
 
+/// Create the single-`f32` storage buffer holding `1.0` bound to the display
+/// pass's exposure slot when a camera has no
+/// [`CameraAutoExposure`](super::CameraAutoExposure) (#153): the display
+/// multiplies its manual exposure by it, so the multiply is a no-op.
+fn create_neutral_exposure(
+    device: &Arc<GraphicsDevice>,
+    ops: &mut Vec<TransferOperation>,
+) -> Arc<Buffer> {
+    let buffer = device
+        .create_buffer(
+            &BufferDescriptor::new(
+                std::mem::size_of::<f32>() as u64,
+                BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            )
+            .with_label("exposure_neutral"),
+        )
+        .expect("create neutral exposure buffer");
+    ops.push(TransferOperation::write_buffer(
+        Arc::clone(&buffer),
+        0,
+        Arc::from(bytemuck::bytes_of(&1.0f32)),
+    ));
+    buffer
+}
+
 /// Parse one baked KTX2 blob, create its GPU texture, and stage every
 /// (mip, layer) upload — the same path the asset loader uses (#120).
 fn create_ibl_texture(
@@ -664,6 +773,10 @@ impl CameraResources {
         // `CameraBloom` (#151); `None`/empty binds the shared black bloom to
         // the display and records no bloom pass.
         bloom_targets: Option<&[&Arc<Texture>]>,
+        // Whether the camera has a `CameraAutoExposure` (#153): builds the two
+        // compute passes and binds the metered exposure buffer to the display;
+        // `false` binds the shared neutral (1.0) exposure and records nothing.
+        auto_exposure_on: bool,
         color_format: TextureFormat,
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
@@ -798,6 +911,97 @@ impl CameraResources {
         let skybox =
             Arc::new(MaterialInstance::new(skybox_material).with_binding_group(skybox_group));
 
+        // --- Auto-exposure compute resources (#153), only when opted in ---
+        // Built before the display so the display can bind the metered exposure
+        // buffer. When off, the display binds the shared neutral (1.0) buffer —
+        // the fallback-binding pattern keeps the display group present either
+        // way. The two compute materials are single-group (group 0) and carry
+        // no dynamic offset (dispatch has none), so their uniforms live in
+        // dedicated per-camera buffers written each frame by the prep transfer.
+        let (auto_exposure, exposure_display_buf) = if auto_exposure_on {
+            let storage = BufferUsage::STORAGE | BufferUsage::COPY_DST;
+            let uniform = BufferUsage::UNIFORM | BufferUsage::COPY_DST;
+            let make_buf = |size: u64, usage: BufferUsage, label: &str| -> Option<Arc<Buffer>> {
+                device
+                    .create_buffer(&BufferDescriptor::new(size, usage).with_label(label))
+                    .inspect_err(|e| log::error!("deferred: {label} buffer failed: {e}"))
+                    .ok()
+            };
+            let histogram = make_buf((AE_BINS * 4) as u64, storage, "ae_histogram")?;
+            let exposure = make_buf(std::mem::size_of::<f32>() as u64, storage, "ae_exposure")?;
+            let build_uniform = make_buf(
+                std::mem::size_of::<AeBuildUniforms>() as u64,
+                uniform,
+                "ae_build_uniform",
+            )?;
+            let resolve_uniform = make_buf(
+                std::mem::size_of::<AeResolveUniforms>() as u64,
+                uniform,
+                "ae_resolve_uniform",
+            )?;
+
+            let compute_material = |source: &str, label: &str| {
+                device
+                    .create_material(
+                        &MaterialDescriptor::new()
+                            .with_shader(ShaderSource::slang(
+                                ShaderStage::Compute,
+                                source.as_bytes().to_vec(),
+                                "cs_main",
+                                vec![],
+                            ))
+                            .with_label(label),
+                    )
+                    .inspect_err(|e| log::error!("deferred: {label} material failed: {e}"))
+                    .ok()
+            };
+            // Build: uniform, scene_color (linear-sampled over the grid),
+            // histogram (read-write).
+            let build_mat =
+                compute_material(HISTOGRAM_BUILD_SHADER_SLANG, "deferred_histogram_build")?;
+            let build_group = device
+                .create_binding_group(
+                    build_mat.binding_layouts()[0].clone(),
+                    BindingGroupDescriptor::new()
+                        .with_buffer(0, build_uniform.clone())
+                        .with_texture(1, scene_color.clone())
+                        .with_sampler(2, shared.ibl_sampler.clone())
+                        .with_buffer(3, histogram.clone()),
+                )
+                .ok()?;
+            let build = Arc::new(MaterialInstance::new(build_mat).with_binding_group(build_group));
+            // Resolve: uniform, histogram (read-only), exposure (read-write).
+            let resolve_mat =
+                compute_material(HISTOGRAM_RESOLVE_SHADER_SLANG, "deferred_histogram_resolve")?;
+            let resolve_group = device
+                .create_binding_group(
+                    resolve_mat.binding_layouts()[0].clone(),
+                    BindingGroupDescriptor::new()
+                        .with_buffer(0, resolve_uniform.clone())
+                        .with_buffer(1, histogram.clone())
+                        .with_buffer(2, exposure.clone()),
+                )
+                .ok()?;
+            let resolve =
+                Arc::new(MaterialInstance::new(resolve_mat).with_binding_group(resolve_group));
+
+            let display_buf = exposure.clone();
+            (
+                Some(AutoExposureResources {
+                    histogram,
+                    exposure,
+                    build_uniform,
+                    resolve_uniform,
+                    build,
+                    resolve,
+                    primed: false,
+                }),
+                display_buf,
+            )
+        } else {
+            (None, shared.neutral_exposure.clone())
+        };
+
         // --- Display-output material (#142): the only format-variant pass ---
         let variant = output_variant(DISPLAY_SHADER_SLANG, color_format)?;
         let display_material = device
@@ -844,7 +1048,10 @@ impl CameraResources {
                         .with_texture(1, source.clone())
                         .with_sampler(2, shared.gbuffer_sampler.clone())
                         .with_texture(3, bloom_top.clone())
-                        .with_sampler(4, shared.ibl_sampler.clone()),
+                        .with_sampler(4, shared.ibl_sampler.clone())
+                        // Auto-exposure multiplier (#153): the camera's metered
+                        // buffer, or the shared neutral 1.0 when off.
+                        .with_buffer(5, exposure_display_buf.clone()),
                 )
                 .ok()?;
             Some(Arc::new(
@@ -1097,6 +1304,8 @@ impl CameraResources {
             bloom_down,
             bloom_up,
             bloom_enabled: bloom_targets.is_some_and(|m| !m.is_empty()),
+            auto_enabled: auto_exposure.is_some(),
+            auto_exposure,
             history_primed: false,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
             env_ptr: env.map(|e| Arc::as_ptr(e) as usize),
@@ -1291,6 +1500,11 @@ impl CameraRenderPipeline for DeferredPipeline {
             })
             .flatten();
         let bloom_on = bloom_chain.is_some();
+        // Auto-exposure (#153): buffers/materials live in CameraResources (no
+        // pipeline targets), so this just gates the create call. `auto_on`
+        // folds into the fresh-check so toggling rebuilds the display's
+        // exposure binding and the compute materials.
+        let auto_on = world.get::<super::CameraAutoExposure>(camera).is_some();
         let mut cameras = self.cameras.lock().expect("deferred camera map poisoned");
         let fresh = cameras.get(&camera).is_some_and(|c| {
             c.albedo_ptr == albedo_ptr
@@ -1298,6 +1512,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 && c.env_ptr == env_ptr
                 && c.ao_enabled == ao_on
                 && c.bloom_enabled == bloom_on
+                && c.auto_enabled == auto_on
         });
         if !fresh {
             match CameraResources::create(
@@ -1309,6 +1524,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 env.as_ref(),
                 ssao_targets,
                 bloom_chain.as_deref(),
+                auto_on,
                 color_format,
                 &ring_buffer,
             ) {
@@ -1379,11 +1595,26 @@ impl CameraRenderPipeline for DeferredPipeline {
             camera_resources.max_reflection_lod,
         ];
 
-        // Manual exposure (#142): the camera's CameraExposure, neutral when
-        // absent.
-        let exposure = world
-            .get::<super::CameraExposure>(view.entity)
-            .map_or(1.0, |e| e.exposure);
+        // Exposure the display applies (#142). With auto-exposure (#153) on,
+        // the metered multiplier comes from the GPU buffer and this carries
+        // only the compensation bias (`2^compensation`); otherwise it is the
+        // manual CameraExposure (neutral when absent).
+        let exposure = if camera_resources.auto_exposure.is_some() {
+            world
+                .get::<super::CameraAutoExposure>(view.entity)
+                .map_or(1.0, |a| 2f32.powf(a.compensation))
+        } else {
+            world
+                .get::<super::CameraExposure>(view.entity)
+                .map_or(1.0, |e| e.exposure)
+        };
+        // Frame delta for the eye-adaptation smoothing (#153); a 60 Hz step
+        // when the clock is absent (headless/tests).
+        let dt = if world.has_resource::<crate::RealTime>() {
+            world.resource::<crate::RealTime>().delta() as f32
+        } else {
+            1.0 / 60.0
+        };
 
         // Bloom intensity (#151): the CameraBloom weight, but only when the
         // bloom materials/targets exist (else 0 — the display binds black).
@@ -1777,6 +2008,92 @@ impl CameraRenderPipeline for DeferredPipeline {
             })
         };
 
+        // --- 4c. Auto-exposure (#153): histogram build + resolve compute, when
+        // the camera opted in. Reads scene_color (post-resolve), writes the
+        // persistent exposure buffer the display multiplies in. Independent of
+        // TAA and bloom; the display waits on the resolve.
+        let auto_handle: Option<PassHandle> = {
+            let ae_params = world
+                .get::<super::CameraAutoExposure>(view.entity)
+                .map(|a| {
+                    // Per-frame smoothing rate from dt + the eye-like speeds.
+                    let rate = |speed: f32| 1.0 - (-dt * speed.max(0.0)).exp();
+                    (
+                        rate(a.speed_up),
+                        rate(a.speed_down),
+                        2f32.powf(a.min_ev),
+                        2f32.powf(a.max_ev),
+                    )
+                });
+            match (camera_resources.auto_exposure.as_mut(), ae_params) {
+                (Some(ae), Some((rate_up, rate_down, min_mult, max_mult))) => {
+                    let build_u = AeBuildUniforms {
+                        params: [AE_LOG_MIN, AE_LOG_MAX, AE_SAMPLE_DIM as f32, 0.0],
+                    };
+                    let resolve_u = AeResolveUniforms {
+                        params: [AE_LOG_MIN, AE_LOG_MAX, rate_up, AE_KEY],
+                        limits: [min_mult, max_mult, rate_down, 0.0],
+                    };
+                    // Uniforms + histogram clear ride a transfer the build waits
+                    // on (the dispatch has no dynamic offset, so uniforms can't
+                    // ride the ring).
+                    let mut ops = vec![
+                        TransferOperation::write_buffer(
+                            ae.build_uniform.clone(),
+                            0,
+                            Arc::from(bytemuck::bytes_of(&build_u)),
+                        ),
+                        TransferOperation::write_buffer(
+                            ae.resolve_uniform.clone(),
+                            0,
+                            Arc::from(bytemuck::bytes_of(&resolve_u)),
+                        ),
+                        TransferOperation::write_buffer(
+                            ae.histogram.clone(),
+                            0,
+                            Arc::from(vec![0u8; AE_BINS * 4]),
+                        ),
+                    ];
+                    if !ae.primed {
+                        // Seed the persistent exposure slot to neutral before the
+                        // first read (create_buffer leaves it uninitialized).
+                        ops.push(TransferOperation::write_buffer(
+                            ae.exposure.clone(),
+                            0,
+                            Arc::from(bytemuck::bytes_of(&1.0f32)),
+                        ));
+                        ae.primed = true;
+                    }
+                    let mut prep = TransferPass::new("auto_exposure_prep".into());
+                    prep.set_transfer_config(TransferConfig::new().with_operations(ops));
+                    let prep_handle = graph.add_transfer_pass(prep);
+
+                    // Build: one thread per grid sample (fixed 512×512).
+                    let mut build_pass = ComputePass::new("histogram_build".into());
+                    build_pass.add_dispatch(
+                        ae.build.clone(),
+                        AE_SAMPLE_DIM / 16,
+                        AE_SAMPLE_DIM / 16,
+                        1,
+                    );
+                    let build_handle = graph.add_compute_pass(build_pass);
+                    graph.add_dependency(build_handle, prep_handle); // uniforms + cleared histogram
+                    graph.add_dependency(build_handle, resolve_handle); // scene_color written
+
+                    // Resolve: single thread meters + smooths the exposure.
+                    let mut resolve_pass = ComputePass::new("histogram_resolve".into());
+                    resolve_pass.add_dispatch(ae.resolve.clone(), 1, 1, 1);
+                    let ae_resolve_handle = graph.add_compute_pass(resolve_pass);
+                    graph.add_dependency(ae_resolve_handle, build_handle);
+                    // The resolve reads the histogram and (first frame) the
+                    // prep-seeded exposure — anchor after the prep too.
+                    graph.add_dependency(ae_resolve_handle, prep_handle);
+                    Some(ae_resolve_handle)
+                }
+                _ => None,
+            }
+        };
+
         // --- 5. Display output (#142): scene-referred -> the camera target ---
         let mut display_pass = GraphicsPass::new("display_output".into());
         display_pass.set_render_targets(
@@ -1799,6 +2116,11 @@ impl CameraRenderPipeline for DeferredPipeline {
         // chain's final write (#151).
         if let Some(bloom_final) = bloom_final {
             graph.add_dependency(display_handle, bloom_final);
+        }
+        // The display reads the metered exposure buffer — order it after the
+        // auto-exposure resolve wrote it (#153).
+        if let Some(auto_handle) = auto_handle {
+            graph.add_dependency(display_handle, auto_handle);
         }
 
         Some(display_handle)

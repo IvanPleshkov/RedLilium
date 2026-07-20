@@ -29,10 +29,10 @@ use redlilium_core::color::{f16_to_f32, srgb_encode, tonemap_pbr_neutral};
 use redlilium_core::math::{Vec3, quat_looking_along};
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
-    CameraAmbientOcclusion, CameraBloom, CameraEnvironment, CameraOutput, DirectionalLight,
-    EcsRunner, GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource,
-    OutputFormat, PointLight, Primitive, Render, RenderSchedule, SizePolicy, TextureManager,
-    Transform, Visibility,
+    CameraAmbientOcclusion, CameraAutoExposure, CameraBloom, CameraEnvironment, CameraOutput,
+    DirectionalLight, EcsRunner, GlobalTransform, MaterialInstanceSource, MeshGenerator,
+    MeshRenderer, MeshSource, OutputFormat, PointLight, Primitive, Render, RenderSchedule,
+    SizePolicy, TextureManager, Transform, Visibility,
 };
 use redlilium_graphics::{
     BufferDescriptor, BufferUsage, FramePipeline, GraphicsInstance, TextureFormat, TransferConfig,
@@ -685,6 +685,142 @@ fn deferred_bloom_brightens_highlights() {
 
     // Golden regression on the bloom look.
     compare_or_update("deferred_bloom.png", &with_bloom);
+}
+
+/// Auto-exposure (#153) must adapt toward a target and route the metered
+/// multiplier to the display. Renders the fixed scene with
+/// `CameraAutoExposure`, lets the eye adaptation converge, and asserts two
+/// tuning-independent properties: the adaptation reaches a **stable** fixed
+/// point (one more frame barely moves — no flicker), and the
+/// exposure-compensation knob scales the result **monotonically** (−2 vs +2
+/// stops, which leave the metered value untouched, brighten the image). A
+/// golden image guards the converged look.
+#[test]
+fn deferred_auto_exposure_adapts_and_tracks_compensation() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping auto-exposure test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+    spawn_golden_scene(&mut ew.world);
+
+    let output_guid = redlilium_assets::Guid::stable("test/auto_exposure_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+    ew.world
+        .insert(camera, CameraEnvironment::default())
+        .unwrap();
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+
+    let capture = |ew: &EditorWorld, pipeline: &mut FramePipeline| {
+        to_display_rgba8(
+            &read_back(ew, &device, pipeline, output_guid, OutputFormat::Srgb),
+            OutputFormat::Srgb,
+        )
+    };
+    let mean = |img: &image::RgbaImage| -> f64 {
+        let sum: u64 = img
+            .pixels()
+            .map(|p| p.0[0] as u64 + p.0[1] as u64 + p.0[2] as u64)
+            .sum();
+        sum as f64 / (SIZE * SIZE) as f64
+    };
+
+    // Enable auto-exposure and let the eye adaptation converge (dt = 1/60, the
+    // default speeds settle well within this budget).
+    ew.world
+        .insert(camera, CameraAutoExposure::default())
+        .unwrap();
+    for _ in 0..150 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let converged = capture(&ew, &mut pipeline);
+
+    // Stability: one more frame must barely move — the metered value reached
+    // its fixed point (no per-frame flicker).
+    tick(&mut ew, &mut pipeline, &runner);
+    let settled = capture(&ew, &mut pipeline);
+    let drift = (mean(&converged) - mean(&settled)).abs();
+    assert!(
+        drift < 3.0,
+        "auto-exposure still drifting after convergence (Δmean {drift:.2}) — not a stable fixed point"
+    );
+
+    // Compensation tracks: it does not touch the histogram, so −2 vs +2 stops
+    // must scale the image monotonically brighter. Compensation is read fresh
+    // each frame; a couple of frames flush the ring.
+    ew.world
+        .insert(
+            camera,
+            CameraAutoExposure {
+                compensation: -2.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for _ in 0..2 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let dark = capture(&ew, &mut pipeline);
+    ew.world
+        .insert(
+            camera,
+            CameraAutoExposure {
+                compensation: 2.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for _ in 0..2 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let bright = capture(&ew, &mut pipeline);
+    drop(pipeline);
+
+    let (md, mb) = (mean(&dark), mean(&bright));
+    assert!(
+        mb > md + 10.0,
+        "exposure compensation did not brighten the image (+2 EV {mb:.1} vs -2 EV {md:.1}) — \
+         the metered exposure buffer is not reaching the display"
+    );
+
+    // Golden regression on the converged (compensation-0) look.
+    compare_or_update("deferred_auto_exposure.png", &converged);
 }
 
 /// Decode an Rg16Float readback into per-texel `[vx, vy]`.
