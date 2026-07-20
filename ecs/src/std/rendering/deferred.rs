@@ -21,7 +21,11 @@
 //!    [`TemporalJitter`](super::TemporalJitter)) — accumulates the jittered
 //!    frames into the [`TAA_HISTORY`] ping-pong (variance clipping in
 //!    YCoCg; frame parity picks read/write);
-//! 6. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
+//! 6. `bloom_down`/`bloom_up` (#151, only for cameras with a
+//!    [`CameraBloom`](super::CameraBloom)) — the Jimenez dual-filter mip
+//!    chain over `scene_color`; the display composites the accumulated glow.
+//!    Absent ⇒ the display binds a 1×1 black bloom and the image is unchanged;
+//! 7. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
 //!    tonemap, and display encoding from [`SCENE_COLOR`] (or the fresh TAA
 //!    history) into the camera's color target (returned as the camera's
 //!    main pass — the [`ScenePass`](super::ScenePass) contract). The
@@ -77,6 +81,9 @@ const DISPLAY_SHADER_SLANG: &str =
 const TAA_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/taa_resolve.slang");
 const SSAO_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/ssao.slang");
 const SSAO_BLUR_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/ssao_blur.slang");
+const BLOOM_DOWN_SHADER_SLANG: &str =
+    include_str!("../../../../std-assets/shaders/bloom_down.slang");
+const BLOOM_UP_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/bloom_up.slang");
 
 // The BRDF integration LUT (#137) stays embedded: it is environment-
 // independent (the same table for every sky), so it is a device-wide resource
@@ -102,6 +109,31 @@ pub const SSAO_AO: &str = "ssao_ao";
 
 /// Format of the SSAO targets — a single occlusion channel.
 const SSAO_FORMAT: TextureFormat = TextureFormat::R8Unorm;
+
+/// Max bloom mip levels (#151). Six half-steps from a half-res start reach a
+/// few texels wide at 1080p — a wide, smooth glow without over-spending.
+const MAX_BLOOM_MIPS: usize = 6;
+
+/// [`PipelineTargets`] key of bloom mip `i` (#151): `bloom_0` is half the
+/// camera resolution, each further mip half the previous. Present only for
+/// cameras with a [`CameraBloom`](super::CameraBloom). `Rgba16Float`.
+fn bloom_mip_key(i: usize) -> String {
+    format!("bloom_{i}")
+}
+
+/// Number of bloom mips for a camera of `width`×`height`: half-res start,
+/// halving until a dimension would drop below 2 texels, capped at
+/// [`MAX_BLOOM_MIPS`].
+fn bloom_mip_count(width: u32, height: u32) -> usize {
+    let mut n = 0;
+    let (mut w, mut h) = (width / 2, height / 2);
+    while n < MAX_BLOOM_MIPS && w >= 2 && h >= 2 {
+        n += 1;
+        w /= 2;
+        h /= 2;
+    }
+    n
+}
 
 /// [`PipelineTargets`] key of the scene-referred linear intermediate (#142):
 /// skybox + resolve render here; the display-output pass reads it. Future
@@ -266,7 +298,9 @@ fn gather_lights(world: &World) -> ResolveUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DisplayOutputUniforms {
-    /// x = linear exposure multiplier ([`CameraExposure`]), yzw unused.
+    /// x = linear exposure multiplier ([`CameraExposure`]); y = bloom
+    /// intensity ([`CameraBloom`](super::CameraBloom), #151; 0 when the bloom
+    /// input is the black fallback); zw unused.
     exposure: [f32; 4],
 }
 
@@ -320,6 +354,15 @@ struct SsaoBlurUniforms {
     params: [f32; 4],
 }
 
+/// Uniforms of the bloom down/up passes (must match `bloom_down.slang` /
+/// `bloom_up.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BloomUniforms {
+    /// xy = the *source* texel size (1 / source extent); zw unused.
+    params: [f32; 4],
+}
+
 /// The engine's built-in deferred PBR/IBL path — see the module docs.
 #[derive(Default)]
 pub struct DeferredPipeline {
@@ -346,6 +389,10 @@ struct SharedResources {
     /// reads 1.0, so the ambient term is unchanged and the no-SSAO image is
     /// byte-identical.
     white_ao: Arc<Texture>,
+    /// 1×1 black `Rgba16Float` bound to the display pass's bloom slot when a
+    /// camera has no [`CameraBloom`](super::CameraBloom) (#151) — the composite
+    /// adds zero, so the no-bloom image is byte-identical.
+    black_bloom: Arc<Texture>,
     ibl_sampler: Arc<Sampler>,
     gbuffer_sampler: Arc<Sampler>,
     /// Fullscreen triangle (the shaders use `SV_VertexID` only; the buffer
@@ -380,6 +427,16 @@ struct CameraResources {
     /// Whether SSAO is on — part of the fresh-check so toggling the component
     /// rebuilds the resolve (its AO binding) and the SSAO materials.
     ao_enabled: bool,
+    /// Bloom passes (#151), present only when the camera has a
+    /// [`CameraBloom`](super::CameraBloom). `bloom_down[i]` writes `bloom_i`
+    /// (instance 0 Karis-samples `scene_color`, the rest sample the previous
+    /// mip); `bloom_up[i]` additively upsamples `bloom_{i+1}` into `bloom_i`.
+    /// Empty ⇒ the display binds the shared black bloom and no bloom pass runs.
+    bloom_down: Vec<Arc<MaterialInstance>>,
+    bloom_up: Vec<Arc<MaterialInstance>>,
+    /// Whether bloom is on — part of the fresh-check (toggling rebuilds the
+    /// display's bloom binding and the bloom materials).
+    bloom_enabled: bool,
     /// Whether the TAA history holds a real frame yet — false right after
     /// (re)creation (resize/format change); the first TAA frame then takes
     /// the current frame wholesale instead of blending with garbage.
@@ -420,6 +477,7 @@ impl SharedResources {
         );
         let fallback_cube = create_black_cube(device, &mut pending_uploads);
         let white_ao = create_white_ao(device, &mut pending_uploads);
+        let black_bloom = create_black_bloom(device, &mut pending_uploads);
 
         let ibl_sampler = device
             .create_sampler_from_cpu(&CpuSampler::linear().with_name("ibl_sampler"))
@@ -456,6 +514,7 @@ impl SharedResources {
             brdf_lut,
             fallback_cube,
             white_ao,
+            black_bloom,
             ibl_sampler,
             gbuffer_sampler,
             fullscreen_mesh,
@@ -505,6 +564,30 @@ fn create_white_ao(device: &Arc<GraphicsDevice>, ops: &mut Vec<TransferOperation
     ops.push(
         TransferOperation::upload_texture_level(device, Arc::clone(&texture), 0, 0, &[255u8])
             .expect("stage white AO upload"),
+    );
+    texture
+}
+
+/// Create the 1×1 black `Rgba16Float` texture bound to the display pass's
+/// bloom slot when a camera has no [`CameraBloom`](super::CameraBloom) (#151):
+/// the composite adds zero.
+fn create_black_bloom(
+    device: &Arc<GraphicsDevice>,
+    ops: &mut Vec<TransferOperation>,
+) -> Arc<Texture> {
+    let usage = TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST;
+    let texture = device
+        .create_texture(
+            &TextureDescriptor::new_2d(1, 1, SCENE_COLOR_FORMAT, usage)
+                .with_mip_levels(1)
+                .with_label("bloom_black"),
+        )
+        .expect("create black bloom");
+    // One 1×1 Rgba16Float texel (4×f16) of zero.
+    let black = [0u8; 8];
+    ops.push(
+        TransferOperation::upload_texture_level(device, Arc::clone(&texture), 0, 0, &black)
+            .expect("stage black bloom upload"),
     );
     texture
 }
@@ -577,6 +660,10 @@ impl CameraResources {
         // `CameraAmbientOcclusion` (#150); `None` binds the shared white AO to
         // the resolve and records no SSAO pass.
         ssao_targets: Option<[&Arc<Texture>; 2]>,
+        // The bloom mip chain (`bloom_0..N`) when the camera has a
+        // `CameraBloom` (#151); `None`/empty binds the shared black bloom to
+        // the display and records no bloom pass.
+        bloom_targets: Option<&[&Arc<Texture>]>,
         color_format: TextureFormat,
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
@@ -735,6 +822,12 @@ impl CameraResources {
             )
             .inspect_err(|e| log::error!("deferred: display-output material failed: {e}"))
             .ok()?;
+        // Bloom the display composites: the accumulated top mip (#151), or the
+        // shared black (adds zero) when the camera has no bloom. Sampled
+        // linearly — the mip is lower-res than the scene.
+        let bloom_top = bloom_targets
+            .and_then(|m| m.first())
+            .map_or_else(|| shared.black_bloom.clone(), |t| (*t).clone());
         // One instance per possible source: scene_color (TAA off) or either
         // history texture (TAA on — the one the TAA pass just wrote).
         let display_instance = |source: &Arc<Texture>| -> Option<Arc<MaterialInstance>> {
@@ -749,7 +842,9 @@ impl CameraResources {
                             std::mem::size_of::<DisplayOutputUniforms>() as u64,
                         )
                         .with_texture(1, source.clone())
-                        .with_sampler(2, shared.gbuffer_sampler.clone()),
+                        .with_sampler(2, shared.gbuffer_sampler.clone())
+                        .with_texture(3, bloom_top.clone())
+                        .with_sampler(4, shared.ibl_sampler.clone()),
                 )
                 .ok()?;
             Some(Arc::new(
@@ -886,6 +981,110 @@ impl CameraResources {
             None => (None, None),
         };
 
+        // --- Bloom passes (#151), only when the camera opted in ---
+        let (bloom_down, bloom_up) = match bloom_targets {
+            Some(mips) if !mips.is_empty() => {
+                let n = mips.len();
+                // Downsample material with the KARIS system variant selected.
+                let down_material =
+                    |karis: bool, label: &str| -> Option<Arc<redlilium_graphics::Material>> {
+                        let variant =
+                            redlilium_graphics::ShaderVariantSpace::parse(BLOOM_DOWN_SHADER_SLANG)
+                                .ok()?
+                                .select()
+                                .system("KARIS", karis)
+                                .build()
+                                .ok()?;
+                        device
+                            .create_material(
+                                &MaterialDescriptor::new()
+                                    .with_shader(ShaderSource::slang(
+                                        ShaderStage::Vertex,
+                                        BLOOM_DOWN_SHADER_SLANG.as_bytes().to_vec(),
+                                        "vs_main",
+                                        vec![],
+                                    ))
+                                    .with_shader(ShaderSource::slang(
+                                        ShaderStage::Fragment,
+                                        BLOOM_DOWN_SHADER_SLANG.as_bytes().to_vec(),
+                                        "fs_main",
+                                        vec![],
+                                    ))
+                                    .with_variant(variant)
+                                    .with_color_format(SCENE_COLOR_FORMAT)
+                                    .with_dynamic_uniform(0, 0)
+                                    .with_label(label),
+                            )
+                            .inspect_err(|e| log::error!("deferred: {label} material failed: {e}"))
+                            .ok()
+                    };
+                let down_karis = down_material(true, "deferred_bloom_down_karis")?;
+                let down_plain = down_material(false, "deferred_bloom_down")?;
+                // Upsample material: OVER (alpha) blend + the shader's
+                // alpha = BLOOM_MIX turns each step into a normalized
+                // lerp(dst, tent, mix) accumulation (see bloom_up.slang).
+                let up_material = device
+                    .create_material(
+                        &MaterialDescriptor::new()
+                            .with_shader(ShaderSource::slang(
+                                ShaderStage::Vertex,
+                                BLOOM_UP_SHADER_SLANG.as_bytes().to_vec(),
+                                "vs_main",
+                                vec![],
+                            ))
+                            .with_shader(ShaderSource::slang(
+                                ShaderStage::Fragment,
+                                BLOOM_UP_SHADER_SLANG.as_bytes().to_vec(),
+                                "fs_main",
+                                vec![],
+                            ))
+                            .with_color_format(SCENE_COLOR_FORMAT)
+                            .with_dynamic_uniform(0, 0)
+                            .with_blend_state(redlilium_graphics::BlendState::alpha_blending())
+                            .with_label("deferred_bloom_up"),
+                    )
+                    .inspect_err(|e| log::error!("deferred: bloom-up material failed: {e}"))
+                    .ok()?;
+
+                // One instance: dynamic uniform, one source texture, linear sampler.
+                let bloom_instance = |material: &Arc<redlilium_graphics::Material>,
+                                      source: &Arc<Texture>|
+                 -> Option<Arc<MaterialInstance>> {
+                    let group = device
+                        .create_binding_group(
+                            material.binding_layouts()[0].clone(),
+                            BindingGroupDescriptor::new()
+                                .with_buffer_range(
+                                    0,
+                                    ring_buffer.clone(),
+                                    0,
+                                    std::mem::size_of::<BloomUniforms>() as u64,
+                                )
+                                .with_texture(1, source.clone())
+                                .with_sampler(2, shared.ibl_sampler.clone()),
+                        )
+                        .ok()?;
+                    Some(Arc::new(
+                        MaterialInstance::new(material.clone()).with_binding_group(group),
+                    ))
+                };
+
+                // down[0] Karis-samples scene_color; down[i] samples mip i-1.
+                let mut down = Vec::with_capacity(n);
+                down.push(bloom_instance(&down_karis, scene_color)?);
+                for i in 1..n {
+                    down.push(bloom_instance(&down_plain, mips[i - 1])?);
+                }
+                // up[i] upsamples mip i+1 into mip i (additive), for i in 0..n-1.
+                let mut up = Vec::with_capacity(n.saturating_sub(1));
+                for i in 0..n.saturating_sub(1) {
+                    up.push(bloom_instance(&up_material, mips[i + 1])?);
+                }
+                (down, up)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+
         Some(Self {
             resolve,
             skybox,
@@ -895,6 +1094,9 @@ impl CameraResources {
             ssao,
             ssao_blur,
             ao_enabled: ssao_targets.is_some(),
+            bloom_down,
+            bloom_up,
+            bloom_enabled: bloom_targets.is_some_and(|m| !m.is_empty()),
             history_primed: false,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
             env_ptr: env.map(|e| Arc::as_ptr(e) as usize),
@@ -999,6 +1201,44 @@ impl CameraRenderPipeline for DeferredPipeline {
             }
         }
 
+        // Bloom mip chain (#151): derived only for cameras with the component.
+        // Rebuilt when the count changes or the top mip disagrees with a
+        // half-res target (resize). Stale mips beyond the current count are
+        // pruned so a shrink never leaves danglers behind.
+        let bloom_enabled = world.get::<super::CameraBloom>(camera).is_some();
+        let bloom_mips = if bloom_enabled {
+            bloom_mip_count(width, height)
+        } else {
+            0
+        };
+        if bloom_enabled {
+            let half = ((width >> 1).max(1), (height >> 1).max(1));
+            let bloom_stale = bloom_mips == 0
+                || targets
+                    .get(&bloom_mip_key(0))
+                    .map(|t| t.size().width != half.0 || t.size().height != half.1)
+                    .unwrap_or(true)
+                || targets.get(&bloom_mip_key(bloom_mips - 1)).is_none()
+                || targets.get(&bloom_mip_key(bloom_mips)).is_some();
+            if bloom_stale {
+                for i in 0..MAX_BLOOM_MIPS {
+                    targets.remove(&bloom_mip_key(i));
+                }
+                let usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING;
+                for i in 0..bloom_mips {
+                    let (w, h) = ((width >> (i + 1)).max(1), (height >> (i + 1)).max(1));
+                    let texture = device
+                        .create_texture(
+                            &TextureDescriptor::new_2d(w, h, SCENE_COLOR_FORMAT, usage)
+                                .with_label("bloom_mip"),
+                        )
+                        .expect("create bloom mip");
+                    targets.set(bloom_mip_key(i), texture);
+                }
+                let _ = world.insert(camera, targets.clone());
+            }
+        }
+
         // (Re-)build the camera's materials when the targets or the color
         // format changed.
         let (
@@ -1039,12 +1279,25 @@ impl CameraRenderPipeline for DeferredPipeline {
             _ => None,
         };
         let ao_on = ssao_targets.is_some();
+        // The bloom mip chain, gathered when the component is on and every mip
+        // resolved (they were just ensured above). `bloom_on` folds into the
+        // fresh-check so toggling rebuilds the display's bloom binding and the
+        // bloom materials.
+        let bloom_chain: Option<Vec<&Arc<Texture>>> = (bloom_mips > 0)
+            .then(|| {
+                (0..bloom_mips)
+                    .map(|i| targets.get(&bloom_mip_key(i)))
+                    .collect()
+            })
+            .flatten();
+        let bloom_on = bloom_chain.is_some();
         let mut cameras = self.cameras.lock().expect("deferred camera map poisoned");
         let fresh = cameras.get(&camera).is_some_and(|c| {
             c.albedo_ptr == albedo_ptr
                 && c.color_format == color_format
                 && c.env_ptr == env_ptr
                 && c.ao_enabled == ao_on
+                && c.bloom_enabled == bloom_on
         });
         if !fresh {
             match CameraResources::create(
@@ -1055,6 +1308,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 [history_a, history_b],
                 env.as_ref(),
                 ssao_targets,
+                bloom_chain.as_deref(),
                 color_format,
                 &ring_buffer,
             ) {
@@ -1131,6 +1385,16 @@ impl CameraRenderPipeline for DeferredPipeline {
             .get::<super::CameraExposure>(view.entity)
             .map_or(1.0, |e| e.exposure);
 
+        // Bloom intensity (#151): the CameraBloom weight, but only when the
+        // bloom materials/targets exist (else 0 — the display binds black).
+        let bloom_intensity = if camera_resources.bloom_enabled {
+            world
+                .get::<super::CameraBloom>(view.entity)
+                .map_or(0.0, |b| b.intensity)
+        } else {
+            0.0
+        };
+
         // TAA (#148) runs for cameras that opted into the temporal contract;
         // frame parity picks the history ping-pong direction (read this
         // index, write the other).
@@ -1185,6 +1449,8 @@ impl CameraRenderPipeline for DeferredPipeline {
             display_offset,
             taa_offset,
             ssao_offsets,
+            bloom_down_offsets,
+            bloom_up_offsets,
             ring_buffer,
         ) = {
             let mut ring = world.resource_mut::<FrameRing>();
@@ -1202,7 +1468,7 @@ impl CameraRenderPipeline for DeferredPipeline {
             }));
             let resolve_offset = ring.push(bytemuck::bytes_of(&resolve_uniforms));
             let display_offset = ring.push(bytemuck::bytes_of(&DisplayOutputUniforms {
-                exposure: [exposure, 0.0, 0.0, 0.0],
+                exposure: [exposure, bloom_intensity, 0.0, 0.0],
             }));
             let taa_offset = taa_read_index.map(|_| {
                 // Reprojection math runs on the unjittered pair (the raster
@@ -1231,6 +1497,26 @@ impl CameraRenderPipeline for DeferredPipeline {
                     ring.push(bytemuck::bytes_of(&blur)),
                 )
             });
+            // Bloom uniforms (#151): one per down/up pass, carrying the SOURCE
+            // texel size. Down pass i reads mip i-1 (i=0 reads scene, full
+            // res), so its source is width>>i; up pass i reads mip i+1, source
+            // width>>(i+2).
+            let (bw, bh) = (scene_color.size().width, scene_color.size().height);
+            let bloom_texel = |shift: u32| BloomUniforms {
+                params: [
+                    1.0 / (bw >> shift).max(1) as f32,
+                    1.0 / (bh >> shift).max(1) as f32,
+                    0.0,
+                    0.0,
+                ],
+            };
+            let n = camera_resources.bloom_down.len();
+            let bloom_down_offsets: Vec<u32> = (0..n)
+                .map(|i| ring.push(bytemuck::bytes_of(&bloom_texel(i as u32))))
+                .collect();
+            let bloom_up_offsets: Vec<u32> = (0..camera_resources.bloom_up.len())
+                .map(|i| ring.push(bytemuck::bytes_of(&bloom_texel(i as u32 + 2))))
+                .collect();
             (
                 camera_offset,
                 skybox_offset,
@@ -1238,6 +1524,8 @@ impl CameraRenderPipeline for DeferredPipeline {
                 display_offset,
                 taa_offset,
                 ssao_offsets,
+                bloom_down_offsets,
+                bloom_up_offsets,
                 ring.buffer().clone(),
             )
         };
@@ -1420,6 +1708,75 @@ impl CameraRenderPipeline for DeferredPipeline {
             _ => (camera_resources.display_scene.clone(), None),
         };
 
+        // --- 4b. Bloom (#151): down/up mip chain from scene_color, when the
+        // camera opted in. Reads scene_color (post-resolve), independent of
+        // TAA; the display composites the accumulated top mip (bloom_0).
+        let bloom_final: Option<PassHandle> = if camera_resources.bloom_down.is_empty() {
+            None
+        } else {
+            let n = camera_resources.bloom_down.len();
+            let mips: Option<Vec<&Arc<Texture>>> =
+                (0..n).map(|i| targets.get(&bloom_mip_key(i))).collect();
+            mips.map(|mips| {
+                // Downsample chain: down[i] writes mip i (replace).
+                let mut down_handles = Vec::with_capacity(n);
+                for i in 0..n {
+                    let mut pass = GraphicsPass::new(format!("bloom_down_{i}"));
+                    pass.set_render_targets(
+                        RenderTargetConfig::new().with_color(
+                            ColorAttachment::from_texture(mips[i].clone())
+                                .with_clear_color(0.0, 0.0, 0.0, 1.0),
+                        ),
+                    );
+                    pass.add_draw_command(
+                        DrawCommand::new(
+                            shared.fullscreen_mesh.clone(),
+                            camera_resources.bloom_down[i].clone(),
+                        )
+                        .with_dynamic_offsets(vec![vec![bloom_down_offsets[i]]]),
+                    );
+                    let h = graph.add_graphics_pass(pass);
+                    // down[0] reads scene_color (the resolve writes it); down[i]
+                    // reads mip i-1.
+                    graph.add_dependency(
+                        h,
+                        if i == 0 {
+                            resolve_handle
+                        } else {
+                            down_handles[i - 1]
+                        },
+                    );
+                    down_handles.push(h);
+                }
+                // Upsample chain (additive): up[i] adds mip i+1 into mip i,
+                // walked from the smallest mip up to mip 0.
+                let mut up_handles: Vec<Option<PassHandle>> = vec![None; n];
+                for i in (0..camera_resources.bloom_up.len()).rev() {
+                    let mut pass = GraphicsPass::new(format!("bloom_up_{i}"));
+                    pass.set_render_targets(RenderTargetConfig::new().with_color(
+                        // Additive blend onto mip i's own downsample — keep it.
+                        ColorAttachment::from_texture(mips[i].clone()).with_load_op(LoadOp::Load),
+                    ));
+                    pass.add_draw_command(
+                        DrawCommand::new(
+                            shared.fullscreen_mesh.clone(),
+                            camera_resources.bloom_up[i].clone(),
+                        )
+                        .with_dynamic_offsets(vec![vec![bloom_up_offsets[i]]]),
+                    );
+                    let h = graph.add_graphics_pass(pass);
+                    // Reads mip i+1 (last writer: up[i+1] if it ran, else
+                    // down[i+1]); writes mip i after its own downsample.
+                    let src_writer = up_handles[i + 1].unwrap_or(down_handles[i + 1]);
+                    graph.add_dependency(h, src_writer);
+                    graph.add_dependency(h, down_handles[i]);
+                    up_handles[i] = Some(h);
+                }
+                // Accumulated bloom lives in mip 0 (up[0] if it ran, else down[0]).
+                up_handles[0].unwrap_or(down_handles[0])
+            })
+        };
+
         // --- 5. Display output (#142): scene-referred -> the camera target ---
         let mut display_pass = GraphicsPass::new("display_output".into());
         display_pass.set_render_targets(
@@ -1438,6 +1795,11 @@ impl CameraRenderPipeline for DeferredPipeline {
         // *a* writer, not necessarily the resolve). With TAA the display
         // reads the history the TAA pass just wrote instead.
         graph.add_dependency(display_handle, taa_handle.unwrap_or(resolve_handle));
+        // The display composites the accumulated bloom — order it after the
+        // chain's final write (#151).
+        if let Some(bloom_final) = bloom_final {
+            graph.add_dependency(display_handle, bloom_final);
+        }
 
         Some(display_handle)
     }

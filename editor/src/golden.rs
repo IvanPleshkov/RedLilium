@@ -29,10 +29,10 @@ use redlilium_core::color::{f16_to_f32, srgb_encode, tonemap_pbr_neutral};
 use redlilium_core::math::{Vec3, quat_looking_along};
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
-    CameraAmbientOcclusion, CameraEnvironment, CameraOutput, DirectionalLight, EcsRunner,
-    GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, OutputFormat,
-    PointLight, Primitive, Render, RenderSchedule, SizePolicy, TextureManager, Transform,
-    Visibility,
+    CameraAmbientOcclusion, CameraBloom, CameraEnvironment, CameraOutput, DirectionalLight,
+    EcsRunner, GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource,
+    OutputFormat, PointLight, Primitive, Render, RenderSchedule, SizePolicy, TextureManager,
+    Transform, Visibility,
 };
 use redlilium_graphics::{
     BufferDescriptor, BufferUsage, FramePipeline, GraphicsInstance, TextureFormat, TransferConfig,
@@ -563,6 +563,128 @@ fn deferred_ssao_darkens_ambient() {
 
     // Golden regression on the SSAO look.
     compare_or_update("deferred_ssao.png", &with_ao);
+}
+
+/// Bloom (#151) must spread bright highlights into a visible halo without
+/// blowing the image out or punching black holes in it. Renders the fixed
+/// scene without bloom, then with a strong `CameraBloom`, and asserts three
+/// tuning-independent properties that pin the two failure modes that bit
+/// early cuts — an Inf-driven NaN block (a bright HDR sky exceeding f16 range
+/// turning into a black square) and an unbounded additive composite washing
+/// the frame white: a meaningful fraction brightens (the halo), no
+/// previously-bright pixel collapses to black (no NaN), and the frame does
+/// not turn mostly white (bounded `lerp` composite, not `scene + bloom`). A
+/// golden image guards the look on top.
+#[test]
+fn deferred_bloom_brightens_highlights() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping bloom test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+    spawn_golden_scene(&mut ew.world);
+
+    let output_guid = redlilium_assets::Guid::stable("test/bloom_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+    ew.world
+        .insert(camera, CameraEnvironment::default())
+        .unwrap();
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+
+    // Baseline: no bloom.
+    for _ in 0..3 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let no_bloom = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+
+    // A strong bloom so the differential is unmistakable. A few frames to
+    // derive the mip chain, build the materials, and render.
+    ew.world.insert(camera, CameraBloom::new(0.15)).unwrap();
+    for _ in 0..5 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let with_bloom = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+    drop(pipeline);
+
+    // Per-pixel luma (channel sum, 0..765).
+    let luma = |p: &image::Rgba<u8>| p.0[0] as i32 + p.0[1] as i32 + p.0[2] as i32;
+    let total = (SIZE * SIZE) as f64;
+    let mut brighter = 0usize; // halo spread
+    let mut black_holes = 0usize; // bright → near-black (the NaN block)
+    let mut white_with = 0usize; // near-white after bloom (blowout)
+    for (a, b) in no_bloom.pixels().zip(with_bloom.pixels()) {
+        let (la, lb) = (luma(a), luma(b));
+        if lb - la > 6 {
+            brighter += 1;
+        }
+        if la > 90 && lb < 15 {
+            black_holes += 1;
+        }
+        if lb >= 750 {
+            white_with += 1;
+        }
+    }
+    assert!(
+        (brighter as f64 / total) > 0.02,
+        "bloom brightened too few pixels ({brighter}) — no visible glow"
+    );
+    // Inf → NaN block: a bright pixel must never collapse to black.
+    assert!(
+        (black_holes as f64 / total) < 0.001,
+        "bloom punched {black_holes} bright pixels to black — NaN (Inf in the \
+         Karis average)"
+    );
+    // Unbounded composite: the frame must not turn mostly white.
+    assert!(
+        (white_with as f64 / total) < 0.5,
+        "bloom blew the frame out ({white_with} near-white px) — the composite \
+         must be a bounded lerp, not an add"
+    );
+
+    // Golden regression on the bloom look.
+    compare_or_update("deferred_bloom.png", &with_bloom);
 }
 
 /// Decode an Rg16Float readback into per-texel `[vx, vy]`.

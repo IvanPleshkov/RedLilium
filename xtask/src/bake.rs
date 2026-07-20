@@ -117,6 +117,9 @@ const REGISTRY: &[ShaderSpec] = &[
     // Screen-space AO (#150): GTAO-lite horizon pass + its bilateral denoise.
     vs_fs_spec("std_ssao", "std-assets/shaders/ssao.slang"),
     vs_fs_spec("std_ssao_blur", "std-assets/shaders/ssao_blur.slang"),
+    // HDR bloom (#151): Jimenez dual-filter down (KARIS variant) + tent up.
+    vs_fs_spec("std_bloom_down", "std-assets/shaders/bloom_down.slang"),
+    vs_fs_spec("std_bloom_up", "std-assets/shaders/bloom_up.slang"),
     // Demo shaders — baked so the demos render on the default Slang-off build
     // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
     // the std deferred path now.)

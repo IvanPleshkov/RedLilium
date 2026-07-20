@@ -20,16 +20,12 @@ pub static BAKED_SLANG_TAG: &str = "2026.8";
 /// key -> compiled WGSL, sorted ascending by key.
 pub static BAKED_WGSL: &[(u64, &str)] = &[
     (
-        0x0b6931beb5b94fcb,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
-    ),
-    (
-        0x0e7a6ff59a3c890c,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
-    ),
-    (
         0x16f8ac0466375732,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) prev_model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) view_projection_unjittered_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) prev_view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n    @location(0) world_position_0 : vec3<f32>,\n    @location(3) world_normal_0 : vec3<f32>,\n    @location(1) curr_clip_0 : vec4<f32>,\n    @location(2) prev_clip_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var _S2 : vec4<f32> = vec4<f32>(_S1.position_0, 1.0f);\n    var world_pos_0 : vec4<f32> = (((_S2) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))));\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = (((world_pos_0) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_position_0 = world_pos_0.xyz;\n    output_0.world_normal_0 = (((vec4<f32>(_S1.normal_0, 0.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)]))))).xyz;\n    output_0.curr_clip_0 = (((world_pos_0) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_unjittered_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_unjittered_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_unjittered_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_unjittered_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_unjittered_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_unjittered_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_unjittered_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_unjittered_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_unjittered_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_unjittered_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_unjittered_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_unjittered_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_unjittered_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_unjittered_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_unjittered_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_unjittered_0.data_0[i32(3)][i32(3)])))));\n    output_0.prev_clip_0 = ((((((_S2) * (mat4x4<f32>(mat4x4<f32>(gModel_0.prev_model_0.data_0[i32(0)][i32(0)], gModel_0.prev_model_0.data_0[i32(1)][i32(0)], gModel_0.prev_model_0.data_0[i32(2)][i32(0)], gModel_0.prev_model_0.data_0[i32(3)][i32(0)], gModel_0.prev_model_0.data_0[i32(0)][i32(1)], gModel_0.prev_model_0.data_0[i32(1)][i32(1)], gModel_0.prev_model_0.data_0[i32(2)][i32(1)], gModel_0.prev_model_0.data_0[i32(3)][i32(1)], gModel_0.prev_model_0.data_0[i32(0)][i32(2)], gModel_0.prev_model_0.data_0[i32(1)][i32(2)], gModel_0.prev_model_0.data_0[i32(2)][i32(2)], gModel_0.prev_model_0.data_0[i32(3)][i32(2)], gModel_0.prev_model_0.data_0[i32(0)][i32(3)], gModel_0.prev_model_0.data_0[i32(1)][i32(3)], gModel_0.prev_model_0.data_0[i32(2)][i32(3)], gModel_0.prev_model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.prev_view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.prev_view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.prev_view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.prev_view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.prev_view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.prev_view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.prev_view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.prev_view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.prev_view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.prev_view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.prev_view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.prev_view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.prev_view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.prev_view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.prev_view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.prev_view_projection_0.data_0[i32(3)][i32(3)])))));\n    return output_0;\n}\n\n",
+    ),
+    (
+        0x19781c7793d957e0,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
         0x19a8ef38f32401a6,
@@ -76,12 +72,24 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    return output_0;\n}\n\n",
     ),
     (
-        0x3f5ddb3d77361b1c,
-        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nfn tonemap_pbr_neutral_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S1 : f32 = min(color_0.x, min(color_0.y, color_0.z));\n    var offset_0 : f32;\n    if(_S1 < 0.07999999821186066f)\n    {\n        offset_0 = _S1 - 6.25f * _S1 * _S1;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S2 : vec3<f32> = color_0 - vec3<f32>(offset_0);\n    var _S3 : f32 = max(_S2.x, max(_S2.y, _S2.z));\n    if(_S3 < 0.75999999046325684f)\n    {\n        return _S2;\n    }\n    var new_peak_0 : f32 = 1.0f - 0.0576000027358532f / (_S3 + 0.24000000953674316f - 0.75999999046325684f);\n    return mix(_S2 * vec3<f32>((new_peak_0 / _S3)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S3 - new_peak_0) + 1.0f))));\n}\n\nfn linear_to_srgb_0( color_1 : vec3<f32>) -> vec3<f32>\n{\n    return mix(color_1 * vec3<f32>(12.92000007629394531f), pow(color_1, vec3<f32>(0.4166666567325592f)) * vec3<f32>(1.0549999475479126f) - vec3<f32>(0.05499999970197678f), step(vec3<f32>(0.00313080009073019f), color_1));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S4 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(linear_to_srgb_0(tonemap_pbr_neutral_0((textureSample((scene_color_0), (scene_sampler_0), (_S4.uv_0))).xyz * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x))), 1.0f) );\n    return _S5;\n}\n\n",
+        0x4708f1b9a324731a,
+        "struct SLANG_ParameterGroup_BloomUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> BloomUniforms_0 : SLANG_ParameterGroup_BloomUniforms_std140_0;\n@binding(1) @group(0) var source_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var linear_sampler_0 : sampler;\n\nfn sanitize_0( x_0 : f32) -> f32\n{\n    var _S1 : f32;\n    if(x_0 == x_0)\n    {\n        _S1 = clamp(x_0, 0.0f, 65504.0f);\n    }\n    else\n    {\n        _S1 = 0.0f;\n    }\n    return _S1;\n}\n\nfn fetch_0( uv_0 : vec2<f32>) -> vec3<f32>\n{\n    var c_0 : vec3<f32> = (textureSample((source_0), (linear_sampler_0), (uv_0))).xyz;\n    return vec3<f32>(sanitize_0(c_0.x), sanitize_0(c_0.y), sanitize_0(c_0.z));\n}\n\nfn luma_0( c_1 : vec3<f32>) -> f32\n{\n    return dot(c_1, vec3<f32>(0.2125999927520752f, 0.71520000696182251f, 0.07220000028610229f));\n}\n\nfn karis_box_0( a_0 : vec3<f32>,  b_0 : vec3<f32>,  c_2 : vec3<f32>,  d_0 : vec3<f32>) -> vec3<f32>\n{\n    var wa_0 : f32 = 1.0f / (1.0f + luma_0(a_0));\n    var wb_0 : f32 = 1.0f / (1.0f + luma_0(b_0));\n    var wc_0 : f32 = 1.0f / (1.0f + luma_0(c_2));\n    var wd_0 : f32 = 1.0f / (1.0f + luma_0(d_0));\n    return (a_0 * vec3<f32>(wa_0) + b_0 * vec3<f32>(wb_0) + c_2 * vec3<f32>(wc_0) + d_0 * vec3<f32>(wd_0)) / vec3<f32>((wa_0 + wb_0 + wc_0 + wd_0));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_1 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S2 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var t_0 : vec2<f32> = BloomUniforms_0.params_0.xy;\n    var b_1 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, -2.0f));\n    var d_1 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, 0.0f));\n    var e_0 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, 0.0f));\n    var f_0 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, 0.0f));\n    var h_0 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, 2.0f));\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(karis_box_0(fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-1.0f, -1.0f)), fetch_0(_S2.uv_1 + t_0 * vec2<f32>(1.0f, -1.0f)), fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-1.0f, 1.0f)), fetch_0(_S2.uv_1 + t_0)) * vec3<f32>(0.5f) + (karis_box_0(fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, -2.0f)), b_1, d_1, e_0) + karis_box_0(b_1, fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, -2.0f)), e_0, f_0) + karis_box_0(d_1, e_0, fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, 2.0f)), h_0) + karis_box_0(e_0, f_0, h_0, fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, 2.0f)))) * vec3<f32>(0.125f), 1.0f) );\n    return _S3;\n}\n\n",
+    ),
+    (
+        0x55a7eda37a27789b,
+        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\n@binding(3) @group(0) var bloom_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var bloom_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nfn tonemap_pbr_neutral_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S1 : f32 = min(color_0.x, min(color_0.y, color_0.z));\n    var offset_0 : f32;\n    if(_S1 < 0.07999999821186066f)\n    {\n        offset_0 = _S1 - 6.25f * _S1 * _S1;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S2 : vec3<f32> = color_0 - vec3<f32>(offset_0);\n    var _S3 : f32 = max(_S2.x, max(_S2.y, _S2.z));\n    if(_S3 < 0.75999999046325684f)\n    {\n        return _S2;\n    }\n    var new_peak_0 : f32 = 1.0f - 0.0576000027358532f / (_S3 + 0.24000000953674316f - 0.75999999046325684f);\n    return mix(_S2 * vec3<f32>((new_peak_0 / _S3)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S3 - new_peak_0) + 1.0f))));\n}\n\nfn linear_to_srgb_0( color_1 : vec3<f32>) -> vec3<f32>\n{\n    return mix(color_1 * vec3<f32>(12.92000007629394531f), pow(color_1, vec3<f32>(0.4166666567325592f)) * vec3<f32>(1.0549999475479126f) - vec3<f32>(0.05499999970197678f), step(vec3<f32>(0.00313080009073019f), color_1));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S4 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(linear_to_srgb_0(tonemap_pbr_neutral_0(mix((textureSample((scene_color_0), (scene_sampler_0), (_S4.uv_0))).xyz, (textureSample((bloom_0), (bloom_sampler_0), (_S4.uv_0))).xyz, vec3<f32>(DisplayOutputUniforms_0.exposure_0.y)) * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x))), 1.0f) );\n    return _S5;\n}\n\n",
     ),
     (
         0x5a0484e3568dd6ba,
         "struct SLANG_ParameterGroup_EguiUniforms_std140_0\n{\n    @align(16) screen_size_0 : vec2<f32>,\n    @align(8) _padding_0 : vec2<f32>,\n};\n\n@binding(0) @group(0) var<uniform> EguiUniforms_0 : SLANG_ParameterGroup_EguiUniforms_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_1 : vec2<f32>,\n    @location(1) tex_coords_1 : vec2<f32>,\n    @location(2) color_1 : vec4<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(vec2<f32>(2.0f * _S1.position_1.x / EguiUniforms_0.screen_size_0.x - 1.0f, 1.0f - 2.0f * _S1.position_1.y / EguiUniforms_0.screen_size_0.y), 0.0f, 1.0f);\n    output_0.tex_coords_0 = _S1.tex_coords_1;\n    output_0.color_0 = _S1.color_1;\n    return output_0;\n}\n\n",
+    ),
+    (
+        0x61bf5ff01795443d,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0x624bc45c179939d0,
+        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\n@binding(3) @group(0) var bloom_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var bloom_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(clamp(mix((textureSample((scene_color_0), (scene_sampler_0), (_S1.uv_0))).xyz, (textureSample((bloom_0), (bloom_sampler_0), (_S1.uv_0))).xyz, vec3<f32>(DisplayOutputUniforms_0.exposure_0.y)) * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x), vec3<f32>(0.0f), vec3<f32>(10.0f)), 1.0f) );\n    return _S2;\n}\n\n",
     ),
     (
         0x62641e520ef56d29,
@@ -104,11 +112,11 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "@binding(0) @group(1) var egui_texture_0 : texture_2d<f32>;\n\n@binding(1) @group(1) var egui_sampler_0 : sampler;\n\nfn srgb_to_linear_0( srgb_0 : vec3<f32>) -> vec3<f32>\n{\n    return mix(srgb_0 / vec3<f32>(12.92000007629394531f), pow((srgb_0 + vec3<f32>(0.05499999970197678f)) / vec3<f32>(1.0549999475479126f), vec3<f32>(2.40000009536743164f)), step(vec3<f32>(0.04044999927282333f), srgb_0));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texture_color_linear_0 : vec4<f32> = (textureSample((egui_texture_0), (egui_sampler_0), (_S1.tex_coords_0)));\n    var _S2 : f32 = texture_color_linear_0.w;\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(texture_color_linear_0.xyz * vec3<f32>(_S2), _S2) * vec4<f32>(srgb_to_linear_0(_S1.color_0.xyz), _S1.color_0.w) );\n    return _S3;\n}\n\n",
     ),
     (
-        0x7a904edfeeef67d2,
-        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(clamp((textureSample((scene_color_0), (scene_sampler_0), (_S1.uv_0))).xyz * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x), vec3<f32>(0.0f), vec3<f32>(10.0f)), 1.0f) );\n    return _S2;\n}\n\n",
+        0x7de263a283afe28e,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
-        0x7de263a283afe28e,
+        0x8af2142b78da2b6a,
         "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
@@ -118,10 +126,6 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
     (
         0x8dac5871efa0030a,
         "struct MaterialParams_std140_0\n{\n    @align(16) base_color_0 : vec4<f32>,\n};\n\n@binding(0) @group(2) var<uniform> gMaterial_0 : MaterialParams_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) world_normal_0 : vec3<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) clip_position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(vec3<f32>(0.15000000596046448f, 0.15000000596046448f, 0.18000000715255737f) + gMaterial_0.base_color_0.xyz * vec3<f32>(max(dot(normalize(_S1.world_normal_0), normalize(vec3<f32>(0.5f, 1.0f, 0.30000001192092896f))), 0.0f)), 1.0f) );\n    return _S2;\n}\n\n",
-    ),
-    (
-        0x945fbc5e5b2a8d99,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
         0x9652c850be7527f5,
@@ -144,20 +148,36 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct SLANG_ParameterGroup_EguiUniforms_std140_0\n{\n    @align(16) screen_size_0 : vec2<f32>,\n    @align(8) _padding_0 : vec2<f32>,\n};\n\n@binding(0) @group(0) var<uniform> EguiUniforms_0 : SLANG_ParameterGroup_EguiUniforms_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_1 : vec2<f32>,\n    @location(1) tex_coords_1 : vec2<f32>,\n    @location(2) color_1 : vec4<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(vec2<f32>(2.0f * _S1.position_1.x / EguiUniforms_0.screen_size_0.x - 1.0f, 1.0f - 2.0f * _S1.position_1.y / EguiUniforms_0.screen_size_0.y), 0.0f, 1.0f);\n    output_0.tex_coords_0 = _S1.tex_coords_1;\n    output_0.color_0 = _S1.color_1;\n    return output_0;\n}\n\n",
     ),
     (
-        0x9fb97ed1c6842f49,
-        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nfn tonemap_pbr_neutral_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S1 : f32 = min(color_0.x, min(color_0.y, color_0.z));\n    var offset_0 : f32;\n    if(_S1 < 0.07999999821186066f)\n    {\n        offset_0 = _S1 - 6.25f * _S1 * _S1;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S2 : vec3<f32> = color_0 - vec3<f32>(offset_0);\n    var _S3 : f32 = max(_S2.x, max(_S2.y, _S2.z));\n    if(_S3 < 0.75999999046325684f)\n    {\n        return _S2;\n    }\n    var new_peak_0 : f32 = 1.0f - 0.0576000027358532f / (_S3 + 0.24000000953674316f - 0.75999999046325684f);\n    return mix(_S2 * vec3<f32>((new_peak_0 / _S3)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S3 - new_peak_0) + 1.0f))));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S4 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_pbr_neutral_0((textureSample((scene_color_0), (scene_sampler_0), (_S4.uv_0))).xyz * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x)), 1.0f) );\n    return _S5;\n}\n\n",
-    ),
-    (
         0x9fcc0e5cd07d1ef9,
         "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0xa0a410aceafa32c2,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0xa4a0a6ff2fdde47b,
+        "struct SLANG_ParameterGroup_BloomUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> BloomUniforms_0 : SLANG_ParameterGroup_BloomUniforms_std140_0;\n@binding(1) @group(0) var source_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var linear_sampler_0 : sampler;\n\nfn sanitize_0( x_0 : f32) -> f32\n{\n    var _S1 : f32;\n    if(x_0 == x_0)\n    {\n        _S1 = clamp(x_0, 0.0f, 65504.0f);\n    }\n    else\n    {\n        _S1 = 0.0f;\n    }\n    return _S1;\n}\n\nfn fetch_0( uv_0 : vec2<f32>) -> vec3<f32>\n{\n    var c_0 : vec3<f32> = (textureSample((source_0), (linear_sampler_0), (uv_0))).xyz;\n    return vec3<f32>(sanitize_0(c_0.x), sanitize_0(c_0.y), sanitize_0(c_0.z));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_1 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S2 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var t_0 : vec2<f32> = BloomUniforms_0.params_0.xy;\n    var _S3 : vec3<f32> = vec3<f32>(0.125f);\n    var _S4 : pixelOutput_0 = pixelOutput_0( vec4<f32>(fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, 0.0f)) * _S3 + (fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, -2.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, -2.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, 2.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, 2.0f))) * vec3<f32>(0.03125f) + (fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, -2.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, 0.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, 0.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, 2.0f))) * vec3<f32>(0.0625f) + (fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-1.0f, -1.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(1.0f, -1.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-1.0f, 1.0f)) + fetch_0(_S2.uv_1 + t_0)) * _S3, 1.0f) );\n    return _S4;\n}\n\n",
     ),
     (
         0xa573518701b7ce54,
         "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
+        0xa9e2d278d14de0ab,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0xabb3f92c7d74e08b,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
         0xb6c7e0e2ffb9ab18,
         "@binding(0) @group(0) var source_texture_0 : texture_2d<f32>;\n\n@binding(1) @group(0) var source_sampler_0 : sampler;\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( (textureSample((source_texture_0), (source_sampler_0), (_S1.uv_0))) );\n    return _S2;\n}\n\n",
+    ),
+    (
+        0xc2a5ac04f411bcd2,
+        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\n@binding(3) @group(0) var bloom_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var bloom_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nfn tonemap_pbr_neutral_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S1 : f32 = min(color_0.x, min(color_0.y, color_0.z));\n    var offset_0 : f32;\n    if(_S1 < 0.07999999821186066f)\n    {\n        offset_0 = _S1 - 6.25f * _S1 * _S1;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S2 : vec3<f32> = color_0 - vec3<f32>(offset_0);\n    var _S3 : f32 = max(_S2.x, max(_S2.y, _S2.z));\n    if(_S3 < 0.75999999046325684f)\n    {\n        return _S2;\n    }\n    var new_peak_0 : f32 = 1.0f - 0.0576000027358532f / (_S3 + 0.24000000953674316f - 0.75999999046325684f);\n    return mix(_S2 * vec3<f32>((new_peak_0 / _S3)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S3 - new_peak_0) + 1.0f))));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S4 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_pbr_neutral_0(mix((textureSample((scene_color_0), (scene_sampler_0), (_S4.uv_0))).xyz, (textureSample((bloom_0), (bloom_sampler_0), (_S4.uv_0))).xyz, vec3<f32>(DisplayOutputUniforms_0.exposure_0.y)) * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x)), 1.0f) );\n    return _S5;\n}\n\n",
     ),
     (
         0xc317c54788d7be76,
@@ -172,12 +192,24 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct MaterialParams_std140_0\n{\n    @align(16) base_color_0 : vec4<f32>,\n    @align(16) pbr_params_0 : vec4<f32>,\n};\n\n@binding(0) @group(2) var<uniform> gMaterial_0 : MaterialParams_std140_0;\nstruct FsOutput_0\n{\n    @location(0) albedo_0 : vec4<f32>,\n    @location(1) normal_metallic_0 : vec4<f32>,\n    @location(2) position_roughness_0 : vec4<f32>,\n    @location(3) velocity_0 : vec2<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) world_position_0 : vec3<f32>,\n    @location(3) world_normal_0 : vec3<f32>,\n    @location(1) curr_clip_0 : vec4<f32>,\n    @location(2) prev_clip_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) clip_position_0 : vec4<f32>) -> FsOutput_0\n{\n    var normal_0 : vec3<f32> = normalize(_S1.world_normal_0);\n    var metallic_0 : f32 = saturate(gMaterial_0.pbr_params_0.x);\n    var _S2 : f32 = max(gMaterial_0.pbr_params_0.y, 0.03999999910593033f);\n    var output_0 : FsOutput_0;\n    output_0.albedo_0 = vec4<f32>(gMaterial_0.base_color_0.xyz, 1.0f);\n    var _S3 : vec3<f32> = vec3<f32>(0.5f);\n    output_0.normal_metallic_0 = vec4<f32>(normal_0 * _S3 + _S3, metallic_0);\n    output_0.position_roughness_0 = vec4<f32>(_S1.world_position_0, _S2);\n    output_0.velocity_0 = _S1.curr_clip_0.xy / vec2<f32>(_S1.curr_clip_0.w) - _S1.prev_clip_0.xy / vec2<f32>(_S1.prev_clip_0.w);\n    return output_0;\n}\n\n",
     ),
     (
+        0xc97b5be8cd9a483c,
+        "struct SLANG_ParameterGroup_BloomUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> BloomUniforms_0 : SLANG_ParameterGroup_BloomUniforms_std140_0;\n@binding(1) @group(0) var source_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var linear_sampler_0 : sampler;\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var t_0 : vec2<f32> = BloomUniforms_0.params_0.xy;\n    var _S2 : vec3<f32> = vec3<f32>(2.0f);\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(((textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, -1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, -1.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(1.0f, -1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, 0.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, 0.0f)))).xyz * vec3<f32>(4.0f) + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(1.0f, 0.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, 1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, 1.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0))).xyz) * vec3<f32>(0.0625f), 0.5f) );\n    return _S3;\n}\n\n",
+    ),
+    (
         0xcd423f0cb0fd8973,
         "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
+        0xd4ce741fb25bfbcd,
+        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\n@binding(3) @group(0) var bloom_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var bloom_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(clamp(mix((textureSample((scene_color_0), (scene_sampler_0), (_S1.uv_0))).xyz, (textureSample((bloom_0), (bloom_sampler_0), (_S1.uv_0))).xyz, vec3<f32>(DisplayOutputUniforms_0.exposure_0.y)) * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x), vec3<f32>(0.0f), vec3<f32>(10.0f)), 1.0f) );\n    return _S2;\n}\n\n",
+    ),
+    (
         0xda322d2dbf33dcba,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n    @location(0) world_normal_0 : vec3<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_normal_0 = (((vec4<f32>(_S1.normal_0, 0.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)]))))).xyz;\n    return output_0;\n}\n\n",
+    ),
+    (
+        0xdfc0946ea55558ac,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
         0xe2584ce62daf47d9,
@@ -190,14 +222,6 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
     (
         0xf06d553ad9ca4fe1,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n    @location(0) world_normal_0 : vec3<f32>,\n    @location(1) uv_0 : vec2<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n    @location(2) uv_1 : vec2<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_normal_0 = (((vec4<f32>(_S1.normal_0, 0.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)]))))).xyz;\n    output_0.uv_0 = _S1.uv_1;\n    return output_0;\n}\n\n",
-    ),
-    (
-        0xf30a5e0b21563ba2,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
-    ),
-    (
-        0xfc5fd4807a2b6b9b,
-        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(clamp((textureSample((scene_color_0), (scene_sampler_0), (_S1.uv_0))).xyz * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x), vec3<f32>(0.0f), vec3<f32>(10.0f)), 1.0f) );\n    return _S2;\n}\n\n",
     ),
 ];
 
@@ -213,12 +237,11 @@ pub static BAKED_SPIRV: &[(u64, &[u8])] = &[
 
 /// key -> human-readable `shader / entry / defines`, sorted ascending by key.
 pub static BAKED_NAMES: &[(u64, &str)] = &[
+    (0x16f8ac0466375732, "std_deferred_gbuffer / vs_main / []"),
     (
-        0x0b6931beb5b94fcb,
+        0x19781c7793d957e0,
         "std_display_output / vs_main / [HDR_OUTPUT]",
     ),
-    (0x0e7a6ff59a3c890c, "std_display_output / vs_main / []"),
-    (0x16f8ac0466375732, "std_deferred_gbuffer / vs_main / []"),
     (
         0x19a8ef38f32401a6,
         "std_deferred_gbuffer_textured / vs_main / []",
@@ -236,9 +259,18 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0x398a25d3582968bd, "entity_index / fs_main / []"),
     (0x3c17f254ff226f8b, "debug_draw / vs_main / []"),
     (0x3cd445cedfea47df, "depth_only / vs_main / []"),
-    (0x3f5ddb3d77361b1c, "std_display_output / fs_main / []"),
+    (0x4708f1b9a324731a, "std_bloom_down / fs_main / [KARIS]"),
     (0x54f9997540610987, "meshlet / ts_main / []"),
+    (0x55a7eda37a27789b, "std_display_output / fs_main / []"),
     (0x5a0484e3568dd6ba, "egui / vs_main / [HDR_OUTPUT]"),
+    (
+        0x61bf5ff01795443d,
+        "std_display_output / vs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
+    ),
+    (
+        0x624bc45c179939d0,
+        "std_display_output / fs_main / [HDR_OUTPUT]",
+    ),
     (0x62641e520ef56d29, "opaque_textured / fs_main / []"),
     (0x635dba31fed8212d, "entity_index / vs_main / []"),
     (0x67a25e7dfb4ebd69, "egui / fs_main / []"),
@@ -247,17 +279,10 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
         0x6dcd912de89429a3,
         "egui / fs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
     ),
-    (
-        0x7a904edfeeef67d2,
-        "std_display_output / fs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
-    ),
     (0x7de263a283afe28e, "std_deferred_resolve / vs_main / []"),
+    (0x8af2142b78da2b6a, "std_bloom_down / vs_main / [KARIS]"),
     (0x8d1c4a3c5b011219, "egui / vs_main / []"),
     (0x8dac5871efa0030a, "opaque_color / fs_main / []"),
-    (
-        0x945fbc5e5b2a8d99,
-        "std_display_output / vs_main / [SRGB_FRAMEBUFFER]",
-    ),
     (0x9652c850be7527f5, "compressed_quad / vs_main / []"),
     (
         0x97838dfa39845db3,
@@ -266,23 +291,36 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0x97ce6aff1b16d1ac, "egui / fs_main / [SRGB_FRAMEBUFFER]"),
     (0x9ac3d8e81fe61fd5, "std_skybox / vs_main / []"),
     (0x9f888e2e52877f3c, "egui / vs_main / [SRGB_FRAMEBUFFER]"),
-    (
-        0x9fb97ed1c6842f49,
-        "std_display_output / fs_main / [SRGB_FRAMEBUFFER]",
-    ),
     (0x9fcc0e5cd07d1ef9, "std_ssao / vs_main / []"),
+    (
+        0xa0a410aceafa32c2,
+        "std_display_output / vs_main / [SRGB_FRAMEBUFFER]",
+    ),
     (0xa4178f564b30de43, "bindless / fs_main / []"),
+    (0xa4a0a6ff2fdde47b, "std_bloom_down / fs_main / []"),
     (0xa573518701b7ce54, "std_taa_resolve / vs_main / []"),
+    (0xa9e2d278d14de0ab, "std_display_output / vs_main / []"),
+    (0xabb3f92c7d74e08b, "std_bloom_down / vs_main / []"),
     (0xb6c7e0e2ffb9ab18, "blit / fs_main / []"),
     (0xba0dde239d9ffd81, "meshlet / fs_main / []"),
+    (
+        0xc2a5ac04f411bcd2,
+        "std_display_output / fs_main / [SRGB_FRAMEBUFFER]",
+    ),
     (
         0xc317c54788d7be76,
         "std_deferred_gbuffer_textured / fs_main / []",
     ),
     (0xc49af10895c2cae5, "std_skybox / fs_main / []"),
     (0xc702d339ddabd042, "std_deferred_gbuffer / fs_main / []"),
+    (0xc97b5be8cd9a483c, "std_bloom_up / fs_main / []"),
     (0xcd423f0cb0fd8973, "std_ssao_blur / vs_main / []"),
+    (
+        0xd4ce741fb25bfbcd,
+        "std_display_output / fs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
+    ),
     (0xda322d2dbf33dcba, "opaque_color / vs_main / []"),
+    (0xdfc0946ea55558ac, "std_bloom_up / vs_main / []"),
     (0xe04dc0dbaf2b11fe, "meshlet / ms_main / []"),
     (0xe2584ce62daf47d9, "opaque_textured / vs_main / []"),
     (0xeb0347465565078a, "egui / fs_main / [HDR_OUTPUT]"),
@@ -290,19 +328,50 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
         0xf06d553ad9ca4fe1,
         "opaque_textured / vs_main / [ALPHA_CUTOUT]",
     ),
-    (
-        0xf30a5e0b21563ba2,
-        "std_display_output / vs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
-    ),
-    (
-        0xfc5fd4807a2b6b9b,
-        "std_display_output / fs_main / [HDR_OUTPUT]",
-    ),
     (0xff00a868f4c65b33, "bindless / vs_main / []"),
 ];
 
 /// shader-set key -> baked binding-layout reflection, sorted ascending by key.
 pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
+    (
+        0x027767aacafd2e72,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("DisplayOutputUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("bloom"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("bloom_sampler"),
+                },
+            ],
+        }],
+    ),
     (
         0x040ffa9802a0cc2b,
         &[crate::shader::baked::BakedGroup {
@@ -522,6 +591,33 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         ],
     ),
     (
+        0x12b38eb97e189d53,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("BloomUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("source"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("linear_sampler"),
+                },
+            ],
+        }],
+    ),
+    (
         0x138b579f90d976a1,
         &[
             crate::shader::baked::BakedGroup {
@@ -553,6 +649,45 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 ],
             },
         ],
+    ),
+    (
+        0x1dcd6ada70da293b,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("DisplayOutputUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("bloom"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("bloom_sampler"),
+                },
+            ],
+        }],
     ),
     (
         0x2f4ec9835f68b497,
@@ -721,33 +856,6 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         ],
     ),
     (
-        0x5b4c54195c12936b,
-        &[crate::shader::baked::BakedGroup {
-            rate: None,
-            label: None,
-            entries: &[
-                crate::shader::baked::BakedEntry {
-                    binding: 0,
-                    ty: crate::materials::BindingType::UniformBuffer,
-                    vis: 3,
-                    label: Some("DisplayOutputUniforms"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 1,
-                    ty: crate::materials::BindingType::Texture,
-                    vis: 3,
-                    label: Some("scene_color"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 2,
-                    ty: crate::materials::BindingType::Sampler,
-                    vis: 3,
-                    label: Some("scene_sampler"),
-                },
-            ],
-        }],
-    ),
-    (
         0x694f806a81377584,
         &[crate::shader::baked::BakedGroup {
             rate: None,
@@ -770,33 +878,6 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                     ty: crate::materials::BindingType::Sampler,
                     vis: 3,
                     label: Some("quad_sampler"),
-                },
-            ],
-        }],
-    ),
-    (
-        0x6c9345fa307b4ef7,
-        &[crate::shader::baked::BakedGroup {
-            rate: None,
-            label: None,
-            entries: &[
-                crate::shader::baked::BakedEntry {
-                    binding: 0,
-                    ty: crate::materials::BindingType::UniformBuffer,
-                    vis: 3,
-                    label: Some("DisplayOutputUniforms"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 1,
-                    ty: crate::materials::BindingType::Texture,
-                    vis: 3,
-                    label: Some("scene_color"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 2,
-                    ty: crate::materials::BindingType::Sampler,
-                    vis: 3,
-                    label: Some("scene_sampler"),
                 },
             ],
         }],
@@ -909,6 +990,72 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         ],
     ),
     (
+        0x8cd7236bfff25db9,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("BloomUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("source"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("linear_sampler"),
+                },
+            ],
+        }],
+    ),
+    (
+        0x9e08223607fba29a,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("DisplayOutputUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("bloom"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("bloom_sampler"),
+                },
+            ],
+        }],
+    ),
+    (
         0xae0b726e36ace4e2,
         &[crate::shader::baked::BakedGroup {
             rate: None,
@@ -943,6 +1090,45 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                     ty: crate::materials::BindingType::Sampler,
                     vis: 3,
                     label: Some("point_sampler"),
+                },
+            ],
+        }],
+    ),
+    (
+        0xb09157e595d2f9b2,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("DisplayOutputUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("bloom"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("bloom_sampler"),
                 },
             ],
         }],
@@ -1002,7 +1188,7 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         }],
     ),
     (
-        0xc2479f1212a4b53d,
+        0xcc7d64960c57ff89,
         &[crate::shader::baked::BakedGroup {
             rate: None,
             label: None,
@@ -1011,19 +1197,19 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                     binding: 0,
                     ty: crate::materials::BindingType::UniformBuffer,
                     vis: 3,
-                    label: Some("DisplayOutputUniforms"),
+                    label: Some("BloomUniforms"),
                 },
                 crate::shader::baked::BakedEntry {
                     binding: 1,
                     ty: crate::materials::BindingType::Texture,
                     vis: 3,
-                    label: Some("scene_color"),
+                    label: Some("source"),
                 },
                 crate::shader::baked::BakedEntry {
                     binding: 2,
                     ty: crate::materials::BindingType::Sampler,
                     vis: 3,
-                    label: Some("scene_sampler"),
+                    label: Some("linear_sampler"),
                 },
             ],
         }],
@@ -1111,33 +1297,6 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 vis: 3,
                 label: Some("DebugUniforms"),
             }],
-        }],
-    ),
-    (
-        0xe251d324fcf656ef,
-        &[crate::shader::baked::BakedGroup {
-            rate: None,
-            label: None,
-            entries: &[
-                crate::shader::baked::BakedEntry {
-                    binding: 0,
-                    ty: crate::materials::BindingType::UniformBuffer,
-                    vis: 3,
-                    label: Some("DisplayOutputUniforms"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 1,
-                    ty: crate::materials::BindingType::Texture,
-                    vis: 3,
-                    label: Some("scene_color"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 2,
-                    ty: crate::materials::BindingType::Sampler,
-                    vis: 3,
-                    label: Some("scene_sampler"),
-                },
-            ],
         }],
     ),
     (

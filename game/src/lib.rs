@@ -21,10 +21,10 @@ use redlilium_ecs::physics::components3d::{Collider3D, RigidBody3D};
 use redlilium_ecs::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
 use redlilium_ecs::physics::systems3d::{StepPhysics3D, SyncPhysicsBodies3D};
 use redlilium_ecs::{
-    Camera, Component, DirectionalLight, GlobalTransform, MaterialInstanceSource, MeshGenerator,
-    MeshRenderer, MeshSource, Name, PostUpdate, Primitive, Read, Res, ResMut, SceneManager, System,
-    SystemContext, SystemError, Time, Transform, Update, UpdateGlobalTransforms, Visibility,
-    WindowInput, World, WriteAll,
+    Camera, CameraBloom, Component, DirectionalLight, Entity, ExclusiveSystem, GlobalTransform,
+    MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, Name, PostUpdate, Primitive,
+    Read, Res, ResMut, SceneManager, System, SystemContext, SystemError, Time, Transform, Update,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, WriteAll,
 };
 use redlilium_runtime::{App, GameUi, Plugin};
 // The Quit button is native-only (a browser tab has no "exit").
@@ -235,10 +235,13 @@ impl System for UpdateFollowCamera {
 /// level) and Quit.
 pub struct GameFlowUi;
 
-impl System for GameFlowUi {
+/// The game camera entity, stashed at spawn so the in-game debug HUD can toggle
+/// per-camera post effects (bloom, #151) on it without a query→entity lookup.
+struct GameCamera(Entity);
+
+impl ExclusiveSystem for GameFlowUi {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-        let world = ctx.raw_world();
+    fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
         if !world.has_resource::<GameUi>() {
             return Ok(());
         }
@@ -265,14 +268,32 @@ impl System for GameFlowUi {
             } else {
                 0.0
             };
+            // Bloom toggle (#151): the checkbox state is derived from whether
+            // the game camera carries a CameraBloom; a change inserts/removes
+            // it after the panel (so the bloom passes truly stop when off).
+            let camera = world
+                .has_resource::<GameCamera>()
+                .then(|| world.resource::<GameCamera>().0);
+            let mut bloom_on = camera.map(|c| world.get::<CameraBloom>(c).is_some());
             egui::Window::new("Car Game — dev")
                 .default_pos([10.0, 10.0])
                 .resizable(false)
                 .show(&egui_ctx, |ui| {
                     ui.label(format!("frame: {:.2} ms", delta * 1000.0));
                     ui.label(format!("speed: {speed:.1} m/s"));
+                    if let Some(on) = bloom_on.as_mut() {
+                        ui.checkbox(on, "Bloom");
+                    }
                     ui.label("WASD — drive, Esc — menu");
                 });
+            if let (Some(camera), Some(on)) = (camera, bloom_on) {
+                let has = world.get::<CameraBloom>(camera).is_some();
+                if on && !has {
+                    let _ = world.insert(camera, CameraBloom::default());
+                } else if !on && has {
+                    let _ = world.remove::<CameraBloom>(camera);
+                }
+            }
             if world
                 .resource::<WindowInput>()
                 .is_key_pressed(KeyCode::Escape)
@@ -335,7 +356,9 @@ impl Plugin for CarGamePlugin {
 
     fn build(&self, app: &mut App) {
         log::info!("CarGamePlugin::build");
-        app.add_system::<Update, _>(GameFlowUi);
+        // Exclusive: the HUD's bloom toggle (#151) inserts/removes a component,
+        // which needs &mut World.
+        app.schedule_mut::<Update>().add_exclusive(GameFlowUi);
 
         // Marker-driven car spawn (#105), right after scene swaps land so the
         // car exists the same frame the level appears. `build` runs only in a
@@ -407,12 +430,19 @@ impl Plugin for CarGamePlugin {
         world
             .insert(camera, redlilium_ecs::CameraAmbientOcclusion::default())
             .unwrap();
+        // HDR bloom (#151) — a subtle default glow on highlights.
+        world
+            .insert(camera, redlilium_ecs::CameraBloom::default())
+            .unwrap();
         world.insert(camera, cam_transform).unwrap();
         world
             .insert(camera, GlobalTransform(cam_transform.to_matrix()))
             .unwrap();
         world.insert(camera, Visibility::VISIBLE).unwrap();
         world.insert(camera, follow).unwrap();
+        // Remember the camera so the in-game HUD's bloom toggle (#151) can find
+        // it without a query.
+        world.insert_resource(GameCamera(camera));
 
         // World content comes from scene assets, starting at the menu (#106).
         // A host that wants a different start scene overrides it through

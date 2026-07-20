@@ -57,17 +57,34 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 
 [[vk::binding(0, 0)]]
 cbuffer DisplayOutputUniforms {
-    float4 exposure; // x = linear exposure multiplier (CameraExposure, #142)
+    // x = linear exposure multiplier (CameraExposure, #142);
+    // y = bloom intensity (CameraBloom, #151; 0 when the bloom input is the
+    //     1x1 black fallback).
+    float4 exposure;
 };
 
 [[vk::binding(1, 0)]]
 Texture2D scene_color;
 [[vk::binding(2, 0)]]
 SamplerState scene_sampler;
+// Accumulated bloom (#151), or a 1x1 black texture when the camera has no
+// CameraBloom — so this composite is a no-op there. Sampled with a linear
+// sampler (the bloom mip is lower-res than the scene).
+[[vk::binding(3, 0)]]
+Texture2D bloom;
+[[vk::binding(4, 0)]]
+SamplerState bloom_sampler;
 
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
-    float3 result_color = scene_color.Sample(scene_sampler, input.uv).rgb * exposure.x;
+    // Bloom composited in scene-referred linear, before exposure. A bounded
+    // mix (the Jimenez/CoD composite), not an add: lerp can't blow the image
+    // out the way `scene + bloom` does when the sky is very bright, and it is
+    // a no-op when bloom is off (intensity 0, black input). exposure.y = 0
+    // when the camera has no CameraBloom.
+    float3 scene = scene_color.Sample(scene_sampler, input.uv).rgb;
+    float3 glow = bloom.Sample(bloom_sampler, input.uv).rgb;
+    float3 result_color = lerp(scene, glow, exposure.y) * exposure.x;
 
 #ifdef HDR_OUTPUT
     // Linear-HDR target: pass radiance through (encoding here would be
