@@ -70,6 +70,12 @@ const DISPLAY_SHADER_SLANG: &str =
 const TAA_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/taa_resolve.slang");
 const VELOCITY_COMPLETE_SHADER_SLANG: &str =
     include_str!("../../../../std-assets/shaders/velocity_complete.slang");
+const MB_TILE_MAX_SHADER_SLANG: &str =
+    include_str!("../../../../std-assets/shaders/mb_tile_max.slang");
+const MB_NEIGHBOR_MAX_SHADER_SLANG: &str =
+    include_str!("../../../../std-assets/shaders/mb_neighbor_max.slang");
+const MB_RECONSTRUCT_SHADER_SLANG: &str =
+    include_str!("../../../../std-assets/shaders/mb_reconstruct.slang");
 
 // Baked IBL set (#137) — embedded stopgap until #145 loads it through the
 // asset system.
@@ -107,6 +113,18 @@ const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// Fraction of the current frame in the TAA blend (history keeps the rest —
 /// an exponential average remembering ~1/value frames).
 const TAA_BLEND: f32 = 0.1;
+
+/// Motion-blur tile size K in pixels (#149) — also the max blur radius the
+/// reconstruction can gather. Velocity is downsampled into ⌈W/K⌉×⌈H/K⌉ tiles.
+const MB_TILE_SIZE: u32 = 20;
+
+/// [`PipelineTargets`] keys of the motion-blur intermediates (#149). Only
+/// cameras with [`MotionBlur`](super::MotionBlur) allocate them: two
+/// tile-resolution velocity reductions and the full-res blurred output the
+/// display pass then reads.
+pub const MB_TILE_MAX: &str = "mb_tile_max";
+pub const MB_NEIGHBOR_MAX: &str = "mb_neighbor_max";
+pub const MB_OUTPUT: &str = "mb_output";
 
 /// G-buffer attachment formats, in attachment order (must match
 /// `deferred_gbuffer.slang`'s `FsOutput`).
@@ -272,6 +290,40 @@ struct VelocityCompleteUniforms {
     prev_view_proj: [[f32; 4]; 4],
 }
 
+/// Uniforms of the motion-blur TileMax pass (must match `mb_tile_max.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MbTileUniforms {
+    inv_resolution: [f32; 2],
+    resolution: [f32; 2],
+    shutter: f32,
+    tile_size: f32,
+    _pad: [f32; 2],
+}
+
+/// Uniforms of the motion-blur NeighborMax pass (must match
+/// `mb_neighbor_max.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MbNeighborUniforms {
+    inv_tile_resolution: [f32; 2],
+    _pad: [f32; 2],
+}
+
+/// Uniforms of the motion-blur reconstruction pass (must match
+/// `mb_reconstruct.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MbReconstructUniforms {
+    inv_resolution: [f32; 2],
+    resolution: [f32; 2],
+    camera_pos: [f32; 4],
+    shutter: f32,
+    tile_size: f32,
+    samples: f32,
+    _pad: f32,
+}
+
 /// Uniforms of the skybox pass (must match `skybox.slang`). The WGSL uniform
 /// layout aligns the shader's trailing `float3 _pad` to 16 bytes, rounding
 /// the cbuffer to 112 — the extra `_pad1` matches that (a 96-byte buffer
@@ -315,6 +367,21 @@ struct SharedResources {
     pending_uploads: Vec<TransferOperation>,
 }
 
+/// Motion-blur pass materials for one camera (#149), built only when the
+/// camera carries a [`MotionBlur`](super::MotionBlur) component.
+struct MotionBlurResources {
+    /// Velocity → per-tile maximum blur vector.
+    tile_max: Arc<MaterialInstance>,
+    /// TileMax → 3×3 directional neighbour max.
+    neighbor_max: Arc<MaterialInstance>,
+    /// Reconstruction, one instance per colour source: `scene_color` (TAA off)
+    /// or either TAA history (the one TAA just wrote).
+    reconstruct_scene: Arc<MaterialInstance>,
+    reconstruct_history: [Arc<MaterialInstance>; 2],
+    /// Display-output instance reading the blurred `MB_OUTPUT`.
+    display: Arc<MaterialInstance>,
+}
+
 /// One camera's fullscreen-pass materials and the identities they were built
 /// against.
 struct CameraResources {
@@ -333,6 +400,12 @@ struct CameraResources {
     /// TAA resolve instances (#148): instance `i` reads history `i` (and
     /// writes the other one — frame parity picks).
     taa: [Arc<MaterialInstance>; 2],
+    /// Motion-blur materials (#149), `Some` only while the camera carries a
+    /// [`MotionBlur`](super::MotionBlur) component and the MB targets exist.
+    motion_blur: Option<MotionBlurResources>,
+    /// `Arc::as_ptr` of `MB_OUTPUT` these MB materials were built against
+    /// (`None` when MB is off) — a mismatch (toggle or resize) rebuilds.
+    mb_output_ptr: Option<usize>,
     /// Whether the TAA history holds a real frame yet — false right after
     /// (re)creation (resize/format change); the first TAA frame then takes
     /// the current frame wholesale instead of blending with garbage.
@@ -490,6 +563,8 @@ impl CameraResources {
         gbuffer: [&Arc<Texture>; 4],
         scene_color: &Arc<Texture>,
         history: [&Arc<Texture>; 2],
+        // [tile_max, neighbor_max, output], present iff the camera has MotionBlur.
+        mb_targets: Option<[&Arc<Texture>; 3]>,
         color_format: TextureFormat,
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
@@ -740,6 +815,131 @@ impl CameraResources {
         };
         let taa = [taa_instance(history[0])?, taa_instance(history[1])?];
 
+        // --- Motion-blur materials (#149): built only when MB targets exist ---
+        let motion_blur = if let Some([mb_tile, mb_neighbor, mb_output]) = mb_targets {
+            let mb_material = |src: &str, fmt: TextureFormat, label: &'static str| {
+                device
+                    .create_material(
+                        &MaterialDescriptor::new()
+                            .with_shader(ShaderSource::slang(
+                                ShaderStage::Vertex,
+                                src.as_bytes().to_vec(),
+                                "vs_main",
+                                vec![],
+                            ))
+                            .with_shader(ShaderSource::slang(
+                                ShaderStage::Fragment,
+                                src.as_bytes().to_vec(),
+                                "fs_main",
+                                vec![],
+                            ))
+                            .with_color_format(fmt)
+                            .with_dynamic_uniform(0, 0)
+                            .with_label(label),
+                    )
+                    .inspect_err(|e| log::error!("deferred: {label} material failed: {e}"))
+                    .ok()
+            };
+
+            // TileMax: velocity -> per-tile max blur vector (RG16F).
+            let tile_material = mb_material(
+                MB_TILE_MAX_SHADER_SLANG,
+                GBUFFER_FORMATS[3],
+                "deferred_mb_tile_max",
+            )?;
+            let tile_group = device
+                .create_binding_group(
+                    tile_material.binding_layouts()[0].clone(),
+                    BindingGroupDescriptor::new()
+                        .with_buffer_range(
+                            0,
+                            ring_buffer.clone(),
+                            0,
+                            std::mem::size_of::<MbTileUniforms>() as u64,
+                        )
+                        .with_texture(1, gbuffer[3].clone())
+                        .with_sampler(2, shared.gbuffer_sampler.clone()),
+                )
+                .ok()?;
+            let tile_max =
+                Arc::new(MaterialInstance::new(tile_material).with_binding_group(tile_group));
+
+            // NeighborMax: TileMax -> 3x3 directional max (RG16F).
+            let neighbor_material = mb_material(
+                MB_NEIGHBOR_MAX_SHADER_SLANG,
+                GBUFFER_FORMATS[3],
+                "deferred_mb_neighbor_max",
+            )?;
+            let neighbor_group = device
+                .create_binding_group(
+                    neighbor_material.binding_layouts()[0].clone(),
+                    BindingGroupDescriptor::new()
+                        .with_buffer_range(
+                            0,
+                            ring_buffer.clone(),
+                            0,
+                            std::mem::size_of::<MbNeighborUniforms>() as u64,
+                        )
+                        .with_texture(1, mb_tile.clone())
+                        .with_sampler(2, shared.gbuffer_sampler.clone()),
+                )
+                .ok()?;
+            let neighbor_max = Arc::new(
+                MaterialInstance::new(neighbor_material).with_binding_group(neighbor_group),
+            );
+
+            // Reconstruction: colour + NeighborMax + velocity/position/albedo ->
+            // blurred MB_OUTPUT. One instance per possible colour source.
+            let reconstruct_material = mb_material(
+                MB_RECONSTRUCT_SHADER_SLANG,
+                SCENE_COLOR_FORMAT,
+                "deferred_mb_reconstruct",
+            )?;
+            let reconstruct_instance = |color: &Arc<Texture>| -> Option<Arc<MaterialInstance>> {
+                let group = device
+                    .create_binding_group(
+                        reconstruct_material.binding_layouts()[0].clone(),
+                        BindingGroupDescriptor::new()
+                            .with_buffer_range(
+                                0,
+                                ring_buffer.clone(),
+                                0,
+                                std::mem::size_of::<MbReconstructUniforms>() as u64,
+                            )
+                            .with_texture(1, color.clone())
+                            .with_texture(2, mb_neighbor.clone())
+                            .with_texture(3, gbuffer[3].clone())
+                            .with_texture(4, gbuffer[2].clone())
+                            .with_texture(5, gbuffer[0].clone())
+                            .with_sampler(6, shared.gbuffer_sampler.clone())
+                            .with_sampler(7, shared.ibl_sampler.clone()),
+                    )
+                    .ok()?;
+                Some(Arc::new(
+                    MaterialInstance::new(reconstruct_material.clone()).with_binding_group(group),
+                ))
+            };
+            let reconstruct_scene = reconstruct_instance(scene_color)?;
+            let reconstruct_history = [
+                reconstruct_instance(history[0])?,
+                reconstruct_instance(history[1])?,
+            ];
+
+            // Display reads the blurred output instead of scene_color/history.
+            let display = display_instance(mb_output)?;
+
+            Some(MotionBlurResources {
+                tile_max,
+                neighbor_max,
+                reconstruct_scene,
+                reconstruct_history,
+                display,
+            })
+        } else {
+            None
+        };
+        let mb_output_ptr = mb_targets.map(|t| Arc::as_ptr(t[2]) as usize);
+
         Some(Self {
             resolve,
             skybox,
@@ -747,6 +947,8 @@ impl CameraResources {
             display_scene,
             display_history,
             taa,
+            motion_blur,
+            mb_output_ptr,
             history_primed: false,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
             color_format,
@@ -770,6 +972,8 @@ impl CameraRenderPipeline for DeferredPipeline {
         let ring_buffer = world.resource::<FrameRing>().buffer().clone();
         let size = target.color.size();
         let (width, height) = (size.width, size.height);
+        // Motion blur (#149) allocates its intermediates only when opted in.
+        let mb_on = world.get::<super::MotionBlur>(camera).is_some();
 
         let mut shared_slot = self
             .shared
@@ -824,6 +1028,36 @@ impl CameraRenderPipeline for DeferredPipeline {
             let _ = world.insert(camera, targets.clone());
         }
 
+        // Motion-blur intermediates (#149): two tile-resolution velocity
+        // reductions + a full-res output, allocated only when opted in.
+        if mb_on {
+            let (tile_w, tile_h) = (width.div_ceil(MB_TILE_SIZE), height.div_ceil(MB_TILE_SIZE));
+            let mb_stale = targets
+                .get(MB_OUTPUT)
+                .map(|t| t.size().width != width || t.size().height != height)
+                .unwrap_or(true);
+            if mb_stale {
+                let usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING;
+                for name in [MB_TILE_MAX, MB_NEIGHBOR_MAX] {
+                    let tex = device
+                        .create_texture(
+                            &TextureDescriptor::new_2d(tile_w, tile_h, GBUFFER_FORMATS[3], usage)
+                                .with_label(name),
+                        )
+                        .expect("create MB tile texture");
+                    targets.set(name, tex);
+                }
+                let out = device
+                    .create_texture(
+                        &TextureDescriptor::new_2d(width, height, SCENE_COLOR_FORMAT, usage)
+                            .with_label(MB_OUTPUT),
+                    )
+                    .expect("create MB output texture");
+                targets.set(MB_OUTPUT, out);
+                let _ = world.insert(camera, targets.clone());
+            }
+        }
+
         // (Re-)build the camera's materials when the targets or the color
         // format changed.
         let (
@@ -846,12 +1080,28 @@ impl CameraRenderPipeline for DeferredPipeline {
         else {
             return;
         };
+        // MB targets present iff opted in and derived above.
+        let mb_targets = if mb_on {
+            match (
+                targets.get(MB_TILE_MAX),
+                targets.get(MB_NEIGHBOR_MAX),
+                targets.get(MB_OUTPUT),
+            ) {
+                (Some(t), Some(n), Some(o)) => Some([t, n, o]),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let albedo_ptr = Arc::as_ptr(albedo) as usize;
+        let mb_output_ptr = mb_targets.map(|t| Arc::as_ptr(t[2]) as usize);
         let color_format = target.color.format();
         let mut cameras = self.cameras.lock().expect("deferred camera map poisoned");
-        let fresh = cameras
-            .get(&camera)
-            .is_some_and(|c| c.albedo_ptr == albedo_ptr && c.color_format == color_format);
+        let fresh = cameras.get(&camera).is_some_and(|c| {
+            c.albedo_ptr == albedo_ptr
+                && c.color_format == color_format
+                && c.mb_output_ptr == mb_output_ptr
+        });
         if !fresh {
             match CameraResources::create(
                 &device,
@@ -859,6 +1109,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 [albedo, normal, position, velocity],
                 scene_color,
                 [history_a, history_b],
+                mb_targets,
                 color_format,
                 &ring_buffer,
             ) {
@@ -942,6 +1193,11 @@ impl CameraRenderPipeline for DeferredPipeline {
             && world.has_resource::<super::TemporalState>())
         .then(|| (world.resource::<super::TemporalState>().frame() % 2) as usize);
 
+        // Motion blur (#149) runs when the camera opted in and its materials
+        // were built (targets present).
+        let mb = world.get::<super::MotionBlur>(view.entity).copied();
+        let mb_on = mb.is_some() && camera_resources.motion_blur.is_some();
+
         // Push this view's uniform slots into the frame ring.
         let (
             camera_offset,
@@ -950,6 +1206,7 @@ impl CameraRenderPipeline for DeferredPipeline {
             resolve_offset,
             display_offset,
             taa_offset,
+            mb_offsets,
             ring_buffer,
         ) = {
             let mut ring = world.resource_mut::<FrameRing>();
@@ -993,6 +1250,39 @@ impl CameraRenderPipeline for DeferredPipeline {
                     ],
                 }))
             });
+            // Motion blur (#149): TileMax / NeighborMax / reconstruction slots.
+            let mb_offsets = if mb_on {
+                let mb = mb.expect("mb_on implies MotionBlur present");
+                let size = scene_color.size();
+                let (w, h) = (size.width.max(1) as f32, size.height.max(1) as f32);
+                let inv_resolution = [1.0 / w, 1.0 / h];
+                let resolution = [w, h];
+                let tile_w = size.width.div_ceil(MB_TILE_SIZE).max(1) as f32;
+                let tile_h = size.height.div_ceil(MB_TILE_SIZE).max(1) as f32;
+                let tile = ring.push(bytemuck::bytes_of(&MbTileUniforms {
+                    inv_resolution,
+                    resolution,
+                    shutter: mb.shutter,
+                    tile_size: MB_TILE_SIZE as f32,
+                    _pad: [0.0; 2],
+                }));
+                let neighbor = ring.push(bytemuck::bytes_of(&MbNeighborUniforms {
+                    inv_tile_resolution: [1.0 / tile_w, 1.0 / tile_h],
+                    _pad: [0.0; 2],
+                }));
+                let reconstruct = ring.push(bytemuck::bytes_of(&MbReconstructUniforms {
+                    inv_resolution,
+                    resolution,
+                    camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
+                    shutter: mb.shutter,
+                    tile_size: MB_TILE_SIZE as f32,
+                    samples: mb.samples as f32,
+                    _pad: 0.0,
+                }));
+                Some((tile, neighbor, reconstruct))
+            } else {
+                None
+            };
             (
                 camera_offset,
                 skybox_offset,
@@ -1000,6 +1290,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 resolve_offset,
                 display_offset,
                 taa_offset,
+                mb_offsets,
                 ring.buffer().clone(),
             )
         };
@@ -1111,38 +1402,102 @@ impl CameraRenderPipeline for DeferredPipeline {
         graph.add_dependency(resolve_handle, skybox_handle);
 
         // --- 4. TAA resolve (#148), when the camera opted in: accumulate
-        // scene_color into the history ping-pong; display then reads the
-        // freshly written history instead of scene_color.
-        let (display_source, taa_handle) = match (taa_read_index, taa_offset) {
-            (Some(read), Some(taa_offset)) => {
-                let write = 1 - read;
-                let history_write = targets.get(TAA_HISTORY[write])?;
-                let mut taa_pass = GraphicsPass::new("taa_resolve".into());
-                taa_pass.set_render_targets(
-                    RenderTargetConfig::new().with_color(
-                        ColorAttachment::from_texture(history_write.clone())
-                            .with_clear_color(0.0, 0.0, 0.0, 1.0),
-                    ),
-                );
-                taa_pass.add_draw_command(
-                    DrawCommand::new(
-                        shared.fullscreen_mesh.clone(),
-                        camera_resources.taa[read].clone(),
+        // scene_color into the history ping-pong. `color_writer` is the pass
+        // whose output the display (or motion blur) then reads; `mb_color_index`
+        // picks the matching reconstruction instance.
+        let (taa_display, color_writer, taa_handle, mb_color_index) =
+            match (taa_read_index, taa_offset) {
+                (Some(read), Some(taa_offset)) => {
+                    let write = 1 - read;
+                    let history_write = targets.get(TAA_HISTORY[write])?;
+                    let mut taa_pass = GraphicsPass::new("taa_resolve".into());
+                    taa_pass.set_render_targets(
+                        RenderTargetConfig::new().with_color(
+                            ColorAttachment::from_texture(history_write.clone())
+                                .with_clear_color(0.0, 0.0, 0.0, 1.0),
+                        ),
+                    );
+                    taa_pass.add_draw_command(
+                        DrawCommand::new(
+                            shared.fullscreen_mesh.clone(),
+                            camera_resources.taa[read].clone(),
+                        )
+                        .with_dynamic_offsets(vec![vec![taa_offset]]),
+                    );
+                    let taa_handle = graph.add_graphics_pass(taa_pass);
+                    graph.add_dependency(taa_handle, resolve_handle);
+                    camera_resources.history_primed = true;
+                    (
+                        camera_resources.display_history[write].clone(),
+                        taa_handle,
+                        Some(taa_handle),
+                        Some(write),
                     )
-                    .with_dynamic_offsets(vec![vec![taa_offset]]),
-                );
-                let taa_handle = graph.add_graphics_pass(taa_pass);
-                // TAA reads scene_color, which has two writers — anchor on
-                // the last (the resolve), like the display pass does.
-                graph.add_dependency(taa_handle, resolve_handle);
-                camera_resources.history_primed = true;
-                (
-                    camera_resources.display_history[write].clone(),
-                    Some(taa_handle),
-                )
-            }
-            _ => (camera_resources.display_scene.clone(), None),
-        };
+                }
+                _ => (
+                    camera_resources.display_scene.clone(),
+                    resolve_handle,
+                    None,
+                    None,
+                ),
+            };
+
+        // --- 4b. Motion blur (#149): TileMax -> NeighborMax -> reconstruction
+        // into MB_OUTPUT, which the display pass then reads. Opt-in only.
+        let (display_source, display_dep) =
+            match (mb_on, mb_offsets, camera_resources.motion_blur.as_ref()) {
+                (true, Some((tile_off, neighbor_off, recon_off)), Some(mb)) => {
+                    let mb_tile = targets.get(MB_TILE_MAX)?;
+                    let mb_neighbor = targets.get(MB_NEIGHBOR_MAX)?;
+                    let mb_output = targets.get(MB_OUTPUT)?;
+
+                    let mut tile_pass = GraphicsPass::new("mb_tile_max".into());
+                    tile_pass.set_render_targets(
+                        RenderTargetConfig::new()
+                            .with_color(ColorAttachment::from_texture(mb_tile.clone())),
+                    );
+                    tile_pass.add_draw_command(
+                        DrawCommand::new(shared.fullscreen_mesh.clone(), mb.tile_max.clone())
+                            .with_dynamic_offsets(vec![vec![tile_off]]),
+                    );
+                    let tile_handle = graph.add_graphics_pass(tile_pass);
+                    // Reads the completed velocity (background filled in).
+                    graph.add_dependency(tile_handle, velocity_complete_handle);
+
+                    let mut neighbor_pass = GraphicsPass::new("mb_neighbor_max".into());
+                    neighbor_pass.set_render_targets(
+                        RenderTargetConfig::new()
+                            .with_color(ColorAttachment::from_texture(mb_neighbor.clone())),
+                    );
+                    neighbor_pass.add_draw_command(
+                        DrawCommand::new(shared.fullscreen_mesh.clone(), mb.neighbor_max.clone())
+                            .with_dynamic_offsets(vec![vec![neighbor_off]]),
+                    );
+                    let neighbor_handle = graph.add_graphics_pass(neighbor_pass);
+                    graph.add_dependency(neighbor_handle, tile_handle);
+
+                    let reconstruct = match mb_color_index {
+                        Some(write) => mb.reconstruct_history[write].clone(),
+                        None => mb.reconstruct_scene.clone(),
+                    };
+                    let mut recon_pass = GraphicsPass::new("mb_reconstruct".into());
+                    recon_pass.set_render_targets(
+                        RenderTargetConfig::new()
+                            .with_color(ColorAttachment::from_texture(mb_output.clone())),
+                    );
+                    recon_pass.add_draw_command(
+                        DrawCommand::new(shared.fullscreen_mesh.clone(), reconstruct)
+                            .with_dynamic_offsets(vec![vec![recon_off]]),
+                    );
+                    let recon_handle = graph.add_graphics_pass(recon_pass);
+                    graph.add_dependency(recon_handle, neighbor_handle);
+                    // Reads the colour the display would otherwise show.
+                    graph.add_dependency(recon_handle, color_writer);
+
+                    (mb.display.clone(), recon_handle)
+                }
+                _ => (taa_display, taa_handle.unwrap_or(resolve_handle)),
+            };
 
         // --- 5. Display output (#142): scene-referred -> the camera target ---
         let mut display_pass = GraphicsPass::new("display_output".into());
@@ -1157,11 +1512,10 @@ impl CameraRenderPipeline for DeferredPipeline {
                 .with_dynamic_offsets(vec![vec![display_offset]]),
         );
         let display_handle = graph.add_graphics_pass(display_pass);
-        // scene_color has two writers above; anchor the read explicitly on
-        // the last of them (the graph would otherwise derive an order against
-        // *a* writer, not necessarily the resolve). With TAA the display
-        // reads the history the TAA pass just wrote instead.
-        graph.add_dependency(display_handle, taa_handle.unwrap_or(resolve_handle));
+        // The display reads whichever pass produced its source: the motion-blur
+        // reconstruction, else the TAA history, else the resolve (scene_color
+        // has two writers, so anchor explicitly on the last).
+        graph.add_dependency(display_handle, display_dep);
 
         Some(display_handle)
     }

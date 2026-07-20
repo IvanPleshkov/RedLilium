@@ -437,6 +437,100 @@ fn deferred_taa_accumulates_stably() {
     );
 }
 
+/// Motion blur (#149) must run end-to-end on the GPU — the TileMax /
+/// NeighborMax / reconstruction passes create, bind, and execute without a
+/// hazard — and be a no-op on a static scene: with no motion the neighbourhood
+/// blur vector is ~0, so the reconstruction returns the source pixel. Render the
+/// golden scene with TAA, capture it, then opt into MotionBlur and confirm the
+/// image is unchanged (a few LSBs of extra-resample tolerance).
+#[test]
+fn deferred_motion_blur_runs_static_noop() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping motion blur test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+    spawn_golden_scene(&mut ew.world);
+
+    let output_guid = redlilium_assets::Guid::stable("test/mb_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+    ew.world
+        .insert(camera, redlilium_ecs::TemporalJitter::default())
+        .unwrap();
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+    for _ in 0..24 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+
+    // TAA only.
+    let without = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+
+    // Opt into motion blur: the pipeline rebuilds its MB targets/materials
+    // (which resets the TAA history), runs TileMax -> NeighborMax ->
+    // reconstruction, and re-converges. Tick a whole multiple of the jitter
+    // cycle (8) so the capture lands on the *same* jitter phase as `without` —
+    // otherwise the two converged frames differ by TAA's phase edge-shimmer,
+    // not by anything motion blur did.
+    ew.world
+        .insert(camera, redlilium_ecs::MotionBlur::default())
+        .unwrap();
+    for _ in 0..32 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let with = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+
+    assert_images_close(
+        &without,
+        &with,
+        4,
+        0.03,
+        24,
+        "motion blur changed a static image (should be a no-op)",
+    );
+}
+
 /// Decode an Rg16Float readback into per-texel `[vx, vy]`.
 fn decode_velocity(raw: &[u8]) -> Vec<[f32; 2]> {
     raw.chunks_exact(4)
