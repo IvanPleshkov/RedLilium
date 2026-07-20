@@ -67,6 +67,8 @@ struct PointLightData {
 
 [[vk::binding(0, 0)]]
 cbuffer ResolveUniforms {
+    // xyz = camera world position; w = max reflection LOD (highest prefilter
+    // mip index of the bound environment, #145 — 0 for the fallback).
     float4 camera_pos;
     uint4 light_counts;  // x = directional count, y = point count
     DirectionalLightData dir_lights[MAX_DIRECTIONAL_LIGHTS];
@@ -93,11 +95,6 @@ Texture2D brdf_lut;
 [[vk::binding(3, 2)]]
 SamplerState ibl_sampler;
 
-// Highest prefiltered-environment mip the roughness axis maps onto. Must be
-// the baked pack's mip count minus one (`PREFILTER_MIPS` in xtask/src/ibl.rs
-// bakes `roughness = mip / (mips - 1)`); a lower value makes rough surfaces
-// sample too sharp a reflection. Rides the environment asset with #145.
-static const float MAX_REFLECTION_LOD_VAL = 7.0;
 
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
@@ -165,7 +162,9 @@ float4 fs_main(VsOutput input) : SV_Target {
     float3 diffuse_ibl = irradiance * albedo;
 
     // Specular IBL from pre-filtered environment map + BRDF LUT
-    float3 prefiltered_color = prefilter_map.SampleLevel(ibl_sampler, r, roughness * MAX_REFLECTION_LOD_VAL).rgb;
+    // Highest prefilter mip index rides the environment asset (#145):
+    // camera_pos.w = mip_count - 1 of the bound prefilter chain.
+    float3 prefiltered_color = prefilter_map.SampleLevel(ibl_sampler, r, roughness * camera_pos.w).rgb;
     float2 brdf_sample = brdf_lut.Sample(ibl_sampler, float2(n_dot_v, roughness)).rg;
     float3 specular_ibl = prefiltered_color * (f_ibl * brdf_sample.x + brdf_sample.y);
 

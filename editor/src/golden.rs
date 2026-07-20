@@ -29,9 +29,9 @@ use redlilium_core::color::{f16_to_f32, srgb_encode, tonemap_pbr_neutral};
 use redlilium_core::math::{Vec3, quat_looking_along};
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
-    CameraOutput, DirectionalLight, EcsRunner, GlobalTransform, MaterialInstanceSource,
-    MeshGenerator, MeshRenderer, MeshSource, OutputFormat, PointLight, Primitive, Render,
-    RenderSchedule, SizePolicy, TextureManager, Transform, Visibility,
+    CameraEnvironment, CameraOutput, DirectionalLight, EcsRunner, GlobalTransform,
+    MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, OutputFormat, PointLight,
+    Primitive, Render, RenderSchedule, SizePolicy, TextureManager, Transform, Visibility,
 };
 use redlilium_graphics::{
     BufferDescriptor, BufferUsage, FramePipeline, GraphicsInstance, TextureFormat, TransferConfig,
@@ -92,13 +92,19 @@ fn deferred_golden_images_across_output_formats() {
     let output_guid = redlilium_assets::Guid::stable("test/golden_camera_output");
     let camera = ew.editor_camera;
     set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+    // The IBL environment is now a per-camera asset (#145); the std default
+    // is the same baked sunrise set the pipeline used to embed.
+    ew.world
+        .insert(camera, CameraEnvironment::default())
+        .unwrap();
 
     let runner = EcsRunner::single_thread();
     ew.schedules.run_startup(&mut ew.world, &runner);
     let mut pipeline = device.create_pipeline(2);
 
     // Pump frames until the asset pipeline is quiet (meshes, materials,
-    // shaders, textures all resident), then a few calm frames on top.
+    // shaders, textures, the environment cubemaps all resident), then a few
+    // calm frames on top.
     let mut calm = 0u32;
     for tick_no in 0..600 {
         tick(&mut ew, &mut pipeline, &runner);
@@ -365,6 +371,9 @@ fn deferred_taa_accumulates_stably() {
     set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
     ew.world
         .insert(camera, redlilium_ecs::TemporalJitter::default())
+        .unwrap();
+    ew.world
+        .insert(camera, CameraEnvironment::default())
         .unwrap();
 
     let runner = EcsRunner::single_thread();

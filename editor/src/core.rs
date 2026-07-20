@@ -313,6 +313,11 @@ pub fn spawn_editor_camera(world: &mut World, aspect: f32) -> Entity {
             redlilium_ecs::RenderPath::named(redlilium_ecs::DEFERRED_PIPELINE),
         )
         .unwrap();
+    // IBL environment as a per-camera asset (#145): the std sunrise set, so
+    // the editor viewport keeps its lit sky.
+    world
+        .insert(editor_camera, redlilium_ecs::CameraEnvironment::default())
+        .unwrap();
     let transform = free_fly.to_transform();
     world.insert(editor_camera, transform).unwrap();
     world

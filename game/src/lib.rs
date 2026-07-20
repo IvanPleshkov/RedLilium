@@ -398,6 +398,10 @@ impl Plugin for CarGamePlugin {
         world
             .insert(camera, redlilium_ecs::TemporalJitter::default())
             .unwrap();
+        // IBL environment as a per-camera asset (#145): the std sunrise set.
+        world
+            .insert(camera, redlilium_ecs::CameraEnvironment::default())
+            .unwrap();
         world.insert(camera, cam_transform).unwrap();
         world
             .insert(camera, GlobalTransform(cam_transform.to_matrix()))

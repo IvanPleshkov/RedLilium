@@ -30,9 +30,11 @@
 //! specialization and are skipped with a warning — scenes migrate by
 //! switching materials to the `pbr` model.
 //!
-//! The IBL set (irradiance/prefilter cubemaps, BRDF LUT, sky cubemap) is the
-//! baked KTX2 pack from `std-assets/textures/ibl/`, embedded here as a
-//! stopgap until IBL environments are first-class assets (#145). Direct
+//! The IBL environment (irradiance/prefilter/sky cubemaps) is a per-camera
+//! [`CameraEnvironment`](super::CameraEnvironment) asset (#145), resolved by
+//! the [`EnvironmentManager`](super::EnvironmentManager); a camera without one
+//! renders no skybox and zero image-based ambient (analytic lights only). The
+//! BRDF integration LUT stays embedded — it is environment-independent. Direct
 //! lights come from the ECS light components (#146) — see [`gather_lights`];
 //! spot lights are not consumed yet. Shadows arrive with #130.
 
@@ -69,14 +71,11 @@ const DISPLAY_SHADER_SLANG: &str =
     include_str!("../../../../std-assets/shaders/display_output.slang");
 const TAA_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/taa_resolve.slang");
 
-// Baked IBL set (#137) — embedded stopgap until #145 loads it through the
-// asset system.
+// The BRDF integration LUT (#137) stays embedded: it is environment-
+// independent (the same table for every sky), so it is a device-wide resource
+// rather than part of any environment asset. The sky/irradiance/prefilter
+// cubemaps now come from a `CameraEnvironment` asset (#145).
 const BRDF_LUT_KTX2: &[u8] = include_bytes!("../../../../std-assets/textures/ibl/brdf_lut.ktx2");
-const IRRADIANCE_KTX2: &[u8] =
-    include_bytes!("../../../../std-assets/textures/ibl/irradiance_cube.ktx2");
-const PREFILTER_KTX2: &[u8] =
-    include_bytes!("../../../../std-assets/textures/ibl/prefilter_cube.ktx2");
-const SKY_KTX2: &[u8] = include_bytes!("../../../../std-assets/textures/ibl/sky_cube.ktx2");
 
 /// [`PipelineTargets`] keys of the G-buffer textures.
 pub const GBUFFER_ALBEDO: &str = "gbuffer_albedo";
@@ -289,16 +288,18 @@ pub struct DeferredPipeline {
 
 /// Device-wide resources shared by every deferred camera.
 struct SharedResources {
-    irradiance_cubemap: Arc<Texture>,
-    prefilter_cubemap: Arc<Texture>,
+    /// Environment-independent BRDF integration LUT (embedded).
     brdf_lut: Arc<Texture>,
-    sky_cubemap: Arc<Texture>,
+    /// 1×1 black cube bound for irradiance/prefilter/sky when a camera has no
+    /// resolved environment (#145) — image-based lighting reads zero, so the
+    /// scene is lit by analytic lights only.
+    fallback_cube: Arc<Texture>,
     ibl_sampler: Arc<Sampler>,
     gbuffer_sampler: Arc<Sampler>,
     /// Fullscreen triangle (the shaders use `SV_VertexID` only; the buffer
     /// exists to satisfy the mesh contract).
     fullscreen_mesh: Arc<Mesh>,
-    /// Staged one-time uploads (IBL mip levels + the dummy vertex buffer),
+    /// Staged one-time uploads (BRDF LUT, fallback cube, dummy vertex buffer),
     /// drained into the first recorded frame's graph.
     pending_uploads: Vec<TransferOperation>,
 }
@@ -325,6 +326,15 @@ struct CameraResources {
     /// resize re-derives the G-buffer (and `scene_color` with it),
     /// invalidating these materials.
     albedo_ptr: usize,
+    /// `Arc::as_ptr` of the resolved environment the IBL/skybox groups bind
+    /// (`None` = the black fallback, #145). A changed environment (resolved,
+    /// swapped, or hot-reloaded) rebuilds these materials. `is_some()` also
+    /// gates whether the skybox pass is recorded (see `record`).
+    env_ptr: Option<usize>,
+    /// Highest prefilter mip index of the bound environment (`0` for the
+    /// fallback) — fed to the resolve shader so roughness maps onto the
+    /// actual baked chain instead of a hardcoded constant (#145).
+    max_reflection_lod: f32,
     /// The color-target format the display material was specialized for
     /// (drives the `HDR_OUTPUT` variant and its pipeline's color state).
     color_format: TextureFormat,
@@ -346,27 +356,7 @@ impl SharedResources {
             "ibl_brdf_lut",
             &mut pending_uploads,
         );
-        let irradiance_cubemap = create_ibl_texture(
-            device,
-            IRRADIANCE_KTX2,
-            TextureDimension::Cube,
-            "ibl_irradiance",
-            &mut pending_uploads,
-        );
-        let prefilter_cubemap = create_ibl_texture(
-            device,
-            PREFILTER_KTX2,
-            TextureDimension::Cube,
-            "ibl_prefilter",
-            &mut pending_uploads,
-        );
-        let sky_cubemap = create_ibl_texture(
-            device,
-            SKY_KTX2,
-            TextureDimension::Cube,
-            "ibl_sky",
-            &mut pending_uploads,
-        );
+        let fallback_cube = create_black_cube(device, &mut pending_uploads);
 
         let ibl_sampler = device
             .create_sampler_from_cpu(&CpuSampler::linear().with_name("ibl_sampler"))
@@ -398,18 +388,42 @@ impl SharedResources {
             ));
         }
 
-        log::info!("deferred pipeline: shared resources created (baked IBL set)");
+        log::info!("deferred pipeline: shared resources created (BRDF LUT + fallback cube)");
         Self {
-            irradiance_cubemap,
-            prefilter_cubemap,
             brdf_lut,
-            sky_cubemap,
+            fallback_cube,
             ibl_sampler,
             gbuffer_sampler,
             fullscreen_mesh,
             pending_uploads,
         }
     }
+}
+
+/// Create the 1×1 black `Rgba16Float` cube used as the no-environment IBL
+/// fallback (#145): sampling it returns zero, so image-based lighting drops
+/// out and the scene is lit by analytic lights only.
+fn create_black_cube(
+    device: &Arc<GraphicsDevice>,
+    ops: &mut Vec<TransferOperation>,
+) -> Arc<Texture> {
+    let usage = TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST;
+    let texture = device
+        .create_texture(
+            &TextureDescriptor::new_cube(1, SCENE_COLOR_FORMAT, usage)
+                .with_mip_levels(1)
+                .with_label("ibl_fallback_black"),
+        )
+        .expect("create fallback cube");
+    // One 1×1 Rgba16Float texel (4×f16) of zero per face.
+    let black = [0u8; 8];
+    for layer in 0..6 {
+        ops.push(
+            TransferOperation::upload_texture_level(device, Arc::clone(&texture), 0, layer, &black)
+                .expect("stage fallback cube upload"),
+        );
+    }
+    texture
 }
 
 /// Parse one baked KTX2 blob, create its GPU texture, and stage every
@@ -468,17 +482,35 @@ fn output_variant(source: &str, format: TextureFormat) -> Option<redlilium_graph
 }
 
 impl CameraResources {
+    #[allow(clippy::too_many_arguments)]
     fn create(
         device: &Arc<GraphicsDevice>,
         shared: &SharedResources,
         gbuffer: [&Arc<Texture>; 4],
         scene_color: &Arc<Texture>,
         history: [&Arc<Texture>; 2],
+        env: Option<&Arc<super::ResolvedEnvironment>>,
         color_format: TextureFormat,
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
         profile_scope!("DeferredPipeline::camera_create");
         use redlilium_graphics::BindingGroupDescriptor;
+
+        // The environment's cubemaps, or the shared black fallback (#145):
+        // no environment ⇒ image-based lighting reads zero and the skybox
+        // pass is skipped (see `record`).
+        let (irradiance, prefilter, sky) = match env {
+            Some(env) => (
+                env.irradiance.texture.clone(),
+                env.prefilter.texture.clone(),
+                env.sky.texture.clone(),
+            ),
+            None => (
+                shared.fallback_cube.clone(),
+                shared.fallback_cube.clone(),
+                shared.fallback_cube.clone(),
+            ),
+        };
 
         // --- Resolve material (scene-referred: always targets scene_color) ---
         let resolve_material = device
@@ -528,8 +560,8 @@ impl CameraResources {
             .create_binding_group(
                 resolve_material.binding_layouts()[2].clone(),
                 BindingGroupDescriptor::new()
-                    .with_texture(0, shared.irradiance_cubemap.clone())
-                    .with_texture(1, shared.prefilter_cubemap.clone())
+                    .with_texture(0, irradiance.clone())
+                    .with_texture(1, prefilter.clone())
                     .with_texture(2, shared.brdf_lut.clone())
                     .with_sampler(3, shared.ibl_sampler.clone()),
             )
@@ -573,7 +605,7 @@ impl CameraResources {
                         0,
                         std::mem::size_of::<SkyboxUniforms>() as u64,
                     )
-                    .with_texture(1, shared.sky_cubemap.clone())
+                    .with_texture(1, sky.clone())
                     .with_sampler(2, shared.ibl_sampler.clone()),
             )
             .ok()?;
@@ -689,6 +721,8 @@ impl CameraResources {
             taa,
             history_primed: false,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
+            env_ptr: env.map(|e| Arc::as_ptr(e) as usize),
+            max_reflection_lod: env.map_or(0.0, |e| e.max_reflection_lod),
             color_format,
         })
     }
@@ -788,10 +822,17 @@ impl CameraRenderPipeline for DeferredPipeline {
         };
         let albedo_ptr = Arc::as_ptr(albedo) as usize;
         let color_format = target.color.format();
+        // The camera's resolved IBL environment (#145), if it has one and it
+        // has loaded — else the black fallback. Cloned out so the component
+        // borrow ends before the camera-map lock.
+        let env = world
+            .get::<super::CameraEnvironment>(camera)
+            .and_then(|c| c.environment.get().cloned());
+        let env_ptr = env.as_ref().map(|e| Arc::as_ptr(e) as usize);
         let mut cameras = self.cameras.lock().expect("deferred camera map poisoned");
-        let fresh = cameras
-            .get(&camera)
-            .is_some_and(|c| c.albedo_ptr == albedo_ptr && c.color_format == color_format);
+        let fresh = cameras.get(&camera).is_some_and(|c| {
+            c.albedo_ptr == albedo_ptr && c.color_format == color_format && c.env_ptr == env_ptr
+        });
         if !fresh {
             match CameraResources::create(
                 &device,
@@ -799,6 +840,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 [albedo, normal, position, velocity],
                 scene_color,
                 [history_a, history_b],
+                env.as_ref(),
                 color_format,
                 &ring_buffer,
             ) {
@@ -859,8 +901,15 @@ impl CameraRenderPipeline for DeferredPipeline {
             .unwrap_or([0.0; 3]);
 
         // This frame's direct lights, from the ECS light components (#146).
+        // camera_pos.w carries the environment's reflection-LOD range (#145) —
+        // the resolve shader reads only .xyz for position.
         let mut resolve_uniforms = gather_lights(world);
-        resolve_uniforms.camera_pos = [camera_pos[0], camera_pos[1], camera_pos[2], 1.0];
+        resolve_uniforms.camera_pos = [
+            camera_pos[0],
+            camera_pos[1],
+            camera_pos[2],
+            camera_resources.max_reflection_lod,
+        ];
 
         // Manual exposure (#142): the camera's CameraExposure, neutral when
         // absent.
@@ -976,28 +1025,40 @@ impl CameraRenderPipeline for DeferredPipeline {
         graph.add_graphics_pass(gbuffer_pass);
 
         // --- 2. Skybox background into the scene-referred intermediate ---
+        // Only when the camera has a resolved environment (#145); with none,
+        // the skybox is skipped and the resolve clears scene_color to the
+        // camera clear color instead (fallback: analytic-lit, no sky).
         let clear = view.target.clear_color;
-        let mut skybox_pass = GraphicsPass::new("skybox".into());
-        skybox_pass.set_render_targets(
-            RenderTargetConfig::new().with_color(
-                ColorAttachment::from_texture(scene_color.clone())
-                    .with_clear_color(clear[0], clear[1], clear[2], clear[3]),
-            ),
-        );
-        skybox_pass.add_draw_command(
-            DrawCommand::new(
-                shared.fullscreen_mesh.clone(),
-                camera_resources.skybox.clone(),
-            )
-            .with_dynamic_offsets(vec![vec![skybox_offset]]),
-        );
-        let skybox_handle = graph.add_graphics_pass(skybox_pass);
+        let has_env = camera_resources.env_ptr.is_some();
+        let skybox_handle = has_env.then(|| {
+            let mut skybox_pass = GraphicsPass::new("skybox".into());
+            skybox_pass.set_render_targets(
+                RenderTargetConfig::new().with_color(
+                    ColorAttachment::from_texture(scene_color.clone())
+                        .with_clear_color(clear[0], clear[1], clear[2], clear[3]),
+                ),
+            );
+            skybox_pass.add_draw_command(
+                DrawCommand::new(
+                    shared.fullscreen_mesh.clone(),
+                    camera_resources.skybox.clone(),
+                )
+                .with_dynamic_offsets(vec![vec![skybox_offset]]),
+            );
+            graph.add_graphics_pass(skybox_pass)
+        });
 
         // --- 3. Resolve: lit geometry composited over the background ---
+        // Loads the skybox background when present, else clears scene_color.
+        let background = match skybox_handle {
+            Some(_) => {
+                ColorAttachment::from_texture(scene_color.clone()).with_load_op(LoadOp::Load)
+            }
+            None => ColorAttachment::from_texture(scene_color.clone())
+                .with_clear_color(clear[0], clear[1], clear[2], clear[3]),
+        };
         let mut resolve_pass = GraphicsPass::new("deferred_resolve".into());
-        resolve_pass.set_render_targets(RenderTargetConfig::new().with_color(
-            ColorAttachment::from_texture(scene_color.clone()).with_load_op(LoadOp::Load),
-        ));
+        resolve_pass.set_render_targets(RenderTargetConfig::new().with_color(background));
         resolve_pass.add_draw_command(
             DrawCommand::new(
                 shared.fullscreen_mesh.clone(),
@@ -1009,7 +1070,9 @@ impl CameraRenderPipeline for DeferredPipeline {
 
         // Skybox and resolve both write scene_color with no read-based
         // direction — order them explicitly (background first).
-        graph.add_dependency(resolve_handle, skybox_handle);
+        if let Some(skybox_handle) = skybox_handle {
+            graph.add_dependency(resolve_handle, skybox_handle);
+        }
 
         // --- 4. TAA resolve (#148), when the camera opted in: accumulate
         // scene_color into the history ping-pong; display then reads the
