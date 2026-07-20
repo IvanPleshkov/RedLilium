@@ -68,6 +68,8 @@ const SKYBOX_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/s
 const DISPLAY_SHADER_SLANG: &str =
     include_str!("../../../../std-assets/shaders/display_output.slang");
 const TAA_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/taa_resolve.slang");
+const VELOCITY_COMPLETE_SHADER_SLANG: &str =
+    include_str!("../../../../std-assets/shaders/velocity_complete.slang");
 
 // Baked IBL set (#137) — embedded stopgap until #145 loads it through the
 // asset system.
@@ -260,6 +262,16 @@ struct TaaUniforms {
     params: [f32; 4],
 }
 
+/// Uniforms of the velocity-completion pass (must match
+/// `velocity_complete.slang`) — the unjittered camera pair the background
+/// reprojection runs on.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct VelocityCompleteUniforms {
+    inv_view_proj: [[f32; 4]; 4],
+    prev_view_proj: [[f32; 4]; 4],
+}
+
 /// Uniforms of the skybox pass (must match `skybox.slang`). The WGSL uniform
 /// layout aligns the shader's trailing `float3 _pad` to 16 bytes, rounding
 /// the cbuffer to 112 — the extra `_pad1` matches that (a 96-byte buffer
@@ -308,6 +320,10 @@ struct SharedResources {
 struct CameraResources {
     resolve: Arc<MaterialInstance>,
     skybox: Arc<MaterialInstance>,
+    /// Velocity-completion pass (#149): fills camera-only motion into the
+    /// background of `GBUFFER_VELOCITY`. Always present; only motion blur (and
+    /// a future unified TAA) consume the completed background.
+    velocity_complete: Arc<MaterialInstance>,
     /// The display-output pass (#142) reading `scene_color` directly — the
     /// TAA-off path.
     display_scene: Arc<MaterialInstance>,
@@ -580,6 +596,49 @@ impl CameraResources {
         let skybox =
             Arc::new(MaterialInstance::new(skybox_material).with_binding_group(skybox_group));
 
+        // --- Velocity-completion material (#149): background camera motion ---
+        // Writes into the velocity G-buffer (RG16F), so its color format is the
+        // velocity attachment's, not scene_color's.
+        let velocity_complete_material = device
+            .create_material(
+                &MaterialDescriptor::new()
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Vertex,
+                        VELOCITY_COMPLETE_SHADER_SLANG.as_bytes().to_vec(),
+                        "vs_main",
+                        vec![],
+                    ))
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Fragment,
+                        VELOCITY_COMPLETE_SHADER_SLANG.as_bytes().to_vec(),
+                        "fs_main",
+                        vec![],
+                    ))
+                    .with_color_format(GBUFFER_FORMATS[3])
+                    .with_dynamic_uniform(0, 0)
+                    .with_label("deferred_velocity_complete"),
+            )
+            .inspect_err(|e| log::error!("deferred: velocity-complete material failed: {e}"))
+            .ok()?;
+        let velocity_complete_group = device
+            .create_binding_group(
+                velocity_complete_material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new()
+                    .with_buffer_range(
+                        0,
+                        ring_buffer.clone(),
+                        0,
+                        std::mem::size_of::<VelocityCompleteUniforms>() as u64,
+                    )
+                    .with_texture(1, gbuffer[0].clone())
+                    .with_sampler(2, shared.gbuffer_sampler.clone()),
+            )
+            .ok()?;
+        let velocity_complete = Arc::new(
+            MaterialInstance::new(velocity_complete_material)
+                .with_binding_group(velocity_complete_group),
+        );
+
         // --- Display-output material (#142): the only format-variant pass ---
         let variant = output_variant(DISPLAY_SHADER_SLANG, color_format)?;
         let display_material = device
@@ -684,6 +743,7 @@ impl CameraResources {
         Some(Self {
             resolve,
             skybox,
+            velocity_complete,
             display_scene,
             display_history,
             taa,
@@ -852,6 +912,13 @@ impl CameraRenderPipeline for DeferredPipeline {
         // the camera position for the fullscreen passes.
         let view_proj = Mat4::from(view.view_projection);
         let inv_view_proj = view_proj.try_inverse()?;
+        // Unjittered inverse for the reprojection passes (velocity completion
+        // #149, TAA #148): the jittered raster inverse would bake the sub-pixel
+        // offset into every ray.
+        let unjittered_vp = Mat4::from(view.view_projection_unjittered);
+        let inv_unjittered_cols = redlilium_core::math::mat4_to_cols_array_2d(
+            &unjittered_vp.try_inverse().unwrap_or(unjittered_vp),
+        );
         let camera_pos = world
             .get::<crate::std::components::Camera>(view.entity)
             .and_then(|cam| cam.view_matrix.try_inverse())
@@ -876,7 +943,15 @@ impl CameraRenderPipeline for DeferredPipeline {
         .then(|| (world.resource::<super::TemporalState>().frame() % 2) as usize);
 
         // Push this view's uniform slots into the frame ring.
-        let (camera_offset, skybox_offset, resolve_offset, display_offset, taa_offset, ring_buffer) = {
+        let (
+            camera_offset,
+            skybox_offset,
+            velocity_complete_offset,
+            resolve_offset,
+            display_offset,
+            taa_offset,
+            ring_buffer,
+        ) = {
             let mut ring = world.resource_mut::<FrameRing>();
             let camera_offset = ring.push(bytemuck::bytes_of(&shaders::CameraUniforms {
                 view_projection: view.view_projection,
@@ -890,18 +965,21 @@ impl CameraRenderPipeline for DeferredPipeline {
                 _pad: [0.0; 3],
                 _pad1: [0.0; 4],
             }));
+            // Velocity completion (#149) — always on; the unjittered pair, so
+            // the background velocity matches the G-buffer's convention.
+            let velocity_complete_offset =
+                ring.push(bytemuck::bytes_of(&VelocityCompleteUniforms {
+                    inv_view_proj: inv_unjittered_cols,
+                    prev_view_proj: view.prev_view_projection,
+                }));
             let resolve_offset = ring.push(bytemuck::bytes_of(&resolve_uniforms));
             let display_offset = ring.push(bytemuck::bytes_of(&DisplayOutputUniforms {
                 exposure: [exposure, 0.0, 0.0, 0.0],
             }));
             let taa_offset = taa_read_index.map(|_| {
-                // Reprojection math runs on the unjittered pair (the raster
-                // inverse would bake the sub-pixel offset into every ray).
-                let unjittered = Mat4::from(view.view_projection_unjittered);
-                let inv_unjittered = unjittered.try_inverse().unwrap_or(unjittered);
                 let size = scene_color.size();
                 ring.push(bytemuck::bytes_of(&TaaUniforms {
-                    inv_view_proj: redlilium_core::math::mat4_to_cols_array_2d(&inv_unjittered),
+                    inv_view_proj: inv_unjittered_cols,
                     prev_view_proj: view.prev_view_projection,
                     params: [
                         TAA_BLEND,
@@ -918,6 +996,7 @@ impl CameraRenderPipeline for DeferredPipeline {
             (
                 camera_offset,
                 skybox_offset,
+                velocity_complete_offset,
                 resolve_offset,
                 display_offset,
                 taa_offset,
@@ -973,7 +1052,27 @@ impl CameraRenderPipeline for DeferredPipeline {
                 ]),
             );
         }
-        graph.add_graphics_pass(gbuffer_pass);
+        let gbuffer_handle = graph.add_graphics_pass(gbuffer_pass);
+
+        // --- 1b. Velocity completion (#149): fill background camera motion
+        // into the velocity G-buffer. Loads (not clears) so geometry velocity
+        // survives; the shader discards geometry fragments. Consumed by motion
+        // blur's TileMax (and, later, a unified TAA).
+        let mut velocity_complete_pass = GraphicsPass::new("velocity_complete".into());
+        velocity_complete_pass.set_render_targets(RenderTargetConfig::new().with_color(
+            ColorAttachment::from_texture(velocity.clone()).with_load_op(LoadOp::Load),
+        ));
+        velocity_complete_pass.add_draw_command(
+            DrawCommand::new(
+                shared.fullscreen_mesh.clone(),
+                camera_resources.velocity_complete.clone(),
+            )
+            .with_dynamic_offsets(vec![vec![velocity_complete_offset]]),
+        );
+        let velocity_complete_handle = graph.add_graphics_pass(velocity_complete_pass);
+        // Runs after the G-buffer: it reads albedo and rewrites the velocity
+        // target the G-buffer just cleared/wrote (write-after-write).
+        graph.add_dependency(velocity_complete_handle, gbuffer_handle);
 
         // --- 2. Skybox background into the scene-referred intermediate ---
         let clear = view.target.clear_color;

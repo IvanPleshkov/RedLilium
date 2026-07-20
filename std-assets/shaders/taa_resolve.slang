@@ -16,6 +16,8 @@
 // ADR-039) carry zero velocity; their history is reprojected through the
 // camera matrices instead (sky moves with camera rotation, not geometry).
 
+import motion; // shared reprojection helpers (#149)
+
 // =============================================================================
 // Vertex Shader
 // =============================================================================
@@ -142,27 +144,19 @@ float4 fs_main(VsOutput input) : SV_Target {
     float2 cam_uv;
     bool background = gbuffer_albedo.Sample(nearest_sampler, input.uv).a < 1.0 / 128.0;
     if (background) {
-        float2 ndc = (input.uv - 0.5) * float2(2.0, -2.0);
-        // Far-plane point of the current ray (reversed-Z: far = depth 0).
-        float4 far_world = mul(inv_view_proj, float4(ndc, 0.0, 1.0));
-        far_world /= far_world.w;
-        float4 prev_clip = mul(prev_view_proj, far_world);
-        float2 prev_ndc = prev_clip.xy / max(prev_clip.w, 1e-6);
-        prev_uv = prev_ndc * float2(0.5, -0.5) + 0.5;
-        // Background carries no object motion, so its reprojection *is* the
-        // camera-only motion.
+        // Sky has no object motion, so its camera reprojection (far-plane ray
+        // through the camera pair) *is* the history reprojection.
+        float3 world = far_plane_world(inv_view_proj, input.uv);
+        prev_uv = project_uv(prev_view_proj, world);
         cam_uv = prev_uv;
     } else {
         float2 velocity = gbuffer_velocity.Sample(nearest_sampler, input.uv).xy;
-        prev_uv = input.uv - velocity * float2(0.5, -0.5);
-        // Camera-only reprojection: send this pixel's world position through
-        // the previous camera. Unlike `velocity` (which folds in the object's
-        // own movement) this depends solely on the camera, so a moving object
-        // does not inflate the blend by itself.
-        float3 world_pos = gbuffer_position.Sample(nearest_sampler, input.uv).xyz;
-        float4 cam_clip = mul(prev_view_proj, float4(world_pos, 1.0));
-        float2 cam_ndc = cam_clip.xy / max(cam_clip.w, 1e-6);
-        cam_uv = cam_ndc * float2(0.5, -0.5) + 0.5;
+        prev_uv = reproject_prev_uv(input.uv, velocity);
+        // Camera-only reprojection of this pixel's world position — unlike
+        // `velocity` (which folds in the object's own motion) it depends solely
+        // on the camera, so a moving object does not inflate the blend itself.
+        float3 world = gbuffer_position.Sample(nearest_sampler, input.uv).xyz;
+        cam_uv = project_uv(prev_view_proj, world);
     }
 
     // Camera-induced screen motion in pixels/frame → adaptive current-frame

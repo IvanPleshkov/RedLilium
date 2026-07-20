@@ -114,6 +114,12 @@ const REGISTRY: &[ShaderSpec] = &[
     ),
     // TAA resolve (#148): history accumulation with variance clipping.
     vs_fs_spec("std_taa_resolve", "std-assets/shaders/taa_resolve.slang"),
+    // Velocity completion (#149): fills camera-only motion into the background
+    // of GBUFFER_VELOCITY so motion blur (and TAA) see the sky move.
+    vs_fs_spec(
+        "std_velocity_complete",
+        "std-assets/shaders/velocity_complete.slang",
+    ),
     // Demo shaders — baked so the demos render on the default Slang-off build
     // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
     // the std deferred path now.)
