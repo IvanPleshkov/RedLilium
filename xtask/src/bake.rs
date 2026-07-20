@@ -114,6 +114,9 @@ const REGISTRY: &[ShaderSpec] = &[
     ),
     // TAA resolve (#148): history accumulation with variance clipping.
     vs_fs_spec("std_taa_resolve", "std-assets/shaders/taa_resolve.slang"),
+    // Screen-space AO (#150): GTAO-lite horizon pass + its bilateral denoise.
+    vs_fs_spec("std_ssao", "std-assets/shaders/ssao.slang"),
+    vs_fs_spec("std_ssao_blur", "std-assets/shaders/ssao_blur.slang"),
     // Demo shaders — baked so the demos render on the default Slang-off build
     // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
     // the std deferred path now.)

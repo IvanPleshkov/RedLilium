@@ -192,14 +192,14 @@ pub use self::std::scene::{
 pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 #[cfg(feature = "rendering")]
 pub use rendering::{
-    AssetDragPayload, AssetRef, AssetRefSource, CameraEnvironment, CameraExposure, CameraOutput,
-    CameraRender, CameraRenderPipeline, CameraTarget, CameraTargetSpec, CameraView, ChangedAssets,
-    DEFERRED_PIPELINE, DebugRender, DeferredPipeline, DirtyMounts, DrawArgs, EguiRender,
-    EnsureCameraTargets, EnvironmentData, EnvironmentLoader, EnvironmentManager, EnvironmentSource,
-    FORWARD_PIPELINE, FlushUploads, ForwardPipeline, FrameRing, FrameTarget, HotReload,
-    MainViewport, MaterialAssetManager, MaterialInstanceData, MaterialInstanceLoad,
-    MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource, MaterialLoader,
-    MeshLoad, MeshManager, MeshRenderer, NewAssetSpec, OutputFormat, PipelineCache,
+    AssetDragPayload, AssetRef, AssetRefSource, CameraAmbientOcclusion, CameraEnvironment,
+    CameraExposure, CameraOutput, CameraRender, CameraRenderPipeline, CameraTarget,
+    CameraTargetSpec, CameraView, ChangedAssets, DEFERRED_PIPELINE, DebugRender, DeferredPipeline,
+    DirtyMounts, DrawArgs, EguiRender, EnsureCameraTargets, EnvironmentData, EnvironmentLoader,
+    EnvironmentManager, EnvironmentSource, FORWARD_PIPELINE, FlushUploads, ForwardPipeline,
+    FrameRing, FrameTarget, HotReload, MainViewport, MaterialAssetManager, MaterialInstanceData,
+    MaterialInstanceLoad, MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource,
+    MaterialLoader, MeshLoad, MeshManager, MeshRenderer, NewAssetSpec, OutputFormat, PipelineCache,
     PipelineRegistry, PipelineTargets, Primitive, PropValue, RecordCtx, RenderPath, RenderPhase,
     RenderSchedule, ResolvedEnvironment, STD_ENVIRONMENT, SceneDrawer, ScenePass,
     SetAssetReferenceAction, SetAssetSettingsAction, Shader, ShaderLoader, ShaderManager,

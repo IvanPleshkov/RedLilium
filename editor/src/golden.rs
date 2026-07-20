@@ -29,9 +29,10 @@ use redlilium_core::color::{f16_to_f32, srgb_encode, tonemap_pbr_neutral};
 use redlilium_core::math::{Vec3, quat_looking_along};
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
-    CameraEnvironment, CameraOutput, DirectionalLight, EcsRunner, GlobalTransform,
-    MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, OutputFormat, PointLight,
-    Primitive, Render, RenderSchedule, SizePolicy, TextureManager, Transform, Visibility,
+    CameraAmbientOcclusion, CameraEnvironment, CameraOutput, DirectionalLight, EcsRunner,
+    GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, OutputFormat,
+    PointLight, Primitive, Render, RenderSchedule, SizePolicy, TextureManager, Transform,
+    Visibility,
 };
 use redlilium_graphics::{
     BufferDescriptor, BufferUsage, FramePipeline, GraphicsInstance, TextureFormat, TransferConfig,
@@ -444,6 +445,124 @@ fn deferred_taa_accumulates_stably() {
         48,
         "converged TAA output flickers between frames",
     );
+}
+
+/// SSAO (#150) must only *darken* the image-based ambient, and must visibly
+/// darken contacts. Renders the fixed scene without AO, then with a strong
+/// `CameraAmbientOcclusion`, and asserts three properties that pin the effect
+/// without depending on its exact tuning: the balance darkens, essentially no
+/// pixel brightens (AO can only occlude), and a meaningful fraction darkens
+/// (creases/contacts). A golden image guards the look on top.
+#[test]
+fn deferred_ssao_darkens_ambient() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping SSAO test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+    spawn_golden_scene(&mut ew.world);
+
+    let output_guid = redlilium_assets::Guid::stable("test/ssao_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+    ew.world
+        .insert(camera, CameraEnvironment::default())
+        .unwrap();
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+
+    // Baseline: no SSAO.
+    for _ in 0..3 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let no_ao = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+
+    // Enable a strong SSAO (bigger radius / more intensity than the default,
+    // so the differential is unmistakable and decoupled from tuning). A few
+    // frames to derive the targets, rebuild the materials, and render.
+    ew.world
+        .insert(camera, CameraAmbientOcclusion::new(0.6, 1.5, 2.0))
+        .unwrap();
+    for _ in 0..5 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let with_ao = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+    drop(pipeline);
+
+    // Per-pixel luma delta (with_ao − no_ao). SSAO scales the ambient by a
+    // factor ≤ 1, and tonemap+encode are monotonic, so a correct pass never
+    // brightens a pixel.
+    let total = (SIZE * SIZE) as f64;
+    let mut brighter = 0usize;
+    let mut darker = 0usize;
+    let mut sum_delta = 0i64;
+    for (a, b) in no_ao.pixels().zip(with_ao.pixels()) {
+        let la = a.0[0] as i32 + a.0[1] as i32 + a.0[2] as i32;
+        let lb = b.0[0] as i32 + b.0[1] as i32 + b.0[2] as i32;
+        let d = lb - la;
+        sum_delta += d as i64;
+        if d > 6 {
+            brighter += 1;
+        }
+        if d < -6 {
+            darker += 1;
+        }
+    }
+    assert!(
+        sum_delta < 0,
+        "SSAO did not darken the image on balance (sum {sum_delta})"
+    );
+    assert!(
+        (brighter as f64 / total) < 0.01,
+        "SSAO brightened {brighter} px — it must only occlude"
+    );
+    assert!(
+        (darker as f64 / total) > 0.01,
+        "SSAO darkened too few pixels ({darker}) — contacts not occluded"
+    );
+
+    // Golden regression on the SSAO look.
+    compare_or_update("deferred_ssao.png", &with_ao);
 }
 
 /// Decode an Rg16Float readback into per-texel `[vx, vy]`.

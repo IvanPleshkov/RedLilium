@@ -402,6 +402,11 @@ impl Plugin for CarGamePlugin {
         world
             .insert(camera, redlilium_ecs::CameraEnvironment::default())
             .unwrap();
+        // Screen-space ambient occlusion (#150) grounds the IBL ambient; its
+        // per-frame kernel rotation rides the TAA above.
+        world
+            .insert(camera, redlilium_ecs::CameraAmbientOcclusion::default())
+            .unwrap();
         world.insert(camera, cam_transform).unwrap();
         world
             .insert(camera, GlobalTransform(cam_transform.to_matrix()))

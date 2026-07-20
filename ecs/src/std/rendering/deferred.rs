@@ -7,16 +7,21 @@
 //! 1. `gbuffer` — MRT (albedo, normal+metallic, position+roughness,
 //!    velocity #147) + the camera's depth, drawing every visible
 //!    `pbr`-model primitive via the shared [`SceneDrawer`];
-//! 2. `skybox` — the environment cubemap as background into the
+//! 2. `ssao` + `ssao_blur` (#150, only for cameras with a
+//!    [`CameraAmbientOcclusion`](super::CameraAmbientOcclusion)) — a GTAO-lite
+//!    horizon pass over the G-buffer and its bilateral denoise; the result
+//!    multiplies the resolve's image-based ambient. Absent ⇒ the resolve
+//!    binds a 1×1 white AO and the image is unchanged;
+//! 3. `skybox` — the environment cubemap as background into the
 //!    scene-referred [`SCENE_COLOR`] intermediate;
-//! 3. `deferred_resolve` — a fullscreen pass reading the G-buffer + IBL set,
+//! 4. `deferred_resolve` — a fullscreen pass reading the G-buffer + IBL set,
 //!    compositing lit geometry over the background, still scene-referred
 //!    linear;
-//! 4. `taa_resolve` (#148, only for cameras with
+//! 5. `taa_resolve` (#148, only for cameras with
 //!    [`TemporalJitter`](super::TemporalJitter)) — accumulates the jittered
 //!    frames into the [`TAA_HISTORY`] ping-pong (variance clipping in
 //!    YCoCg; frame parity picks read/write);
-//! 5. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
+//! 6. `display_output` (#142) — exposure ([`CameraExposure`](super::CameraExposure)),
 //!    tonemap, and display encoding from [`SCENE_COLOR`] (or the fresh TAA
 //!    history) into the camera's color target (returned as the camera's
 //!    main pass — the [`ScenePass`](super::ScenePass) contract). The
@@ -70,6 +75,8 @@ const SKYBOX_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/s
 const DISPLAY_SHADER_SLANG: &str =
     include_str!("../../../../std-assets/shaders/display_output.slang");
 const TAA_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/taa_resolve.slang");
+const SSAO_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/ssao.slang");
+const SSAO_BLUR_SHADER_SLANG: &str = include_str!("../../../../std-assets/shaders/ssao_blur.slang");
 
 // The BRDF integration LUT (#137) stays embedded: it is environment-
 // independent (the same table for every sky), so it is a device-wide resource
@@ -85,6 +92,16 @@ pub const GBUFFER_POSITION_ROUGHNESS: &str = "gbuffer_position_roughness";
 /// to zero; background pixels keep it (camera-only reprojection is the TAA
 /// resolve's job, #148). `COPY_SRC` so tests can read the contract back.
 pub const GBUFFER_VELOCITY: &str = "gbuffer_velocity";
+
+/// [`PipelineTargets`] keys of the SSAO targets (#150), present only for
+/// cameras with a [`CameraAmbientOcclusion`](super::CameraAmbientOcclusion):
+/// the raw horizon AO and its bilateral-denoised result (the one the resolve
+/// reads). Both `R8Unorm`.
+pub const SSAO_RAW: &str = "ssao_raw";
+pub const SSAO_AO: &str = "ssao_ao";
+
+/// Format of the SSAO targets — a single occlusion channel.
+const SSAO_FORMAT: TextureFormat = TextureFormat::R8Unorm;
 
 /// [`PipelineTargets`] key of the scene-referred linear intermediate (#142):
 /// skybox + resolve render here; the display-output pass reads it. Future
@@ -104,6 +121,12 @@ const SCENE_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// Fraction of the current frame in the TAA blend (history keeps the rest —
 /// an exponential average remembering ~1/value frames).
 const TAA_BLEND: f32 = 0.1;
+
+/// Golden angle (radians) — the per-frame SSAO kernel rotation increment
+/// (#150). Advancing the noise pattern by an irrational fraction of a turn
+/// gives a temporal resolver a well-distributed sequence to average; applied
+/// only when one is downstream (else the pattern is static — no flicker).
+const GOLDEN_ANGLE: f32 = 2.399_963_2;
 
 /// G-buffer attachment formats, in attachment order (must match
 /// `deferred_gbuffer.slang`'s `FsOutput`).
@@ -273,6 +296,30 @@ struct SkyboxUniforms {
     _pad1: [f32; 4],
 }
 
+/// Uniforms of the SSAO pass (must match `ssao.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsaoUniforms {
+    /// World → view (rigid: the upper 3×3 rotates normals).
+    view: [[f32; 4]; 4],
+    /// View → clip (for the depth-dependent screen-space search radius).
+    proj: [[f32; 4]; 4],
+    /// x = world radius, y = intensity, z = power, w = per-frame rotation
+    /// (radians; 0 unless a temporal resolver is downstream, so a non-temporal
+    /// camera's noise pattern is static — no flicker).
+    params: [f32; 4],
+    /// xy = texel size (1 / extent); zw unused.
+    params2: [f32; 4],
+}
+
+/// Uniforms of the SSAO denoise pass (must match `ssao_blur.slang`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsaoBlurUniforms {
+    /// xy = texel size; z = world-space edge-stop sigma; w unused.
+    params: [f32; 4],
+}
+
 /// The engine's built-in deferred PBR/IBL path — see the module docs.
 #[derive(Default)]
 pub struct DeferredPipeline {
@@ -294,6 +341,11 @@ struct SharedResources {
     /// resolved environment (#145) — image-based lighting reads zero, so the
     /// scene is lit by analytic lights only.
     fallback_cube: Arc<Texture>,
+    /// 1×1 white `R8` bound to the resolve's SSAO slot when a camera has no
+    /// [`CameraAmbientOcclusion`](super::CameraAmbientOcclusion) (#150) — AO
+    /// reads 1.0, so the ambient term is unchanged and the no-SSAO image is
+    /// byte-identical.
+    white_ao: Arc<Texture>,
     ibl_sampler: Arc<Sampler>,
     gbuffer_sampler: Arc<Sampler>,
     /// Fullscreen triangle (the shaders use `SV_VertexID` only; the buffer
@@ -318,6 +370,16 @@ struct CameraResources {
     /// TAA resolve instances (#148): instance `i` reads history `i` (and
     /// writes the other one — frame parity picks).
     taa: [Arc<MaterialInstance>; 2],
+    /// SSAO passes (#150), present only when the camera has a
+    /// [`CameraAmbientOcclusion`](super::CameraAmbientOcclusion): the horizon
+    /// pass (writes `ssao_raw`) and its bilateral denoise (reads `ssao_raw`,
+    /// writes `ssao_ao`). `None` ⇒ the resolve binds the shared white AO and
+    /// no SSAO pass is recorded.
+    ssao: Option<Arc<MaterialInstance>>,
+    ssao_blur: Option<Arc<MaterialInstance>>,
+    /// Whether SSAO is on — part of the fresh-check so toggling the component
+    /// rebuilds the resolve (its AO binding) and the SSAO materials.
+    ao_enabled: bool,
     /// Whether the TAA history holds a real frame yet — false right after
     /// (re)creation (resize/format change); the first TAA frame then takes
     /// the current frame wholesale instead of blending with garbage.
@@ -357,6 +419,7 @@ impl SharedResources {
             &mut pending_uploads,
         );
         let fallback_cube = create_black_cube(device, &mut pending_uploads);
+        let white_ao = create_white_ao(device, &mut pending_uploads);
 
         let ibl_sampler = device
             .create_sampler_from_cpu(&CpuSampler::linear().with_name("ibl_sampler"))
@@ -392,6 +455,7 @@ impl SharedResources {
         Self {
             brdf_lut,
             fallback_cube,
+            white_ao,
             ibl_sampler,
             gbuffer_sampler,
             fullscreen_mesh,
@@ -423,6 +487,25 @@ fn create_black_cube(
                 .expect("stage fallback cube upload"),
         );
     }
+    texture
+}
+
+/// Create the 1×1 white `R8` texture bound to the resolve's SSAO slot when a
+/// camera has no [`CameraAmbientOcclusion`](super::CameraAmbientOcclusion)
+/// (#150): sampling it returns 1.0, so ambient occlusion is a no-op.
+fn create_white_ao(device: &Arc<GraphicsDevice>, ops: &mut Vec<TransferOperation>) -> Arc<Texture> {
+    let usage = TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST;
+    let texture = device
+        .create_texture(
+            &TextureDescriptor::new_2d(1, 1, SSAO_FORMAT, usage)
+                .with_mip_levels(1)
+                .with_label("ssao_white"),
+        )
+        .expect("create white AO");
+    ops.push(
+        TransferOperation::upload_texture_level(device, Arc::clone(&texture), 0, 0, &[255u8])
+            .expect("stage white AO upload"),
+    );
     texture
 }
 
@@ -490,6 +573,10 @@ impl CameraResources {
         scene_color: &Arc<Texture>,
         history: [&Arc<Texture>; 2],
         env: Option<&Arc<super::ResolvedEnvironment>>,
+        // The SSAO targets `[raw, denoised]` when the camera has a
+        // `CameraAmbientOcclusion` (#150); `None` binds the shared white AO to
+        // the resolve and records no SSAO pass.
+        ssao_targets: Option<[&Arc<Texture>; 2]>,
         color_format: TextureFormat,
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
@@ -566,11 +653,23 @@ impl CameraResources {
                     .with_sampler(3, shared.ibl_sampler.clone()),
             )
             .ok()?;
+        // SSAO group (#150): the denoised AO target, or the shared 1×1 white
+        // (AO = 1) so this binding is present whether or not SSAO runs.
+        let ao_texture = ssao_targets.map_or_else(|| shared.white_ao.clone(), |t| t[1].clone());
+        let ao_group = device
+            .create_binding_group(
+                resolve_material.binding_layouts()[3].clone(),
+                BindingGroupDescriptor::new()
+                    .with_texture(0, ao_texture)
+                    .with_sampler(1, shared.gbuffer_sampler.clone()),
+            )
+            .ok()?;
         let resolve = Arc::new(
             MaterialInstance::new(resolve_material)
                 .with_binding_group(uniform_group)
                 .with_binding_group(gbuffer_group)
-                .with_binding_group(ibl_group),
+                .with_binding_group(ibl_group)
+                .with_binding_group(ao_group),
         );
 
         // --- Skybox material (scene-referred: always targets scene_color) ---
@@ -713,12 +812,89 @@ impl CameraResources {
         };
         let taa = [taa_instance(history[0])?, taa_instance(history[1])?];
 
+        // --- SSAO passes (#150), only when the camera opted in ---
+        // A tiny fullscreen material builder shared by the horizon and blur
+        // passes (both target R8, dynamic uniform in group 0).
+        let fullscreen_ssao_material = |source: &str, label: &str| {
+            device
+                .create_material(
+                    &MaterialDescriptor::new()
+                        .with_shader(ShaderSource::slang(
+                            ShaderStage::Vertex,
+                            source.as_bytes().to_vec(),
+                            "vs_main",
+                            vec![],
+                        ))
+                        .with_shader(ShaderSource::slang(
+                            ShaderStage::Fragment,
+                            source.as_bytes().to_vec(),
+                            "fs_main",
+                            vec![],
+                        ))
+                        .with_color_format(SSAO_FORMAT)
+                        .with_dynamic_uniform(0, 0)
+                        .with_label(label),
+                )
+                .inspect_err(|e| log::error!("deferred: {label} material failed: {e}"))
+                .ok()
+        };
+        let (ssao, ssao_blur) = match ssao_targets {
+            Some([raw, _ao]) => {
+                let ssao_material = fullscreen_ssao_material(SSAO_SHADER_SLANG, "deferred_ssao")?;
+                // Horizon pass: albedo (marker), normal, position + sampler.
+                let ssao_group = device
+                    .create_binding_group(
+                        ssao_material.binding_layouts()[0].clone(),
+                        BindingGroupDescriptor::new()
+                            .with_buffer_range(
+                                0,
+                                ring_buffer.clone(),
+                                0,
+                                std::mem::size_of::<SsaoUniforms>() as u64,
+                            )
+                            .with_texture(1, gbuffer[0].clone())
+                            .with_texture(2, gbuffer[1].clone())
+                            .with_texture(3, gbuffer[2].clone())
+                            .with_sampler(4, shared.gbuffer_sampler.clone()),
+                    )
+                    .ok()?;
+                let ssao =
+                    Arc::new(MaterialInstance::new(ssao_material).with_binding_group(ssao_group));
+
+                let blur_material =
+                    fullscreen_ssao_material(SSAO_BLUR_SHADER_SLANG, "deferred_ssao_blur")?;
+                // Denoise pass: raw AO + position (edge stop) + sampler.
+                let blur_group = device
+                    .create_binding_group(
+                        blur_material.binding_layouts()[0].clone(),
+                        BindingGroupDescriptor::new()
+                            .with_buffer_range(
+                                0,
+                                ring_buffer.clone(),
+                                0,
+                                std::mem::size_of::<SsaoBlurUniforms>() as u64,
+                            )
+                            .with_texture(1, raw.clone())
+                            .with_texture(2, gbuffer[2].clone())
+                            .with_sampler(3, shared.gbuffer_sampler.clone()),
+                    )
+                    .ok()?;
+                let ssao_blur =
+                    Arc::new(MaterialInstance::new(blur_material).with_binding_group(blur_group));
+                (Some(ssao), Some(ssao_blur))
+            }
+            None => (None, None),
+        };
+
         Some(Self {
             resolve,
             skybox,
             display_scene,
             display_history,
             taa,
+            ssao,
+            ssao_blur,
+            ao_enabled: ssao_targets.is_some(),
             history_primed: false,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
             env_ptr: env.map(|e| Arc::as_ptr(e) as usize),
@@ -798,6 +974,31 @@ impl CameraRenderPipeline for DeferredPipeline {
             let _ = world.insert(camera, targets.clone());
         }
 
+        // SSAO targets (#150): derived only for cameras with the component, at
+        // the same size as the G-buffer (re-derived on resize). Left in place
+        // when the component is absent — the resolve binds the shared white AO
+        // regardless, so unused targets are harmless (memory is the only cost).
+        let ao_enabled = world.get::<super::CameraAmbientOcclusion>(camera).is_some();
+        if ao_enabled {
+            let ao_stale = targets
+                .get(SSAO_AO)
+                .map(|t| t.size().width != width || t.size().height != height)
+                .unwrap_or(true);
+            if ao_stale {
+                let usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING;
+                for name in [SSAO_RAW, SSAO_AO] {
+                    let texture = device
+                        .create_texture(
+                            &TextureDescriptor::new_2d(width, height, SSAO_FORMAT, usage)
+                                .with_label(name),
+                        )
+                        .expect("create SSAO texture");
+                    targets.set(name, texture);
+                }
+                let _ = world.insert(camera, targets.clone());
+            }
+        }
+
         // (Re-)build the camera's materials when the targets or the color
         // format changed.
         let (
@@ -829,9 +1030,21 @@ impl CameraRenderPipeline for DeferredPipeline {
             .get::<super::CameraEnvironment>(camera)
             .and_then(|c| c.environment.get().cloned());
         let env_ptr = env.as_ref().map(|e| Arc::as_ptr(e) as usize);
+        // The SSAO input/output pair when the component is on and both targets
+        // resolved (they were just ensured above) — else `None` (resolve binds
+        // white AO, no SSAO pass). `ao_on` folds into the fresh-check so
+        // toggling the component rebuilds the materials.
+        let ssao_targets = match (ao_enabled, targets.get(SSAO_RAW), targets.get(SSAO_AO)) {
+            (true, Some(raw), Some(ao)) => Some([raw, ao]),
+            _ => None,
+        };
+        let ao_on = ssao_targets.is_some();
         let mut cameras = self.cameras.lock().expect("deferred camera map poisoned");
         let fresh = cameras.get(&camera).is_some_and(|c| {
-            c.albedo_ptr == albedo_ptr && c.color_format == color_format && c.env_ptr == env_ptr
+            c.albedo_ptr == albedo_ptr
+                && c.color_format == color_format
+                && c.env_ptr == env_ptr
+                && c.ao_enabled == ao_on
         });
         if !fresh {
             match CameraResources::create(
@@ -841,6 +1054,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 scene_color,
                 [history_a, history_b],
                 env.as_ref(),
+                ssao_targets,
                 color_format,
                 &ring_buffer,
             ) {
@@ -924,8 +1138,55 @@ impl CameraRenderPipeline for DeferredPipeline {
             && world.has_resource::<super::TemporalState>())
         .then(|| (world.resource::<super::TemporalState>().frame() % 2) as usize);
 
+        // SSAO uniforms (#150), when the camera opted in. Built before the
+        // ring borrow (eager `.map`, so the world borrows end here). The
+        // per-frame kernel rotation advances only when a temporal resolver
+        // (TAA today) is downstream — else 0, so the noise is static.
+        let ssao_uniforms = camera_resources
+            .ao_enabled
+            .then(|| {
+                world
+                    .get::<crate::std::components::Camera>(view.entity)
+                    .zip(world.get::<super::CameraAmbientOcclusion>(view.entity))
+                    .map(|(cam, ao)| {
+                        let size = scene_color.size();
+                        let texel = [
+                            1.0 / size.width.max(1) as f32,
+                            1.0 / size.height.max(1) as f32,
+                        ];
+                        let frame_rot = if taa_read_index.is_some() {
+                            world.resource::<super::TemporalState>().frame() as f32 * GOLDEN_ANGLE
+                        } else {
+                            0.0
+                        };
+                        let ssao = SsaoUniforms {
+                            view: redlilium_core::math::mat4_to_cols_array_2d(&cam.view_matrix),
+                            proj: redlilium_core::math::mat4_to_cols_array_2d(
+                                &cam.projection_matrix,
+                            ),
+                            params: [ao.radius, ao.intensity, ao.power, frame_rot],
+                            params2: [texel[0], texel[1], 0.0, 0.0],
+                        };
+                        let blur = SsaoBlurUniforms {
+                            // Edge-stop sigma = the sampling radius: neighbors
+                            // within a radius blur together, silhouettes stop it.
+                            params: [texel[0], texel[1], ao.radius, 0.0],
+                        };
+                        (ssao, blur)
+                    })
+            })
+            .flatten();
+
         // Push this view's uniform slots into the frame ring.
-        let (camera_offset, skybox_offset, resolve_offset, display_offset, taa_offset, ring_buffer) = {
+        let (
+            camera_offset,
+            skybox_offset,
+            resolve_offset,
+            display_offset,
+            taa_offset,
+            ssao_offsets,
+            ring_buffer,
+        ) = {
             let mut ring = world.resource_mut::<FrameRing>();
             let camera_offset = ring.push(bytemuck::bytes_of(&shaders::CameraUniforms {
                 view_projection: view.view_projection,
@@ -964,12 +1225,19 @@ impl CameraRenderPipeline for DeferredPipeline {
                     ],
                 }))
             });
+            let ssao_offsets = ssao_uniforms.map(|(ssao, blur)| {
+                (
+                    ring.push(bytemuck::bytes_of(&ssao)),
+                    ring.push(bytemuck::bytes_of(&blur)),
+                )
+            });
             (
                 camera_offset,
                 skybox_offset,
                 resolve_offset,
                 display_offset,
                 taa_offset,
+                ssao_offsets,
                 ring.buffer().clone(),
             )
         };
@@ -1022,7 +1290,45 @@ impl CameraRenderPipeline for DeferredPipeline {
                 ]),
             );
         }
-        graph.add_graphics_pass(gbuffer_pass);
+        let gbuffer_handle = graph.add_graphics_pass(gbuffer_pass);
+
+        // --- 1b. SSAO (#150): horizon AO + bilateral denoise, when the camera
+        // opted in. Reads the G-buffer, writes the denoised AO the resolve
+        // multiplies into the ambient term. Independent of the skybox.
+        let ssao_blur_handle = match (
+            camera_resources.ssao.as_ref(),
+            camera_resources.ssao_blur.as_ref(),
+            ssao_offsets,
+            targets.get(SSAO_RAW),
+            targets.get(SSAO_AO),
+        ) {
+            (Some(ssao_mat), Some(blur_mat), Some((ssao_off, blur_off)), Some(raw), Some(ao)) => {
+                let mut ssao_pass = GraphicsPass::new("ssao".into());
+                ssao_pass.set_render_targets(RenderTargetConfig::new().with_color(
+                    // Clear to 1 (open) — the pass overwrites every pixel.
+                    ColorAttachment::from_texture(raw.clone()).with_clear_color(1.0, 1.0, 1.0, 1.0),
+                ));
+                ssao_pass.add_draw_command(
+                    DrawCommand::new(shared.fullscreen_mesh.clone(), ssao_mat.clone())
+                        .with_dynamic_offsets(vec![vec![ssao_off]]),
+                );
+                let ssao_handle = graph.add_graphics_pass(ssao_pass);
+                graph.add_dependency(ssao_handle, gbuffer_handle);
+
+                let mut blur_pass = GraphicsPass::new("ssao_blur".into());
+                blur_pass.set_render_targets(RenderTargetConfig::new().with_color(
+                    ColorAttachment::from_texture(ao.clone()).with_clear_color(1.0, 1.0, 1.0, 1.0),
+                ));
+                blur_pass.add_draw_command(
+                    DrawCommand::new(shared.fullscreen_mesh.clone(), blur_mat.clone())
+                        .with_dynamic_offsets(vec![vec![blur_off]]),
+                );
+                let blur_handle = graph.add_graphics_pass(blur_pass);
+                graph.add_dependency(blur_handle, ssao_handle);
+                Some(blur_handle)
+            }
+            _ => None,
+        };
 
         // --- 2. Skybox background into the scene-referred intermediate ---
         // Only when the camera has a resolved environment (#145); with none,
@@ -1064,7 +1370,9 @@ impl CameraRenderPipeline for DeferredPipeline {
                 shared.fullscreen_mesh.clone(),
                 camera_resources.resolve.clone(),
             )
-            .with_dynamic_offsets(vec![vec![resolve_offset], vec![], vec![]]),
+            // Four groups now: uniforms (dynamic), G-buffer, IBL, SSAO — only
+            // the first carries a dynamic offset; the rest are static.
+            .with_dynamic_offsets(vec![vec![resolve_offset], vec![], vec![], vec![]]),
         );
         let resolve_handle = graph.add_graphics_pass(resolve_pass);
 
@@ -1072,6 +1380,10 @@ impl CameraRenderPipeline for DeferredPipeline {
         // direction — order them explicitly (background first).
         if let Some(skybox_handle) = skybox_handle {
             graph.add_dependency(resolve_handle, skybox_handle);
+        }
+        // The resolve samples the denoised AO — order it after the blur (#150).
+        if let Some(ssao_blur_handle) = ssao_blur_handle {
+            graph.add_dependency(resolve_handle, ssao_blur_handle);
         }
 
         // --- 4. TAA resolve (#148), when the camera opted in: accumulate

@@ -54,9 +54,9 @@ pub use asset_drag::{AssetDragPayload, asset_drop_target};
 pub use asset_inspect::{NewAssetSpec, new_asset_spec};
 pub use asset_inspect::{inspect_asset_settings, reference_accepted_kind};
 pub use components::{
-    CameraEnvironment, CameraExposure, CameraOutput, CameraTarget, CameraTargetSpec,
-    DEFERRED_PIPELINE, FORWARD_PIPELINE, MeshRenderer, OutputFormat, PipelineTargets, Primitive,
-    RenderPath, STD_ENVIRONMENT, SizePolicy, TemporalJitter,
+    CameraAmbientOcclusion, CameraEnvironment, CameraExposure, CameraOutput, CameraTarget,
+    CameraTargetSpec, DEFERRED_PIPELINE, FORWARD_PIPELINE, MeshRenderer, OutputFormat,
+    PipelineTargets, Primitive, RenderPath, STD_ENVIRONMENT, SizePolicy, TemporalJitter,
 };
 pub use deferred::DeferredPipeline;
 #[cfg(feature = "rendering")]
@@ -107,6 +107,7 @@ pub fn register_rendering_components(world: &mut World) {
     world.register_inspector::<CameraOutput>();
     world.register_inspector::<RenderPath>();
     world.register_inspector_default::<CameraExposure>();
+    world.register_inspector_default::<CameraAmbientOcclusion>();
     world.register_inspector_default::<TemporalJitter>();
     world.register_inspector_default::<CameraEnvironment>();
     world.register_component::<CameraTarget>();
