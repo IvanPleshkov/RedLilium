@@ -198,7 +198,7 @@ pub use rendering::{
     EnsureCameraTargets, FORWARD_PIPELINE, FlushUploads, ForwardPipeline, FrameRing, FrameTarget,
     HotReload, MainViewport, MaterialAssetManager, MaterialInstanceData, MaterialInstanceLoad,
     MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource, MaterialLoader,
-    MeshLoad, MeshManager, MeshRenderer, NewAssetSpec, OutputFormat, PipelineCache,
+    MeshLoad, MeshManager, MeshRenderer, MotionBlur, NewAssetSpec, OutputFormat, PipelineCache,
     PipelineRegistry, PipelineTargets, Primitive, PropValue, RecordCtx, RenderPath, RenderPhase,
     RenderSchedule, SceneDrawer, ScenePass, SetAssetReferenceAction, SetAssetSettingsAction,
     Shader, ShaderLoader, ShaderManager, ShaderSource, ShadingRegistry, SizePolicy, TemporalJitter,

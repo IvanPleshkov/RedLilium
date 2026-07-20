@@ -120,6 +120,17 @@ const REGISTRY: &[ShaderSpec] = &[
         "std_velocity_complete",
         "std-assets/shaders/velocity_complete.slang",
     ),
+    // Motion blur (#149, McGuire/Guertin): TileMax + NeighborMax over the
+    // velocity buffer, then a reconstruction gather.
+    vs_fs_spec("std_mb_tile_max", "std-assets/shaders/mb_tile_max.slang"),
+    vs_fs_spec(
+        "std_mb_neighbor_max",
+        "std-assets/shaders/mb_neighbor_max.slang",
+    ),
+    vs_fs_spec(
+        "std_mb_reconstruct",
+        "std-assets/shaders/mb_reconstruct.slang",
+    ),
     // Demo shaders — baked so the demos render on the default Slang-off build
     // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
     // the std deferred path now.)
