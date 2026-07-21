@@ -1345,6 +1345,12 @@ impl AppHandler for Editor {
         // Drain action queue and execute through history (before systems so
         // that Changed<T> filters can detect the mutations this frame).
         self.world.as_mut().unwrap().drain_actions();
+        // Pause-mode inspector edits target the play world through its own
+        // (discarding) history — same EditAction path, ephemeral target. No-op
+        // unless paused.
+        if let Some(play) = self.play.as_mut() {
+            play.drain_pause_actions();
+        }
 
         // Tier-1 behavior reload (ADR-037): drain watcher/build events; a
         // finished green build swaps the behavior module between frames (the
@@ -1828,14 +1834,28 @@ impl AppHandler for Editor {
                                 scene_view_rect = Some(available);
                             }
                         } else {
-                            // Normal dock layout during Edit and Pause modes
+                            // Normal dock layout during Edit and Pause modes.
+                            // While paused the panels bind to the **play**
+                            // world (the frozen running game), so the
+                            // hierarchy/inspector observe and edit the real
+                            // runtime entities — the game camera, spawned
+                            // actors — instead of the editing world they never
+                            // appear in. Edits ride the play world's own
+                            // discarding history (ephemeral, no undo). Off
+                            // pause it stays the editing world.
+                            let paused = self.play.as_ref().is_some_and(|p| p.is_paused());
+                            let (world, history) = if paused {
+                                self.play.as_mut().unwrap().dock_targets()
+                            } else {
+                                (&mut ew.world, &ew.history)
+                            };
                             let mut tab_viewer = EditorTabViewer {
-                                world: &mut ew.world,
+                                world,
                                 inspector_state: &mut self.inspector_state,
                                 vfs: &self.vfs,
                                 asset_browser: &mut self.asset_browser,
                                 console: &mut self.console,
-                                history: &ew.history,
+                                history,
                                 scene_view_rect: None,
                                 drag_rect,
                                 scene_texture: self.scene_texture_id,
