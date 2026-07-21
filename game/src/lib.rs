@@ -107,6 +107,15 @@ const CAR_FORWARD: PhysVector = PhysVector::new(0.0, 0.0, -1.0);
 /// redirect makes the car go where its nose points instead of drifting.
 const LATERAL_GRIP: f64 = 6.0;
 
+/// Fixed sub-step the follow camera integrates its smoothing with, seconds.
+///
+/// The camera must not inherit the frame rate: an exponential blend chasing a
+/// *moving* target settles at a lag of `v*dt / (1 - exp(-k*dt))`, which grows
+/// with `dt`, so stepping it once per frame makes the trailing distance vary
+/// with frame time. Integrating in fixed sub-steps makes the lag a property of
+/// this constant instead — the camera behaves identically at any frame rate.
+const CAMERA_SMOOTHING_STEP: f32 = 1.0 / 120.0;
+
 /// WASD arcade drive (#104): apply engine/steering impulses to the chassis
 /// body. No joints or wheels — forces on a single rigid body, tuned for feel,
 /// with steering authority scaled by speed (a parked car does not yaw).
@@ -212,8 +221,21 @@ impl System for UpdateFollowCamera {
                 };
                 let desired =
                     car_pos - forward * follow.distance + Vec3::new(0.0, follow.height, 0.0);
-                let blend = 1.0 - (-follow.stiffness * time.delta() as f32).exp();
-                let eye = cam_transform.translation + (desired - cam_transform.translation) * blend;
+                // Integrate the smoothing in fixed sub-steps rather than one
+                // step of the whole frame delta. `1 - exp(-k*dt)` is only
+                // frame-rate independent for a *stationary* target; chasing a
+                // moving one it settles at a lag of `v*dt / (1 - exp(-k*dt))`,
+                // which grows with `dt`. At a variable frame rate that made the
+                // camera's trailing distance breathe frame to frame. Pinning
+                // the integration step pins the lag.
+                let mut eye = cam_transform.translation;
+                let mut remaining = time.delta() as f32;
+                while remaining > 0.0 {
+                    let step = remaining.min(CAMERA_SMOOTHING_STEP);
+                    let blend = 1.0 - (-follow.stiffness * step).exp();
+                    eye += (desired - eye) * blend;
+                    remaining -= step;
+                }
 
                 let target = car_pos + Vec3::new(0.0, 0.8, 0.0);
                 let view = nalgebra::Isometry3::look_at_rh(
