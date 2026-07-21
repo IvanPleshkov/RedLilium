@@ -70,6 +70,7 @@ pub mod backend;
 pub mod bindless;
 pub mod compiler;
 pub mod device;
+pub mod display;
 pub mod egui;
 pub mod error;
 pub mod graph;

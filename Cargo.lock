@@ -4490,6 +4490,8 @@ dependencies = [
  "gpu-allocator",
  "log",
  "naga 24.0.0",
+ "objc2 0.5.2",
+ "objc2-app-kit 0.2.2",
  "parking_lot",
  "pollster",
  "raw-window-handle",
@@ -4500,6 +4502,7 @@ dependencies = [
  "tracy-client",
  "web-time",
  "wgpu",
+ "windows 0.58.0",
  "winit",
 ]
 

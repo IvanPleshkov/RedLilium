@@ -51,6 +51,11 @@ pub(crate) struct RuntimeHandler<P: Plugin + 'static> {
     config: GameConfig,
     plugin: Option<P>,
     state: Option<GameState>,
+    /// Smoothed display headroom H (#154), polled from the window screen each
+    /// frame and published to the game world's [`DisplayHeadroom`] so the
+    /// deferred display pass rolls highlights off to the real panel range.
+    /// `1.0` (SDR) until the first poll resolves an HDR screen.
+    display_headroom: f32,
 }
 
 impl<P: Plugin + 'static> RuntimeHandler<P> {
@@ -59,6 +64,7 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
             config,
             plugin: Some(plugin),
             state: None,
+            display_headroom: redlilium_graphics::display::SDR_HEADROOM,
         }
     }
 }
@@ -148,7 +154,15 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         state.egui.begin_frame(ctx.elapsed_time() as f64);
         state.ui_frame_open = true;
 
+        // Poll the window screen's EDR headroom (#154), ease it (maxEDR tracks
+        // the brightness slider live, so smoothing keeps highlights from
+        // pumping), and publish it so the deferred display pass rolls
+        // highlights off to the real panel range. 1.0 (no-op) off macOS / SDR.
+        let raw = redlilium_graphics::display::window_display_headroom(ctx.window().as_ref());
+        self.display_headroom += (raw - self.display_headroom) * 0.1;
+
         let (world, schedules) = state.app.parts_mut();
+        world.insert_resource(redlilium_ecs::DisplayHeadroom(self.display_headroom));
         schedules.run_frame(world, &state.runner, ctx.delta_time() as f64);
 
         // Game-requested exit (#100). On wasm a browser tab has no process to
@@ -468,6 +482,7 @@ mod tests {
                 output_format: OutputFormat::default(),
                 module,
             }),
+            display_headroom: redlilium_graphics::display::SDR_HEADROOM,
         }
     }
 

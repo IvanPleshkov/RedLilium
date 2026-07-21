@@ -321,6 +321,14 @@ impl PlaySession {
         self.paused
     }
 
+    /// Mutable access to the play world — for the shell to publish per-frame
+    /// host state the game renders with (e.g. the display headroom, #154)
+    /// before [`render`](Self::render). Not an entity-editing surface; that is
+    /// [`dock_targets`](Self::dock_targets), gated on pause.
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
     /// The paused play world plus the history the inspector edits it through —
     /// what the shell feeds the dock **instead of** the editing world while
     /// paused, so the hierarchy/inspector observe and edit the *real* running

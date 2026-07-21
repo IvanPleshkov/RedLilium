@@ -128,6 +128,13 @@ pub struct Editor {
     /// Smoothed frames-per-second for the status bar.
     fps: f32,
 
+    /// Smoothed display headroom H (#154): the window screen's EDR peak over
+    /// SDR white, polled each frame (it tracks the brightness slider live) and
+    /// eased so highlights don't pump. Fed to the rendered world's
+    /// [`DisplayHeadroom`] so the deferred display pass rolls highlights off to
+    /// the real panel range. `1.0` (SDR) until the first poll resolves a screen.
+    display_headroom: f32,
+
     /// Pending component import from asset browser (VFS read in progress).
     pending_import: Option<PendingImport>,
     /// Pending prefab import from asset browser (VFS read in progress).
@@ -212,6 +219,7 @@ impl Editor {
         Self {
             world: None,
             play: None,
+            display_headroom: redlilium_graphics::display::SDR_HEADROOM,
             game_host: None,
             static_game: None,
             behavior_spec: None,
@@ -1246,6 +1254,24 @@ impl AppHandler for Editor {
 
         if self.world.is_none() {
             return true;
+        }
+
+        // Poll the window screen's EDR headroom (#154), ease it, and publish it
+        // to the world(s) the scene view renders, so the deferred display pass
+        // rolls highlights off to the real panel range. maxEDR tracks the
+        // brightness slider continuously; a ~150ms ease (at 60 fps) hides that
+        // jitter while still catching up to a monitor change within a few
+        // frames. Off macOS / no HDR screen the poll returns 1.0 (no-op).
+        {
+            let raw = redlilium_graphics::display::window_display_headroom(ctx.window().as_ref());
+            self.display_headroom += (raw - self.display_headroom) * 0.1;
+            let headroom = redlilium_ecs::DisplayHeadroom(self.display_headroom);
+            if let Some(ew) = self.world.as_mut() {
+                ew.world.insert_resource(headroom);
+            }
+            if let Some(play) = self.play.as_mut() {
+                play.world_mut().insert_resource(headroom);
+            }
         }
 
         // When the entity selection changes to a non-empty set, drop the asset

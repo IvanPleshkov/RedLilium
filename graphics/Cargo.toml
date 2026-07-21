@@ -68,6 +68,24 @@ wgpu = { workspace = true, optional = true, features = [
     "fragile-send-sync-non-atomic-wasm",
 ] }
 
+# macOS-only: read the window's display EDR headroom from NSScreen (#154 step 2
+# — `maximumExtendedDynamicRangeColorComponentValue`). objc2 0.5 / objc2-app-kit
+# 0.2 already ride in transitively via winit 0.30, so this pins no new tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSResponder", "NSView", "NSWindow", "NSScreen"] }
+
+# Windows-only: read the window monitor's peak luminance via DXGI
+# (`IDXGIOutput6::GetDesc1`) to derive the display headroom (#154 step 2). The
+# `windows` crate at 0.58 already rides in via wgpu, so this pins no new tree.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+] }
+
 [dev-dependencies]
 rstest.workspace = true
 pollster.workspace = true
