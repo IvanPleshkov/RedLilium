@@ -156,6 +156,11 @@ pub struct Time {
     elapsed: f64,
     /// The configured fixed timestep interval.
     fixed_delta: f64,
+    /// Exponentially-smoothed frame delta (tau ~= 0.15 s). A *stable* reference
+    /// interval for consumers that must not strobe under frame-time jitter
+    /// (the motion-blur shutter, #149) — deliberately separate from the
+    /// truthful [`frame_delta`](Self::frame_delta) that drives motion.
+    smoothed_frame_delta: f64,
 }
 
 impl Time {
@@ -166,6 +171,7 @@ impl Time {
             frame_delta: 0.0,
             elapsed: 0.0,
             fixed_delta,
+            smoothed_frame_delta: 0.0,
         }
     }
 
@@ -201,6 +207,17 @@ impl Time {
     /// Returns the configured fixed timestep interval.
     pub fn fixed_delta(&self) -> f64 {
         self.fixed_delta
+    }
+
+    /// Frame delta smoothed over ~a few frames (EMA, tau ~= 0.15 s).
+    ///
+    /// Unlike [`frame_delta`](Self::frame_delta) — which stays truthful because
+    /// it drives motion — this is a *stable* reference interval for consumers
+    /// that must be robust to frame-time jitter (the motion-blur shutter, #149,
+    /// scales by `smoothed_frame_delta / frame_delta` so blur length tracks a
+    /// steady clock instead of strobing with the vsync beat).
+    pub fn smoothed_frame_delta(&self) -> f64 {
+        self.smoothed_frame_delta
     }
 }
 
@@ -420,6 +437,16 @@ impl Schedules {
             time.frame_delta = delta_time;
             time.elapsed += delta_time;
             time.fixed_delta = self.fixed_timestep;
+            // Smoothed frame delta (jitter-robust reference for the MB shutter,
+            // #149). Seed on the first frame; otherwise EMA at tau ~= 0.15 s
+            // (dt-correct alpha) — averages ~6-15 frames, well above the 2-frame
+            // vsync beat but tracking a genuine sustained fps change in ~0.3 s.
+            if time.smoothed_frame_delta <= 0.0 {
+                time.smoothed_frame_delta = delta_time;
+            } else {
+                let alpha = 1.0 - (-delta_time / 0.15).exp();
+                time.smoothed_frame_delta += (delta_time - time.smoothed_frame_delta) * alpha;
+            }
         }
 
         // 2. Swap reactive trigger buffers and advance event queues exactly

@@ -321,6 +321,7 @@ struct MbReconstructUniforms {
     shutter: f32,
     tile_size: f32,
     samples: f32,
+    /// Padding to a 16-byte boundary (cbuffer alignment).
     _pad: f32,
 }
 
@@ -557,6 +558,7 @@ fn output_variant(source: &str, format: TextureFormat) -> Option<redlilium_graph
 }
 
 impl CameraResources {
+    #[allow(clippy::too_many_arguments)]
     fn create(
         device: &Arc<GraphicsDevice>,
         shared: &SharedResources,
@@ -1198,6 +1200,21 @@ impl CameraRenderPipeline for DeferredPipeline {
         let mb = world.get::<super::MotionBlur>(view.entity).copied();
         let mb_on = mb.is_some() && camera_resources.motion_blur.is_some();
 
+        // dt-normalized MB shutter (#149): blur length ~ per-frame velocity ~
+        // dt, so scale the shutter by smoothed_dt / dt to tie blur to a *stable*
+        // reference interval — frame-time jitter (the vsync 16/17ms beat) then no
+        // longer strobes it sharp/blurred. Clamp is asymmetric: a generous floor
+        // lets a genuine hitch's frame collapse back to normal blur length; a
+        // tight ceiling guards the one blow-up direction (dt anomalously small).
+        // Applied to the MB shutter only — GBUFFER_VELOCITY and the TAA/velocity
+        // contract (#147) stay untouched.
+        let mb_shutter_ratio = if mb_on && world.has_resource::<crate::Time>() {
+            let time = world.resource::<crate::Time>();
+            (time.smoothed_frame_delta() / time.frame_delta().max(1e-6)).clamp(0.15, 2.0) as f32
+        } else {
+            1.0
+        };
+
         // Push this view's uniform slots into the frame ring.
         let (
             camera_offset,
@@ -1262,7 +1279,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                 let tile = ring.push(bytemuck::bytes_of(&MbTileUniforms {
                     inv_resolution,
                     resolution,
-                    shutter: mb.shutter,
+                    shutter: mb.shutter * mb_shutter_ratio,
                     tile_size: MB_TILE_SIZE as f32,
                     _pad: [0.0; 2],
                 }));
@@ -1274,7 +1291,9 @@ impl CameraRenderPipeline for DeferredPipeline {
                     inv_resolution,
                     resolution,
                     camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
-                    shutter: mb.shutter,
+                    // Same shutter as TileMax — McGuire's invariant that no tile
+                    // advertises more blur than reconstruction gathers.
+                    shutter: mb.shutter * mb_shutter_ratio,
                     tile_size: MB_TILE_SIZE as f32,
                     samples: mb.samples as f32,
                     _pad: 0.0,

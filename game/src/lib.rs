@@ -398,6 +398,18 @@ impl Plugin for CarGamePlugin {
         world
             .insert(camera, redlilium_ecs::TemporalJitter::default())
             .unwrap();
+        // Tile-based motion blur (#149): the follow camera pans with the car,
+        // so the environment streaks — motion blur sells the speed. A shorter
+        // shutter than the 0.5 default keeps it light rather than smeary.
+        world
+            .insert(
+                camera,
+                redlilium_ecs::MotionBlur {
+                    shutter: 0.35,
+                    samples: 15,
+                },
+            )
+            .unwrap();
         world.insert(camera, cam_transform).unwrap();
         world
             .insert(camera, GlobalTransform(cam_transform.to_matrix()))

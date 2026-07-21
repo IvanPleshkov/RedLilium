@@ -531,6 +531,173 @@ fn deferred_motion_blur_runs_static_noop() {
     );
 }
 
+/// The camera-only velocity path (`velocity_complete`, #149) must be
+/// *temporally stable* under a smooth camera pan — the property motion blur
+/// depends on and TAA does not. TAA averages the per-frame velocity away;
+/// motion blur consumes it directly, so any frame-to-frame jitter in the
+/// background (sky) velocity surfaces as shimmer once TAA stops hiding it.
+///
+/// This isolates the velocity path from scene content: an **empty** scene means
+/// the G-buffer albedo alpha clears to 0 everywhere, so every texel is
+/// "background" (ADR-039) and `GBUFFER_VELOCITY` is *entirely* the
+/// `velocity_complete` reprojection. The camera is panned by a **constant** yaw
+/// about a **fixed** eye. Under a constant rotation rate about a fixed point the
+/// induced optical flow is time-invariant — the far-plane point a pixel sees
+/// always sits at the same relative angle one frame back, at the same distance
+/// from the shared eye — so two consecutive frames must produce a near-identical
+/// velocity field (equal in exact arithmetic; float noise otherwise).
+///
+/// TemporalJitter is on: velocity uses the *unjittered* pair, so sub-pixel
+/// jitter must not leak in and destabilise the field. A pass proves the
+/// reprojection is clean, and therefore that any sky shimmer seen under motion
+/// blur comes from *upstream* camera motion (variable frame time, an unsmoothed
+/// look target), not this shader.
+#[test]
+fn deferred_camera_pan_velocity_is_temporally_stable() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping pan velocity test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+    // Empty scene on purpose: no meshes -> albedo alpha clears to 0 everywhere
+    // -> every texel is background -> GBUFFER_VELOCITY is purely the camera-only
+    // reprojection under scrutiny.
+
+    let output_guid = redlilium_assets::Guid::stable("test/pan_velocity_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+    ew.world
+        .insert(camera, redlilium_ecs::TemporalJitter::default())
+        .unwrap();
+
+    // Fixed eye; the look direction yaws a constant step per frame. A fixed eye
+    // keeps the flow a pure rotation, whose field is exactly frame-invariant.
+    let eye = Vec3::new(0.0, 1.0, 3.0);
+    const DTHETA: f32 = 0.02; // rad/frame (~1.15 deg) — far above sub-pixel jitter.
+    let set_pan = |world: &mut redlilium_ecs::World, frame: i32| {
+        let theta = frame as f32 * DTHETA;
+        let forward = Vec3::new(theta.sin(), 0.0, -theta.cos());
+        let t = Transform::new(eye, quat_looking_along(forward), Vec3::new(1.0, 1.0, 1.0));
+        world.insert(camera, t).unwrap();
+        world
+            .insert(camera, GlobalTransform(t.to_matrix()))
+            .unwrap();
+    };
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    // Hold theta = 0 while the pipeline's shaders/targets go resident.
+    set_pan(&mut ew.world, 0);
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+    for _ in 0..5 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+
+    let velocity_texture = ew
+        .world
+        .get::<redlilium_ecs::PipelineTargets>(camera)
+        .expect("deferred targets derived")
+        .get(redlilium_ecs::rendering::deferred::GBUFFER_VELOCITY)
+        .expect("velocity target derived")
+        .clone();
+
+    // Warm the pan up so `prev` is itself a mid-pan step (constant omega on both
+    // sides of the capture), then capture two consecutive frames.
+    let mut frame = 1;
+    for _ in 0..8 {
+        set_pan(&mut ew.world, frame);
+        tick(&mut ew, &mut pipeline, &runner);
+        frame += 1;
+    }
+    let vel_a = decode_velocity(&read_back_texture(
+        &device,
+        &mut pipeline,
+        velocity_texture.clone(),
+        4,
+    ));
+    set_pan(&mut ew.world, frame);
+    tick(&mut ew, &mut pipeline, &runner);
+    let vel_b = decode_velocity(&read_back_texture(
+        &device,
+        &mut pipeline,
+        velocity_texture,
+        4,
+    ));
+
+    // The pan must actually produce motion, or the test is vacuous (e.g. the
+    // background was never filled).
+    let mag_a = max_magnitude(&vel_a);
+    assert!(
+        mag_a > 0.01,
+        "camera pan produced no background velocity: {mag_a}"
+    );
+
+    // Compare on a centre crop: away from the frustum edge the rotational flow
+    // is cleanly defined, with no near-plane / behind-camera projection spikes.
+    let lo = SIZE / 4;
+    let hi = SIZE - SIZE / 4;
+    let mut delta_max = 0.0f32;
+    let mut mag_center = 0.0f32;
+    for y in lo..hi {
+        for x in lo..hi {
+            let i = (y * SIZE + x) as usize;
+            let a = vel_a[i];
+            let b = vel_b[i];
+            let d = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+            delta_max = delta_max.max(d);
+            mag_center = mag_center.max((a[0] * a[0] + a[1] * a[1]).sqrt());
+        }
+    }
+    assert!(
+        mag_center > 0.01,
+        "centre pan velocity too small: {mag_center}"
+    );
+    let ratio = delta_max / mag_center;
+    eprintln!(
+        "pan velocity: |v|~{mag_center:.4} NDC, frame-to-frame delta_max {delta_max:.5} \
+         ({:.2}% of |v|)",
+        ratio * 100.0
+    );
+    assert!(
+        ratio < 0.05,
+        "camera-only velocity flickers frame-to-frame under a constant pan: delta_max \
+         {delta_max:.5} is {:.1}% of |v| {mag_center:.4} (threshold 5%)",
+        ratio * 100.0
+    );
+}
+
 /// Decode an Rg16Float readback into per-texel `[vx, vy]`.
 fn decode_velocity(raw: &[u8]) -> Vec<[f32; 2]> {
     raw.chunks_exact(4)

@@ -21,6 +21,7 @@ cbuffer MbReconstructUniforms {
     float tile_size;
     // Reconstruction tap count.
     float samples;
+    // Padding to a 16-byte boundary (cbuffer alignment).
     float _pad;
 };
 
@@ -102,6 +103,7 @@ float4 fs_main(VsOutput input) : SV_Target {
 
     float2 v_max = neighbor_max.Sample(nearest_sampler, uv).xy;
     float v_max_len = length(v_max);
+
     // Nothing in this neighbourhood moves enough to blur.
     if (v_max_len < 0.5) {
         return float4(center_color, 1.0);
