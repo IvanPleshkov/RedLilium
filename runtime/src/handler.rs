@@ -428,6 +428,39 @@ fn ensure_camera_output(
                 .with_format(format),
         );
     }
+
+    // Keep the projection's aspect in step with the viewport. Without this the
+    // standalone game renders forever with the aspect captured at boot
+    // (`App::initial_aspect`), so any resize that changes the window's
+    // proportions leaves a stretched image and a frustum that no longer matches
+    // the target. The editor patched its own camera; nothing did it here.
+    let aspect = width.max(1) as f32 / height.max(1) as f32;
+    if let Ok(mut cameras) = world.write_all::<Camera>()
+        && let Some(mut cam) = cameras.get_mut(camera.index())
+    {
+        sync_projection_aspect(&mut cam.projection_matrix, aspect);
+    }
+}
+
+/// Rewrite a perspective projection's aspect in place, preserving its field of
+/// view, near/far planes and depth convention.
+///
+/// [`Camera`] stores only matrices — there is no fov/near/far to rebuild from —
+/// but the aspect enters a perspective matrix solely as `m00 = m11 / aspect`, so
+/// rewriting that single term is exactly equivalent to rebuilding the matrix
+/// with the new aspect (the test pins that equivalence). Orthographic
+/// projections encode extent rather than aspect and are left untouched.
+fn sync_projection_aspect(projection: &mut redlilium_core::math::Mat4, aspect: f32) {
+    // `m33 == 0` marks a perspective projection.
+    if !aspect.is_finite() || aspect <= 0.0 || projection[(3, 3)].abs() >= 1e-6 {
+        return;
+    }
+    // `copysign` so a future Y-flip convention (negative `m11`) could not
+    // silently mirror X.
+    let desired = (projection[(1, 1)].abs() / aspect).copysign(projection[(0, 0)]);
+    if (projection[(0, 0)] - desired).abs() > 1e-6 {
+        projection[(0, 0)] = desired;
+    }
 }
 
 #[cfg(test)]
@@ -437,6 +470,43 @@ mod tests {
     use redlilium_graphics::GraphicsInstance;
     use redlilium_vfs::Vfs;
     use std::time::Duration;
+
+    /// Rewriting the single aspect term must be indistinguishable from
+    /// rebuilding the projection outright — that equivalence is what lets the
+    /// camera keep matrices only, with no fov/near/far to rebuild from.
+    #[test]
+    fn syncing_aspect_matches_a_rebuilt_projection() {
+        use redlilium_core::math::DepthConvention;
+        use std::f32::consts::FRAC_PI_4;
+
+        for convention in [DepthConvention::ReversedZ, DepthConvention::Classic] {
+            let mut projection = convention.perspective(FRAC_PI_4, 16.0 / 9.0, 0.1, 500.0);
+            sync_projection_aspect(&mut projection, 4.0 / 3.0);
+            let rebuilt = convention.perspective(FRAC_PI_4, 4.0 / 3.0, 0.1, 500.0);
+            for row in 0..4 {
+                for col in 0..4 {
+                    assert!(
+                        (projection[(row, col)] - rebuilt[(row, col)]).abs() < 1e-5,
+                        "{convention:?} m[{row}][{col}]: {} != {}",
+                        projection[(row, col)],
+                        rebuilt[(row, col)]
+                    );
+                }
+            }
+        }
+    }
+
+    /// An orthographic projection encodes extent, not aspect — rewriting `m00`
+    /// there would silently rescale the view instead of retargeting it.
+    #[test]
+    fn syncing_aspect_leaves_orthographic_alone() {
+        use redlilium_core::math::DepthConvention;
+
+        let before = DepthConvention::ReversedZ.orthographic(-10.0, 10.0, -10.0, 10.0, 0.1, 500.0);
+        let mut projection = before;
+        sync_projection_aspect(&mut projection, 4.0 / 3.0);
+        assert_eq!(projection, before);
+    }
 
     /// Minimal no-op plugin — the test exercises the reload sequencing, not
     /// game logic.
