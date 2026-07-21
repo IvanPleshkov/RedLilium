@@ -50,7 +50,7 @@ fn deferred_camera_no_environment_fallback() {
     world.insert_resource(ScenePass::default());
     world.insert_resource(PipelineRegistry::default());
     world.insert_resource(PipelineCache::new(device.clone()));
-    world.insert_resource(FrameRing::new(&device, 1 << 16, "test_frame_ring").expect("frame ring"));
+    world.insert_resource(FrameRing::new(&device, 1 << 18, "test_frame_ring").expect("frame ring"));
     world.insert_resource(MainViewport::new(SIZE, SIZE));
 
     // Offscreen camera on the deferred path, publishing its color output

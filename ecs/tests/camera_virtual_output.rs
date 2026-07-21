@@ -47,7 +47,7 @@ fn offscreen_camera_clear_lands_in_virtual_texture() {
     world.insert_resource(ScenePass::default());
     world.insert_resource(PipelineRegistry::default());
     world.insert_resource(PipelineCache::new(device.clone()));
-    world.insert_resource(FrameRing::new(&device, 1 << 16, "test_frame_ring").expect("frame ring"));
+    world.insert_resource(FrameRing::new(&device, 1 << 18, "test_frame_ring").expect("frame ring"));
     world.insert_resource(MainViewport::new(SIZE, SIZE));
 
     // Primary camera (Screen, black) + offscreen camera (red) publishing its
