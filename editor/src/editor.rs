@@ -1275,19 +1275,41 @@ impl AppHandler for Editor {
         }
 
         // When the entity selection changes to a non-empty set, drop the asset
-        // selection so the inspector switches back to the entity.
-        if let Some(ew) = self.world.as_ref() {
-            let current = ew
-                .world
-                .resource::<redlilium_ecs::ui::Selection>()
-                .entities()
-                .to_vec();
-            if current != self.last_selection {
-                if !current.is_empty() {
-                    self.asset_browser.clear_selected_file();
-                }
-                self.last_selection = current;
+        // selection so the inspector switches back to the entity. Read it from
+        // whichever world the panels are bound to this frame — the paused play
+        // world (which carries its own Selection) or the editing world — so a
+        // pause-mode hierarchy pick clears the stale asset just like an editing
+        // pick. Watching only the editing world here left the inspector stuck
+        // on the last-selected asset for the whole pause (its Selection never
+        // moves while paused).
+        let paused = self.play.as_ref().is_some_and(|p| p.is_paused());
+        let current = if paused {
+            self.play
+                .as_ref()
+                .map(|p| p.world())
+                .filter(|w| w.has_resource::<redlilium_ecs::ui::Selection>())
+                .map(|w| {
+                    w.resource::<redlilium_ecs::ui::Selection>()
+                        .entities()
+                        .to_vec()
+                })
+                .unwrap_or_default()
+        } else {
+            self.world
+                .as_ref()
+                .map(|ew| {
+                    ew.world
+                        .resource::<redlilium_ecs::ui::Selection>()
+                        .entities()
+                        .to_vec()
+                })
+                .unwrap_or_default()
+        };
+        if current != self.last_selection {
+            if !current.is_empty() {
+                self.asset_browser.clear_selected_file();
             }
+            self.last_selection = current;
         }
 
         // Entity picking: resolve last frame's GPU readbacks into selection.

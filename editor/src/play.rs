@@ -239,9 +239,10 @@ impl PlaySession {
         self.window_input.clone()
     }
 
-    /// Read access to the play world (play-world *inspection* is deliberately
-    /// not exposed to the panels yet).
-    #[cfg_attr(not(test), allow(dead_code))] // test seam + future inspection surface
+    /// Read access to the play world. The shell reads its `Selection` through
+    /// this while paused (the asset-vs-entity inspector arbitration must watch
+    /// the world the panels are actually bound to); the panels *edit* it
+    /// through [`dock_targets`](Self::dock_targets).
     pub fn world(&self) -> &World {
         &self.world
     }
