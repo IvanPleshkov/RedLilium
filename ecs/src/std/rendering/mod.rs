@@ -59,7 +59,7 @@ pub use components::{
     MeshRenderer, OutputFormat, PipelineTargets, Primitive, RenderPath, STD_ENVIRONMENT,
     SizePolicy, TemporalJitter,
 };
-pub use deferred::DeferredPipeline;
+pub use deferred::{DeferredPipeline, DisplayHeadroom};
 #[cfg(feature = "rendering")]
 pub use loaders::{
     EnvironmentData, EnvironmentLoader, EnvironmentSource, MaterialData, MaterialInstanceData,

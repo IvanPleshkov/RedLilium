@@ -25,14 +25,14 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use redlilium_core::color::{f16_to_f32, srgb_encode, tonemap_pbr_neutral};
+use redlilium_core::color::{f16_to_f32, srgb_encode};
 use redlilium_core::math::{Vec3, quat_looking_along};
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
-    CameraAmbientOcclusion, CameraAutoExposure, CameraBloom, CameraEnvironment, CameraOutput,
-    DirectionalLight, EcsRunner, GlobalTransform, MaterialInstanceSource, MeshGenerator,
-    MeshRenderer, MeshSource, OutputFormat, PointLight, Primitive, Render, RenderSchedule,
-    SizePolicy, TextureManager, Transform, Visibility,
+    CameraAmbientOcclusion, CameraAutoExposure, CameraBloom, CameraEnvironment, CameraExposure,
+    CameraOutput, DirectionalLight, DisplayHeadroom, EcsRunner, GlobalTransform,
+    MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, OutputFormat, PointLight,
+    Primitive, Render, RenderSchedule, SizePolicy, TextureManager, Transform, Visibility,
 };
 use redlilium_graphics::{
     BufferDescriptor, BufferUsage, FramePipeline, GraphicsInstance, TextureFormat, TransferConfig,
@@ -156,6 +156,123 @@ fn deferred_golden_images_across_output_formats() {
             &format!("Srgb vs {format:?} output disagree"),
         );
     }
+}
+
+/// End-to-end proof of the display-headroom plumbing (#154): the same
+/// over-exposed scene, rendered to a linear-HDR target, must pin its peak at
+/// paper-white (1.0) when `DisplayHeadroom` is 1 and roll that same highlight
+/// *up* into the extended range when it is 4 — while sub-knee mids stay put.
+/// Guards that `exposure.z` reaches the shader and actually lifts the ceiling,
+/// independent of any golden image.
+#[test]
+fn deferred_hdr_headroom_extends_highlights() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping headroom test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+    spawn_golden_scene(&mut ew.world);
+
+    let output_guid = redlilium_assets::Guid::stable("test/headroom_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Hdr, output_guid);
+    ew.world
+        .insert(camera, CameraEnvironment::default())
+        .unwrap();
+    // Over-expose so highlights sit well above the compression knee regardless
+    // of scene content — makes the roll-off differential unambiguous.
+    ew.world.insert(camera, CameraExposure::new(8.0)).unwrap();
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+
+    // H=1: the shoulder pins the peak at/below paper-white (only f16 slop over).
+    ew.world.insert_resource(DisplayHeadroom(1.0));
+    for _ in 0..3 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let peak_sdr = hdr_peak_channel(&read_back(
+        &ew,
+        &device,
+        &mut pipeline,
+        output_guid,
+        OutputFormat::Hdr,
+    ));
+
+    // H=4: the same highlight rolls up into the extended range, bounded by H.
+    ew.world.insert_resource(DisplayHeadroom(4.0));
+    for _ in 0..3 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let peak_hdr = hdr_peak_channel(&read_back(
+        &ew,
+        &device,
+        &mut pipeline,
+        output_guid,
+        OutputFormat::Hdr,
+    ));
+    drop(pipeline);
+
+    assert!(
+        peak_sdr <= 1.05,
+        "H=1 pins the peak to paper-white, got {peak_sdr}"
+    );
+    assert!(
+        peak_hdr > peak_sdr + 0.5,
+        "H=4 extends highlights above paper-white ({peak_sdr} -> {peak_hdr})"
+    );
+    assert!(
+        peak_hdr <= 4.0 + 1e-2,
+        "roll-off stays within the headroom, got {peak_hdr}"
+    );
+}
+
+/// Largest finite linear channel (max over RGB) in a raw `Rgba16Float`
+/// readback — the peak the display-headroom roll-off produced.
+fn hdr_peak_channel(raw: &[u8]) -> f32 {
+    let mut peak = 0.0f32;
+    for texel in raw.chunks_exact(8) {
+        for i in 0..3 {
+            let c = f16_to_f32(u16::from_le_bytes([texel[2 * i], texel[2 * i + 1]]));
+            if c.is_finite() && c > peak {
+                peak = c;
+            }
+        }
+    }
+    peak
 }
 
 /// The temporal contract's observable (#147): the G-buffer velocity target
@@ -1057,8 +1174,12 @@ fn to_display_rgba8(raw: &[u8], format: OutputFormat) -> image::RgbaImage {
                 pixels.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
         }
-        // Linear-HDR target: apply the same SDR transform the shaders apply
-        // on SDR targets (tonemap + sRGB encode).
+        // Linear-HDR target: the display pass already applied the headroom
+        // roll-off on the GPU (#154), and the test path has no DisplayHeadroom
+        // resource, so H=1 — the surface holds PBR-Neutral-tonemapped *linear*
+        // (1.0 = paper white). To get a comparable display image we only sRGB-
+        // encode it (do NOT tonemap again — the GPU already did, unlike the old
+        // raw-linear-clamp path).
         OutputFormat::Hdr => {
             for texel in raw.chunks_exact(8) {
                 let rgb = [
@@ -1066,7 +1187,7 @@ fn to_display_rgba8(raw: &[u8], format: OutputFormat) -> image::RgbaImage {
                     f16_to_f32(u16::from_le_bytes([texel[2], texel[3]])),
                     f16_to_f32(u16::from_le_bytes([texel[4], texel[5]])),
                 ];
-                for c in tonemap_pbr_neutral(rgb) {
+                for c in rgb {
                     pixels.push((srgb_encode(c).clamp(0.0, 1.0) * 255.0).round() as u8);
                 }
                 pixels.push(255);

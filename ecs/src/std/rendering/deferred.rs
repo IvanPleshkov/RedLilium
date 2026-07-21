@@ -324,8 +324,37 @@ fn gather_lights(world: &World) -> ResolveUniforms {
 struct DisplayOutputUniforms {
     /// x = linear exposure multiplier ([`CameraExposure`]); y = bloom
     /// intensity ([`CameraBloom`](super::CameraBloom), #151; 0 when the bloom
-    /// input is the black fallback); zw unused.
+    /// input is the black fallback); z = display headroom H (#154, only the
+    /// `HDR_OUTPUT` variant reads it); w unused.
     exposure: [f32; 4],
+}
+
+/// Display headroom `H` (#154): the output surface's peak luminance over
+/// paper-white, in ×SDR-white units (`H ≥ 1`). Highlights above paper-white
+/// (1.0) roll off up to `H` on a linear-HDR target; at `H = 1` the display
+/// output is byte-identical to the SDR path.
+///
+/// A frame resource the host sets from the real display (macOS
+/// `NSScreen.maximumExtendedDynamicRangeColorComponentValue`, later swapchain
+/// HDR metadata). **Absent ⇒ `H = 1`** — the safe SDR default every
+/// headless/test path takes, so goldens never depend on a display query. The
+/// deferred pass folds it into `DisplayOutputUniforms::exposure.z`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisplayHeadroom(pub f32);
+
+impl DisplayHeadroom {
+    /// The effective headroom, floored at 1.0 (a display never has less range
+    /// than SDR, and the curve is undefined below 1).
+    pub fn get(self) -> f32 {
+        self.0.max(1.0)
+    }
+}
+
+impl Default for DisplayHeadroom {
+    fn default() -> Self {
+        // SDR: paper-white is the peak, no extended range.
+        Self(1.0)
+    }
 }
 
 /// Uniforms of the TAA resolve pass (must match `taa_resolve.slang`).
@@ -1616,6 +1645,15 @@ impl CameraRenderPipeline for DeferredPipeline {
             1.0 / 60.0
         };
 
+        // Display headroom H (#154) the HDR display path rolls highlights off
+        // to. Absent ⇒ 1.0 (SDR), so every headless/test path is display-
+        // independent and the SDR curve is unchanged.
+        let headroom = if world.has_resource::<DisplayHeadroom>() {
+            world.resource::<DisplayHeadroom>().get()
+        } else {
+            1.0
+        };
+
         // Bloom intensity (#151): the CameraBloom weight, but only when the
         // bloom materials/targets exist (else 0 — the display binds black).
         let bloom_intensity = if camera_resources.bloom_enabled {
@@ -1699,7 +1737,7 @@ impl CameraRenderPipeline for DeferredPipeline {
             }));
             let resolve_offset = ring.push(bytemuck::bytes_of(&resolve_uniforms));
             let display_offset = ring.push(bytemuck::bytes_of(&DisplayOutputUniforms {
-                exposure: [exposure, bloom_intensity, 0.0, 0.0],
+                exposure: [exposure, bloom_intensity, headroom, 0.0],
             }));
             let taa_offset = taa_read_index.map(|_| {
                 // Reprojection math runs on the unjittered pair (the raster
