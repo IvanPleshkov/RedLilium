@@ -21,6 +21,7 @@ use redlilium_graphics::{
 use crate::args::{AppArgs, WindowMode};
 use crate::context::{AppContext, DrawContext};
 use crate::handler::AppHandler;
+use crate::pacing::FramePacer;
 
 /// Main application struct that manages the window and graphics.
 ///
@@ -63,9 +64,18 @@ where
     prebuilt_instance: Option<Arc<GraphicsInstance>>,
     start_time: Instant,
     last_frame_time: Instant,
+    /// Turns the CPU-sampled frame delta into the interval the frame is
+    /// actually displayed for (see [`crate::pacing`]).
+    pacer: FramePacer,
+    /// Frames since the display period was last read from the monitor.
+    frames_since_monitor_probe: u32,
     running: bool,
     initialized: bool,
 }
+
+/// How often to re-read the monitor's refresh rate, in frames — often enough to
+/// follow a monitor or mode change, rarely enough to stay off the frame path.
+const MONITOR_PROBE_INTERVAL: u32 = 60;
 
 impl<H, A> App<H, A>
 where
@@ -82,6 +92,8 @@ where
             prebuilt_instance: None,
             start_time: Instant::now(),
             last_frame_time: Instant::now(),
+            pacer: FramePacer::new(),
+            frames_since_monitor_probe: MONITOR_PROBE_INTERVAL,
             running: true,
             initialized: false,
         }
@@ -461,8 +473,29 @@ where
         }
 
         let now = Instant::now();
-        let delta_time = now.duration_since(self.last_frame_time).as_secs_f32();
+        let raw_delta = now.duration_since(self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
+
+        // Re-read the display period now and then (monitor or mode change, and
+        // it is not worth a query every frame).
+        self.frames_since_monitor_probe += 1;
+        if self.frames_since_monitor_probe >= MONITOR_PROBE_INTERVAL {
+            self.frames_since_monitor_probe = 0;
+            let period = self
+                .window
+                .as_ref()
+                .and_then(|w| w.current_monitor())
+                .and_then(|m| m.refresh_rate_millihertz())
+                .filter(|mhz| *mhz > 0)
+                .map(|mhz| 1000.0 / mhz as f32);
+            self.pacer.set_display_period(period);
+        }
+
+        // What the simulation needs is the interval this frame is *displayed*
+        // for, not the interval the CPU measured between frame starts. Under
+        // vsync those differ by up to ±13% frame to frame, which shows up as
+        // the world subtly speeding up and slowing down (see `pacing`).
+        let delta_time = self.pacer.pace(raw_delta);
 
         // We need to split the borrow of self to handle the handler and context separately
         let ctx = match &mut self.context {

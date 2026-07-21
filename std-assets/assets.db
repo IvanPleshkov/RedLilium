@@ -2,6 +2,14 @@
     version: 1,
     entries: [
         (
+            guid: ("d1adb995-5fb4-5fb2-b517-9eb4aacf3e98"),
+            path: "environments/std.env",
+            kind: "environment",
+            source_hash: 14695981039346656037,
+            settings: Some("(irradiance:(\"715e900a-0d93-4d61-bc45-f6d6974ededc\"),prefilter:(\"ba928a44-8bfe-42dd-9558-b6bc63357281\"),sky:(\"175ef605-60c0-4bda-b282-6baeb3c5db94\"))"),
+            references: {},
+        ),
+        (
             guid: ("994670d7-d68d-5d80-8c4c-085610f8f6ad"),
             path: "layouts/position_normal.vlayout",
             kind: "vertex_layout",

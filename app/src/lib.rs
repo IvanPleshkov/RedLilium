@@ -40,6 +40,7 @@ mod args;
 mod context;
 mod handler;
 pub mod input;
+mod pacing;
 
 pub use app::App;
 pub use args::{AppArgs, DefaultAppArgs, WindowMode};

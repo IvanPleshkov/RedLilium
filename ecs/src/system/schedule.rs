@@ -161,6 +161,9 @@ pub struct Time {
     /// (the motion-blur shutter, #149) — deliberately separate from the
     /// truthful [`frame_delta`](Self::frame_delta) that drives motion.
     smoothed_frame_delta: f64,
+    /// Leftover accumulator as a `[0, 1)` fraction of the fixed step — the
+    /// blend factor for interpolating rendered poses between fixed steps.
+    fixed_alpha: f64,
 }
 
 impl Time {
@@ -172,6 +175,7 @@ impl Time {
             elapsed: 0.0,
             fixed_delta,
             smoothed_frame_delta: 0.0,
+            fixed_alpha: 0.0,
         }
     }
 
@@ -218,6 +222,14 @@ impl Time {
     /// steady clock instead of strobing with the vsync beat).
     pub fn smoothed_frame_delta(&self) -> f64 {
         self.smoothed_frame_delta
+    }
+
+    /// Fraction of the next fixed step already accumulated but not yet
+    /// simulated, in `[0, 1)`. This is the blend factor for interpolating
+    /// rendered poses between the two most recent fixed steps, so rendering
+    /// stays smooth when the render rate and the fixed physics rate disagree.
+    pub fn fixed_alpha(&self) -> f64 {
+        self.fixed_alpha
     }
 }
 
@@ -504,6 +516,14 @@ impl Schedules {
             // to prevent unbounded growth.
             self.fixed_accumulator %= self.fixed_timestep;
         }
+
+        // Publish the leftover accumulator as a [0, 1) blend factor for
+        // render-side interpolation between fixed steps.
+        world.resource_mut::<Time>().fixed_alpha = if self.fixed_timestep > 0.0 {
+            self.fixed_accumulator / self.fixed_timestep
+        } else {
+            0.0
+        };
 
         // Restore effective delta to frame delta
         world.resource_mut::<Time>().delta = delta_time;

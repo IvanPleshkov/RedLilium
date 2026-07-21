@@ -38,6 +38,13 @@ pub struct EditActionHistory<T: Editable> {
     redo_stack: Vec<Box<dyn EditAction<T>>>,
     max_undo: usize,
     merge_broken: bool,
+    /// Apply-and-forget mode: when set, [`execute`](Self::execute) applies the
+    /// action to the target but retains nothing — no undo/redo, no save
+    /// tracking. For **ephemeral** edit targets that are dropped wholesale
+    /// rather than saved (e.g. the editor's paused play world, which is a
+    /// throwaway copy): edits take effect immediately, the stacks stay empty,
+    /// and the target is never reported dirty. See [`discarding`](Self::discarding).
+    discard: bool,
     /// Tracks distance from the saved state.
     ///
     /// - `Some(0)` — the current state matches the last save.
@@ -58,6 +65,29 @@ impl<T: Editable> EditActionHistory<T> {
             redo_stack: Vec::new(),
             max_undo,
             merge_broken: false,
+            discard: false,
+            save_distance: Some(0),
+        }
+    }
+
+    /// Creates a history in **apply-and-forget** mode: [`execute`](Self::execute)
+    /// applies each action but retains nothing, so undo/redo are always empty
+    /// and the target is never reported dirty ([`has_unsaved_changes`](Self::has_unsaved_changes)
+    /// stays `false`).
+    ///
+    /// This is the sanctioned way to route UI edits at an **ephemeral** target
+    /// through the same `EditAction` → `execute` path as a real editing world —
+    /// preserving the "UI never mutates the world directly" invariant — while
+    /// keeping no history. The editor uses it for the paused play world: that
+    /// world is a throwaway copy dropped whole on resume/stop, so per-edit undo
+    /// would only accumulate garbage no one can reach.
+    pub fn discarding() -> Self {
+        Self {
+            undo_stack: VecDeque::new(),
+            redo_stack: Vec::new(),
+            max_undo: 0,
+            merge_broken: false,
+            discard: true,
             save_distance: Some(0),
         }
     }
@@ -80,6 +110,12 @@ impl<T: Editable> EditActionHistory<T> {
         target: &mut T,
     ) -> EditActionResult {
         action.apply(target)?;
+
+        // Apply-and-forget: the target is ephemeral, so the effect lands but
+        // nothing is retained (no stacks, no merge state, no save tracking).
+        if self.discard {
+            return Ok(());
+        }
 
         if !action.is_recorded() {
             if action.breaks_merge() {
@@ -614,6 +650,44 @@ mod tests {
     fn max_undo_accessor() {
         let history = EditActionHistory::<Counter>::new(42);
         assert_eq!(history.max_undo(), 42);
+    }
+
+    #[test]
+    fn discarding_applies_but_retains_nothing() {
+        let mut history = EditActionHistory::discarding();
+        let mut counter = Counter { value: 0 };
+
+        // Even a recorded, content-modifying action leaves no history.
+        history
+            .execute(Box::new(Add { amount: 5 }), &mut counter)
+            .unwrap();
+        history
+            .execute(Box::new(Add { amount: 3 }), &mut counter)
+            .unwrap();
+
+        assert_eq!(counter.value, 8); // effects applied
+        assert_eq!(history.undo_count(), 0);
+        assert_eq!(history.redo_count(), 0);
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+        // Ephemeral target is never dirty, and undo/redo are inert no-ops.
+        assert!(!history.has_unsaved_changes());
+        assert!(history.undo(&mut counter).is_err());
+        assert_eq!(counter.value, 8);
+    }
+
+    #[test]
+    fn discarding_still_propagates_apply_failure() {
+        let mut history = EditActionHistory::discarding();
+        let mut counter = Counter { value: 0 };
+        // A failing action still surfaces its error (apply runs before the
+        // discard short-circuit).
+        assert!(
+            history
+                .execute(Box::new(FailingAction), &mut counter)
+                .is_err()
+        );
+        assert_eq!(counter.value, 0);
     }
 
     #[test]

@@ -18,6 +18,29 @@ pub struct Collider3DHandle(pub ColliderHandle);
 #[derive(Debug, Clone, Copy)]
 pub struct ImpulseJoint3DHandle(pub ImpulseJointHandle);
 
+/// Render-side interpolation history for a physics body: the authoritative
+/// poses of the two most recent fixed steps.
+///
+/// Physics is stepped at a fixed rate that need not match the render rate, so
+/// showing the raw latest step would judder (a "staircase") whenever the two
+/// disagree. [`RecordPhysicsPose`](super::systems3d::RecordPhysicsPose) shifts
+/// `cur → prev` and records the new pose each fixed step;
+/// [`InterpolatePhysics`](super::systems3d::InterpolatePhysics) blends the two
+/// by [`Time::fixed_alpha`](crate::Time::fixed_alpha) into `Transform` for
+/// rendering. Rapier stays the source of truth (it never reads `Transform`
+/// back), so the interpolated `Transform` never perturbs the simulation.
+#[derive(Debug, Clone, Copy)]
+pub struct PhysicsInterpolation {
+    /// Translation after the previous fixed step.
+    pub prev_translation: redlilium_core::math::Vec3,
+    /// Rotation after the previous fixed step.
+    pub prev_rotation: redlilium_core::math::Quat,
+    /// Translation after the latest fixed step.
+    pub cur_translation: redlilium_core::math::Vec3,
+    /// Rotation after the latest fixed step.
+    pub cur_rotation: redlilium_core::math::Quat,
+}
+
 // ---- PhysicsWorld3D resource ----
 
 /// Single ECS resource holding all rapier 3D physics state plus entity mapping.

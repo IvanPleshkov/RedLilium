@@ -1,14 +1,17 @@
-//! Pixel-level e2e for the standard deferred PBR/IBL pipeline (#144).
+//! Pixel-level e2e for the standard deferred PBR/IBL pipeline (#144), the
+//! **no-environment fallback** (#145).
 //!
-//! An offscreen camera with `RenderPath("deferred")` runs through the real
-//! Render schedule (`EnsureCameraTargets` → `CameraRender`). Even with no
-//! meshes in the world the deferred path must produce a picture: the G-buffer
-//! pass clears, the skybox pass renders the baked sky cubemap (its IBL upload
-//! rides the same first frame's graph), and the resolve pass composites — so
-//! the readback must contain sky pixels, not the camera's clear color. This
-//! proves the whole chain: RenderPath resolution → G-buffer derivation into
-//! PipelineTargets → IBL upload through the frame graph → skybox/resolve
-//! materials specialized for the target format.
+//! An offscreen camera with `RenderPath("deferred")` and no `CameraEnvironment`
+//! (nor any environment manager in the world) runs through the real Render
+//! schedule (`EnsureCameraTargets` → `CameraRender`). With no environment the
+//! skybox pass is skipped and image-based lighting is zero (the black-cube
+//! fallback); with no meshes either, every pixel resolves to the camera's
+//! clear color, transformed by the display pass. The contract this guards:
+//! the deferred chain (RenderPath resolution → G-buffer + scene_color
+//! derivation → resolve → display) runs cleanly with no environment — a
+//! uniform, finite, non-black image, no panic/NaN. The environment-lit path
+//! (sky + IBL) is covered by the editor golden tests, which load a real
+//! `environment` asset.
 #![cfg(feature = "rendering")]
 
 use std::sync::{Arc, Mutex};
@@ -29,7 +32,7 @@ use redlilium_graphics::{
 const SIZE: u32 = 64;
 
 #[test]
-fn deferred_camera_renders_skybox_background() {
+fn deferred_camera_no_environment_fallback() {
     let _ = env_logger::builder().is_test(true).try_init();
     let instance = GraphicsInstance::new().expect("graphics instance");
     let device = instance.create_device().expect("device");
@@ -51,8 +54,8 @@ fn deferred_camera_renders_skybox_background() {
     world.insert_resource(MainViewport::new(SIZE, SIZE));
 
     // Offscreen camera on the deferred path, publishing its color output
-    // under a virtual asset identity. Clear color = magenta, which the sky
-    // must overwrite everywhere.
+    // under a virtual asset identity. Clear color = magenta; with no
+    // environment and no meshes the fallback fills every pixel with it.
     let output_guid = Guid::stable("test/deferred_camera_output");
     let camera = world.spawn();
     world
@@ -150,25 +153,23 @@ fn deferred_camera_renders_skybox_background() {
     let data = pixels.lock().unwrap().clone();
     assert_eq!(data.len(), byte_size as usize, "readback size");
 
-    // The sky must overwrite the magenta clear everywhere: no pixel may stay
-    // at the clear color, and the image must not be uniform garbage — the
-    // sky has gradients, so expect some pixel diversity.
-    let mut clear_pixels = 0usize;
+    // Fallback contract (#145): no environment + no meshes ⇒ every pixel is
+    // the camera clear color through the display transform — a single,
+    // finite, non-black color. This guards that the chain runs cleanly with
+    // no environment (no panic, no NaN, no garbage), not any specific look.
+    let first = [data[0], data[1], data[2], data[3]];
     let mut distinct = std::collections::HashSet::new();
     for px in data.chunks_exact(4) {
-        distinct.insert([px[0], px[1], px[2]]);
-        // Magenta clear in any plausible encoding: strong red+blue, no green.
-        if px[0] > 200 && px[1] < 30 && px[2] > 200 {
-            clear_pixels += 1;
-        }
+        distinct.insert([px[0], px[1], px[2], px[3]]);
     }
     assert_eq!(
-        clear_pixels, 0,
-        "no pixel may remain at the camera clear color (skybox must cover)"
+        distinct.len(),
+        1,
+        "no-environment fallback must be uniform (no sky, no geometry), got {} colors",
+        distinct.len()
     );
     assert!(
-        distinct.len() >= 8,
-        "sky background should have gradients, got {} distinct colors",
-        distinct.len()
+        first[0] > 0 || first[1] > 0 || first[2] > 0,
+        "fallback clear color must be visible (non-black), got {first:?}"
     );
 }

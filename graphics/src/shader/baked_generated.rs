@@ -24,14 +24,6 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
-        0x0b6931beb5b94fcb,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
-    ),
-    (
-        0x0e7a6ff59a3c890c,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
-    ),
-    (
         0x16f8ac0466375732,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) prev_model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) view_projection_unjittered_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) prev_view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n    @location(0) world_position_0 : vec3<f32>,\n    @location(3) world_normal_0 : vec3<f32>,\n    @location(1) curr_clip_0 : vec4<f32>,\n    @location(2) prev_clip_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var _S2 : vec4<f32> = vec4<f32>(_S1.position_0, 1.0f);\n    var world_pos_0 : vec4<f32> = (((_S2) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))));\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = (((world_pos_0) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_position_0 = world_pos_0.xyz;\n    output_0.world_normal_0 = (((vec4<f32>(_S1.normal_0, 0.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)]))))).xyz;\n    output_0.curr_clip_0 = (((world_pos_0) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_unjittered_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_unjittered_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_unjittered_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_unjittered_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_unjittered_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_unjittered_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_unjittered_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_unjittered_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_unjittered_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_unjittered_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_unjittered_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_unjittered_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_unjittered_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_unjittered_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_unjittered_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_unjittered_0.data_0[i32(3)][i32(3)])))));\n    output_0.prev_clip_0 = ((((((_S2) * (mat4x4<f32>(mat4x4<f32>(gModel_0.prev_model_0.data_0[i32(0)][i32(0)], gModel_0.prev_model_0.data_0[i32(1)][i32(0)], gModel_0.prev_model_0.data_0[i32(2)][i32(0)], gModel_0.prev_model_0.data_0[i32(3)][i32(0)], gModel_0.prev_model_0.data_0[i32(0)][i32(1)], gModel_0.prev_model_0.data_0[i32(1)][i32(1)], gModel_0.prev_model_0.data_0[i32(2)][i32(1)], gModel_0.prev_model_0.data_0[i32(3)][i32(1)], gModel_0.prev_model_0.data_0[i32(0)][i32(2)], gModel_0.prev_model_0.data_0[i32(1)][i32(2)], gModel_0.prev_model_0.data_0[i32(2)][i32(2)], gModel_0.prev_model_0.data_0[i32(3)][i32(2)], gModel_0.prev_model_0.data_0[i32(0)][i32(3)], gModel_0.prev_model_0.data_0[i32(1)][i32(3)], gModel_0.prev_model_0.data_0[i32(2)][i32(3)], gModel_0.prev_model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.prev_view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.prev_view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.prev_view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.prev_view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.prev_view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.prev_view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.prev_view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.prev_view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.prev_view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.prev_view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.prev_view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.prev_view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.prev_view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.prev_view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.prev_view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.prev_view_projection_0.data_0[i32(3)][i32(3)])))));\n    return output_0;\n}\n\n",
     ),
@@ -44,8 +36,28 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct SLANG_ParameterGroup_MbTileUniforms_std140_0\n{\n    @align(16) inv_resolution_0 : vec2<f32>,\n    @align(8) resolution_0 : vec2<f32>,\n    @align(16) shutter_0 : f32,\n    @align(4) tile_size_0 : f32,\n    @align(8) _pad_0 : vec2<f32>,\n};\n\n@binding(0) @group(0) var<uniform> MbTileUniforms_0 : SLANG_ParameterGroup_MbTileUniforms_std140_0;\n@binding(1) @group(0) var gbuffer_velocity_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var nearest_sampler_0 : sampler;\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec2<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var k_0 : i32 = i32(MbTileUniforms_0.tile_size_0);\n    var _S2 : vec2<i32> = vec2<i32>(position_0.xy) * vec2<i32>(k_0);\n    const _S3 : vec2<f32> = vec2<f32>(0.0f, 0.0f);\n    var best_len_0 : f32 = 0.0f;\n    var best_0 : vec2<f32> = _S3;\n    var j_0 : i32 = i32(0);\n    for(;;)\n    {\n        if(j_0 < k_0)\n        {\n        }\n        else\n        {\n            break;\n        }\n        var best_len_1 : f32 = best_len_0;\n        var best_1 : vec2<f32> = best_0;\n        var i_0 : i32 = i32(0);\n        for(;;)\n        {\n            if(i_0 < k_0)\n            {\n            }\n            else\n            {\n                break;\n            }\n            var v_px_0 : vec2<f32> = (textureSample((gbuffer_velocity_0), (nearest_sampler_0), ((vec2<f32>(_S2 + vec2<i32>(i_0, j_0)) + vec2<f32>(0.5f)) * MbTileUniforms_0.inv_resolution_0))).xy * vec2<f32>(0.5f, -0.5f) * MbTileUniforms_0.resolution_0 * vec2<f32>(MbTileUniforms_0.shutter_0);\n            var len_0 : f32 = length(v_px_0);\n            var len_1 : f32;\n            var v_px_1 : vec2<f32>;\n            if(len_0 > (MbTileUniforms_0.tile_size_0))\n            {\n                var v_px_2 : vec2<f32> = v_px_0 * vec2<f32>((MbTileUniforms_0.tile_size_0 / len_0));\n                len_1 = MbTileUniforms_0.tile_size_0;\n                v_px_1 = v_px_2;\n            }\n            else\n            {\n                len_1 = len_0;\n                v_px_1 = v_px_0;\n            }\n            if(len_1 > best_len_1)\n            {\n                best_len_1 = len_1;\n                best_1 = v_px_1;\n            }\n            i_0 = i_0 + i32(1);\n        }\n        var _S4 : i32 = j_0 + i32(1);\n        best_len_0 = best_len_1;\n        best_0 = best_1;\n        j_0 = _S4;\n    }\n    var _S5 : pixelOutput_0 = pixelOutput_0( best_0 );\n    return _S5;\n}\n\n",
     ),
     (
+        0x1da1806d4b488890,
+        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\n@binding(3) @group(0) var bloom_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var bloom_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\n@binding(5) @group(0) var<storage, read> auto_exposure_0 : array<f32>;\n\nfn tonemap_pbr_neutral_headroom_0( color_0 : vec3<f32>,  headroom_0 : f32) -> vec3<f32>\n{\n    var _S1 : vec3<f32> = max(color_0, vec3<f32>(0.0f));\n    var _S2 : f32 = max(headroom_0, 1.0f);\n    var _S3 : f32 = min(_S1.x, min(_S1.y, _S1.z));\n    var offset_0 : f32;\n    if(_S3 < 0.07999999821186066f)\n    {\n        offset_0 = _S3 - 6.25f * _S3 * _S3;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S4 : vec3<f32> = _S1 - vec3<f32>(offset_0);\n    var _S5 : f32 = max(_S4.x, max(_S4.y, _S4.z));\n    if(_S5 < 0.75999999046325684f)\n    {\n        return _S4;\n    }\n    var d_0 : f32 = _S2 - 0.75999999046325684f;\n    var new_peak_0 : f32 = _S2 - d_0 * d_0 / (_S5 + d_0 - 0.75999999046325684f);\n    return mix(_S4 * vec3<f32>((new_peak_0 / _S5)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S5 - new_peak_0) + 1.0f))));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S6 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S7 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_pbr_neutral_headroom_0(mix((textureSample((scene_color_0), (scene_sampler_0), (_S6.uv_0))).xyz, (textureSample((bloom_0), (bloom_sampler_0), (_S6.uv_0))).xyz, vec3<f32>(DisplayOutputUniforms_0.exposure_0.y)) * vec3<f32>((DisplayOutputUniforms_0.exposure_0.x * auto_exposure_0[i32(0)])), DisplayOutputUniforms_0.exposure_0.z), 1.0f) );\n    return _S7;\n}\n\n",
+    ),
+    (
+        0x1e792af98e860649,
+        "@binding(1) @group(0) var gbuffer_albedo_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var point_sampler_0 : sampler;\n\n@binding(3) @group(0) var gbuffer_position_roughness_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var gbuffer_normal_metallic_0 : texture_2d<f32>;\n\nstruct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_SsaoUniforms_std140_0\n{\n    @align(16) view_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) params_0 : vec4<f32>,\n    @align(16) params2_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> SsaoUniforms_0 : SLANG_ParameterGroup_SsaoUniforms_std140_0;\nfn is_background_0( uv_0 : vec2<f32>) -> bool\n{\n    return ((textureSample((gbuffer_albedo_0), (point_sampler_0), (uv_0))).w) < 0.0078125f;\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_1 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    if(is_background_0(_S1.uv_1))\n    {\n        var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(1.0f, 0.0f, 0.0f, 1.0f) );\n        return _S2;\n    }\n    var pv_0 : vec3<f32> = (((vec4<f32>((textureSample((gbuffer_position_roughness_0), (point_sampler_0), (_S1.uv_1))).xyz, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(SsaoUniforms_0.view_0.data_0[i32(0)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(3)]))))).xyz;\n    var _S3 : mat4x4<f32> = mat4x4<f32>(mat4x4<f32>(SsaoUniforms_0.view_0.data_0[i32(0)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(3)]));\n    var _S4 : vec3<f32> = normalize((((normalize((textureSample((gbuffer_normal_metallic_0), (point_sampler_0), (_S1.uv_1))).xyz * vec3<f32>(2.0f) - vec3<f32>(1.0f))) * (mat3x3<f32>(_S3[i32(0)].xyz, _S3[i32(1)].xyz, _S3[i32(2)].xyz)))));\n    var radius_0 : f32 = SsaoUniforms_0.params_0.x;\n    var pc_0 : vec4<f32> = (((vec4<f32>(pv_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(SsaoUniforms_0.proj_0.data_0[i32(0)][i32(0)], SsaoUniforms_0.proj_0.data_0[i32(1)][i32(0)], SsaoUniforms_0.proj_0.data_0[i32(2)][i32(0)], SsaoUniforms_0.proj_0.data_0[i32(3)][i32(0)], SsaoUniforms_0.proj_0.data_0[i32(0)][i32(1)], SsaoUniforms_0.proj_0.data_0[i32(1)][i32(1)], SsaoUniforms_0.proj_0.data_0[i32(2)][i32(1)], SsaoUniforms_0.proj_0.data_0[i32(3)][i32(1)], SsaoUniforms_0.proj_0.data_0[i32(0)][i32(2)], SsaoUniforms_0.proj_0.data_0[i32(1)][i32(2)], SsaoUniforms_0.proj_0.data_0[i32(2)][i32(2)], SsaoUniforms_0.proj_0.data_0[i32(3)][i32(2)], SsaoUniforms_0.proj_0.data_0[i32(0)][i32(3)], SsaoUniforms_0.proj_0.data_0[i32(1)][i32(3)], SsaoUniforms_0.proj_0.data_0[i32(2)][i32(3)], SsaoUniforms_0.proj_0.data_0[i32(3)][i32(3)])))));\n    var rc_0 : vec4<f32> = (((vec4<f32>(pv_0 + vec3<f32>(radius_0, 0.0f, 0.0f), 1.0f)) * (mat4x4<f32>(mat4x4<f32>(SsaoUniforms_0.proj_0.data_0[i32(0)][i32(0)], SsaoUniforms_0.proj_0.data_0[i32(1)][i32(0)], SsaoUniforms_0.proj_0.data_0[i32(2)][i32(0)], SsaoUniforms_0.proj_0.data_0[i32(3)][i32(0)], SsaoUniforms_0.proj_0.data_0[i32(0)][i32(1)], SsaoUniforms_0.proj_0.data_0[i32(1)][i32(1)], SsaoUniforms_0.proj_0.data_0[i32(2)][i32(1)], SsaoUniforms_0.proj_0.data_0[i32(3)][i32(1)], SsaoUniforms_0.proj_0.data_0[i32(0)][i32(2)], SsaoUniforms_0.proj_0.data_0[i32(1)][i32(2)], SsaoUniforms_0.proj_0.data_0[i32(2)][i32(2)], SsaoUniforms_0.proj_0.data_0[i32(3)][i32(2)], SsaoUniforms_0.proj_0.data_0[i32(0)][i32(3)], SsaoUniforms_0.proj_0.data_0[i32(1)][i32(3)], SsaoUniforms_0.proj_0.data_0[i32(2)][i32(3)], SsaoUniforms_0.proj_0.data_0[i32(3)][i32(3)])))));\n    const _S5 : vec2<f32> = vec2<f32>(0.5f, -0.5f);\n    var _S6 : vec2<f32> = vec2<f32>(0.5f);\n    var _S7 : f32 = min(length(rc_0.xy / vec2<f32>(rc_0.w) * _S5 + _S6 - (pc_0.xy / vec2<f32>(pc_0.w) * _S5 + _S6)), 0.25f);\n    if(_S7 < (SsaoUniforms_0.params2_0.x))\n    {\n        var _S8 : pixelOutput_0 = pixelOutput_0( vec4<f32>(1.0f, 0.0f, 0.0f, 1.0f) );\n        return _S8;\n    }\n    var _S9 : f32 = fract(52.98291778564453125f * fract(dot(_S1.uv_1 / SsaoUniforms_0.params2_0.xy, vec2<f32>(0.06711056083440781f, 0.00583714991807938f)))) * 6.28318548202514648f + SsaoUniforms_0.params_0.w;\n    var d_0 : i32 = i32(0);\n    var occlusion_0 : f32 = 0.0f;\n    for(;;)\n    {\n        if(d_0 < i32(6))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var angle_0 : f32 = _S9 + f32(d_0) / 6.0f * 6.28318548202514648f;\n        var _S10 : vec2<f32> = vec2<f32>(cos(angle_0), sin(angle_0));\n        var horizon_0 : f32 = 0.0f;\n        var s_0 : i32 = i32(1);\n        for(;;)\n        {\n            if(s_0 <= i32(4))\n            {\n            }\n            else\n            {\n                break;\n            }\n            var suv_0 : vec2<f32> = _S1.uv_1 + _S10 * vec2<f32>(_S7) * vec2<f32>((f32(s_0) / 4.0f));\n            var _S11 : bool;\n            if((any((suv_0 < vec2<f32>(0.0f)))))\n            {\n                _S11 = true;\n            }\n            else\n            {\n                _S11 = (any((suv_0 > vec2<f32>(1.0f))));\n            }\n            if(_S11)\n            {\n                s_0 = s_0 + i32(1);\n                continue;\n            }\n            if(is_background_0(suv_0))\n            {\n                s_0 = s_0 + i32(1);\n                continue;\n            }\n            var dv_0 : vec3<f32> = (((vec4<f32>((textureSample((gbuffer_position_roughness_0), (point_sampler_0), (suv_0))).xyz, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(SsaoUniforms_0.view_0.data_0[i32(0)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(0)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(1)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(2)], SsaoUniforms_0.view_0.data_0[i32(0)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(1)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(2)][i32(3)], SsaoUniforms_0.view_0.data_0[i32(3)][i32(3)]))))).xyz - pv_0;\n            var dist_0 : f32 = length(dv_0);\n            if(dist_0 < 0.00009999999747379f)\n            {\n                s_0 = s_0 + i32(1);\n                continue;\n            }\n            horizon_0 = max(horizon_0, (dot(dv_0 / vec3<f32>(dist_0), _S4) - 0.01999999955296516f) * saturate(1.0f - dist_0 / radius_0));\n            s_0 = s_0 + i32(1);\n        }\n        var occlusion_1 : f32 = occlusion_0 + saturate(horizon_0);\n        d_0 = d_0 + i32(1);\n        occlusion_0 = occlusion_1;\n    }\n    var _S12 : pixelOutput_0 = pixelOutput_0( vec4<f32>(pow(saturate(1.0f - occlusion_0 / 6.0f * SsaoUniforms_0.params_0.y), SsaoUniforms_0.params_0.z), 0.0f, 0.0f, 1.0f) );\n    return _S12;\n}\n\n",
+    ),
+    (
         0x20ee92ec75c13d5a,
         "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0x2534c532aeab9bfd,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0x2897935200bbc983,
+        "struct SLANG_ParameterGroup_SsaoBlurUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> SsaoBlurUniforms_0 : SLANG_ParameterGroup_SsaoBlurUniforms_std140_0;\n@binding(2) @group(0) var gbuffer_position_roughness_0 : texture_2d<f32>;\n\n@binding(3) @group(0) var point_sampler_0 : sampler;\n\n@binding(1) @group(0) var ssao_raw_0 : texture_2d<f32>;\n\nconst OFFSETS_0 : array<f32, i32(4)> = array<f32, i32(4)>( -1.5f, -0.5f, 0.5f, 1.5f );\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : vec2<f32> = SsaoBlurUniforms_0.params_0.xy;\n    var _S3 : vec3<f32> = (textureSample((gbuffer_position_roughness_0), (point_sampler_0), (_S1.uv_0))).xyz;\n    var _S4 : f32 = max(SsaoBlurUniforms_0.params_0.z, 0.00009999999747379f);\n    var _S5 : f32 = 1.0f / (2.0f * _S4 * _S4);\n    var i_0 : i32 = i32(0);\n    var sum_0 : f32 = 0.0f;\n    var wsum_0 : f32 = 0.0f;\n    for(;;)\n    {\n        if(i_0 < i32(4))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var j_0 : i32 = i32(0);\n        for(;;)\n        {\n            if(j_0 < i32(4))\n            {\n            }\n            else\n            {\n                break;\n            }\n            var suv_0 : vec2<f32> = _S1.uv_0 + vec2<f32>(OFFSETS_0[j_0], OFFSETS_0[i_0]) * _S2;\n            var dp_0 : vec3<f32> = (textureSample((gbuffer_position_roughness_0), (point_sampler_0), (suv_0))).xyz - _S3;\n            var w_0 : f32 = exp(- dot(dp_0, dp_0) * _S5);\n            var sum_1 : f32 = sum_0 + (textureSample((ssao_raw_0), (point_sampler_0), (suv_0))).x * w_0;\n            var wsum_1 : f32 = wsum_0 + w_0;\n            j_0 = j_0 + i32(1);\n            sum_0 = sum_1;\n            wsum_0 = wsum_1;\n        }\n        i_0 = i_0 + i32(1);\n    }\n    var _S6 : pixelOutput_0 = pixelOutput_0( vec4<f32>(sum_0 / max(wsum_0, 0.00009999999747379f), 0.0f, 0.0f, 1.0f) );\n    return _S6;\n}\n\n",
+    ),
+    (
+        0x2c7f0873b466991e,
+        "@binding(0) @group(1) var gbuffer_albedo_0 : texture_2d<f32>;\n\n@binding(3) @group(1) var gbuffer_sampler_0 : sampler;\n\n@binding(1) @group(1) var gbuffer_normal_metallic_0 : texture_2d<f32>;\n\n@binding(2) @group(1) var gbuffer_position_roughness_0 : texture_2d<f32>;\n\n@binding(0) @group(3) var ssao_texture_0 : texture_2d<f32>;\n\n@binding(1) @group(3) var ssao_sampler_0 : sampler;\n\nstruct DirectionalLightData_std140_0\n{\n    @align(16) dir_to_light_0 : vec4<f32>,\n    @align(16) color_0 : vec4<f32>,\n};\n\nstruct _Array_std140_DirectionalLightData4_0\n{\n    @align(16) data_0 : array<DirectionalLightData_std140_0, i32(4)>,\n};\n\nstruct PointLightData_std140_0\n{\n    @align(16) position_range_0 : vec4<f32>,\n    @align(16) color_1 : vec4<f32>,\n};\n\nstruct _Array_std140_PointLightData16_0\n{\n    @align(16) data_1 : array<PointLightData_std140_0, i32(16)>,\n};\n\nstruct SLANG_ParameterGroup_ResolveUniforms_std140_0\n{\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) light_counts_0 : vec4<u32>,\n    @align(16) dir_lights_0 : _Array_std140_DirectionalLightData4_0,\n    @align(16) point_lights_0 : _Array_std140_PointLightData16_0,\n};\n\n@binding(0) @group(0) var<uniform> ResolveUniforms_0 : SLANG_ParameterGroup_ResolveUniforms_std140_0;\n@binding(0) @group(2) var irradiance_map_0 : texture_cube<f32>;\n\n@binding(3) @group(2) var ibl_sampler_0 : sampler;\n\n@binding(1) @group(2) var prefilter_map_0 : texture_cube<f32>;\n\n@binding(2) @group(2) var brdf_lut_0 : texture_2d<f32>;\n\nfn calculate_f0_0( albedo_0 : vec3<f32>,  metallic_0 : f32) -> vec3<f32>\n{\n    return mix(vec3<f32>(0.03999999910593033f), albedo_0, vec3<f32>(metallic_0));\n}\n\nfn distribution_ggx_0( n_0 : vec3<f32>,  h_0 : vec3<f32>,  roughness_0 : f32) -> f32\n{\n    var a_0 : f32 = roughness_0 * roughness_0;\n    var a2_0 : f32 = a_0 * a_0;\n    var _S1 : f32 = max(dot(n_0, h_0), 0.0f);\n    var denom_0 : f32 = _S1 * _S1 * (a2_0 - 1.0f) + 1.0f;\n    return a2_0 / (3.14159274101257324f * denom_0 * denom_0);\n}\n\nfn geometry_schlick_ggx_0( n_dot_v_0 : f32,  roughness_1 : f32) -> f32\n{\n    var r_0 : f32 = roughness_1 + 1.0f;\n    var k_0 : f32 = r_0 * r_0 / 8.0f;\n    return n_dot_v_0 / (n_dot_v_0 * (1.0f - k_0) + k_0);\n}\n\nfn geometry_smith_0( n_1 : vec3<f32>,  v_0 : vec3<f32>,  l_0 : vec3<f32>,  roughness_2 : f32) -> f32\n{\n    return geometry_schlick_ggx_0(max(dot(n_1, v_0), 0.0f), roughness_2) * geometry_schlick_ggx_0(max(dot(n_1, l_0), 0.0f), roughness_2);\n}\n\nfn saturate_f_0( x_0 : f32) -> f32\n{\n    return saturate(x_0);\n}\n\nfn fresnel_schlick_0( cos_theta_0 : f32,  f0_0 : vec3<f32>) -> vec3<f32>\n{\n    return f0_0 + (vec3<f32>(1.0f) - f0_0) * vec3<f32>(pow(saturate_f_0(1.0f - cos_theta_0), 5.0f));\n}\n\nfn cook_torrance_specular_0( n_2 : vec3<f32>,  v_1 : vec3<f32>,  l_1 : vec3<f32>,  h_1 : vec3<f32>,  roughness_3 : f32,  f0_1 : vec3<f32>) -> vec3<f32>\n{\n    return vec3<f32>((distribution_ggx_0(n_2, h_1, roughness_3) * geometry_smith_0(n_2, v_1, l_1, roughness_3))) * fresnel_schlick_0(max(dot(h_1, v_1), 0.0f), f0_1) / vec3<f32>((4.0f * max(dot(n_2, v_1), 0.0f) * max(dot(n_2, l_1), 0.0f) + 0.00009999999747379f));\n}\n\nfn lambertian_diffuse_0( albedo_1 : vec3<f32>) -> vec3<f32>\n{\n    return albedo_1 * vec3<f32>(0.31830987334251404f);\n}\n\nfn pbr_direct_lighting_0( n_3 : vec3<f32>,  v_2 : vec3<f32>,  l_2 : vec3<f32>,  albedo_2 : vec3<f32>,  metallic_1 : f32,  roughness_4 : f32,  light_color_0 : vec3<f32>) -> vec3<f32>\n{\n    var h_2 : vec3<f32> = normalize(v_2 + l_2);\n    var f0_2 : vec3<f32> = calculate_f0_0(albedo_2, metallic_1);\n    return ((vec3<f32>(1.0f) - fresnel_schlick_0(max(dot(h_2, v_2), 0.0f), f0_2)) * vec3<f32>((1.0f - metallic_1)) * lambertian_diffuse_0(albedo_2) + cook_torrance_specular_0(n_3, v_2, l_2, h_2, roughness_4, f0_2)) * light_color_0 * vec3<f32>(max(dot(n_3, l_2), 0.0f));\n}\n\nfn fresnel_schlick_roughness_0( cos_theta_1 : f32,  f0_3 : vec3<f32>,  roughness_5 : f32) -> vec3<f32>\n{\n    return f0_3 + (max(vec3<f32>((1.0f - roughness_5)), f0_3) - f0_3) * vec3<f32>(pow(saturate_f_0(1.0f - cos_theta_1), 5.0f));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S2 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var albedo_sample_0 : vec4<f32> = (textureSample((gbuffer_albedo_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    var normal_metallic_sample_0 : vec4<f32> = (textureSample((gbuffer_normal_metallic_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    var position_roughness_sample_0 : vec4<f32> = (textureSample((gbuffer_position_roughness_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    var _S3 : f32 = albedo_sample_0.w;\n    if(_S3 < 0.0078125f)\n    {\n        discard;\n    }\n    var ao_0 : f32 = _S3 * (textureSample((ssao_texture_0), (ssao_sampler_0), (_S2.uv_0))).x;\n    var albedo_3 : vec3<f32> = albedo_sample_0.xyz;\n    var normal_0 : vec3<f32> = normalize(normal_metallic_sample_0.xyz * vec3<f32>(2.0f) - vec3<f32>(1.0f));\n    var metallic_2 : f32 = normal_metallic_sample_0.w;\n    var world_position_0 : vec3<f32> = position_roughness_sample_0.xyz;\n    var _S4 : f32 = max(position_roughness_sample_0.w, 0.03999999910593033f);\n    var v_3 : vec3<f32> = normalize(ResolveUniforms_0.camera_pos_0.xyz - world_position_0);\n    var r_1 : vec3<f32> = reflect((vec3<f32>(0) - v_3), normal_0);\n    var _S5 : f32 = max(dot(normal_0, v_3), 0.0f);\n    var f0_4 : vec3<f32> = calculate_f0_0(albedo_3, metallic_2);\n    var _S6 : vec3<f32> = vec3<f32>(0.0f);\n    var i_0 : u32 = u32(0);\n    var lo_0 : vec3<f32> = _S6;\n    for(;;)\n    {\n        if(i_0 < (ResolveUniforms_0.light_counts_0.x))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var lo_1 : vec3<f32> = lo_0 + pbr_direct_lighting_0(normal_0, v_3, ResolveUniforms_0.dir_lights_0.data_0[i_0].dir_to_light_0.xyz, albedo_3, metallic_2, _S4, ResolveUniforms_0.dir_lights_0.data_0[i_0].color_0.xyz);\n        i_0 = i_0 + u32(1);\n        lo_0 = lo_1;\n    }\n    i_0 = u32(0);\n    for(;;)\n    {\n        if(i_0 < (ResolveUniforms_0.light_counts_0.y))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var to_light_0 : vec3<f32> = ResolveUniforms_0.point_lights_0.data_1[i_0].position_range_0.xyz - world_position_0;\n        var _S7 : f32 = max(dot(to_light_0, to_light_0), 9.99999997475242708e-07f);\n        var dist_0 : f32 = sqrt(_S7);\n        var l_3 : vec3<f32> = to_light_0 / vec3<f32>(dist_0);\n        var attenuation_0 : f32 = 1.0f / _S7;\n        var range_0 : f32 = ResolveUniforms_0.point_lights_0.data_1[i_0].position_range_0.w;\n        var attenuation_1 : f32;\n        if(range_0 > 0.0f)\n        {\n            var q_0 : f32 = dist_0 / range_0;\n            var q_1 : f32 = q_0 * q_0;\n            var window_0 : f32 = saturate(1.0f - q_1 * q_1);\n            attenuation_1 = attenuation_0 * (window_0 * window_0);\n        }\n        else\n        {\n            attenuation_1 = attenuation_0;\n        }\n        var lo_2 : vec3<f32> = lo_0 + pbr_direct_lighting_0(normal_0, v_3, l_3, albedo_3, metallic_2, _S4, ResolveUniforms_0.point_lights_0.data_1[i_0].color_1.xyz * vec3<f32>(attenuation_1));\n        i_0 = i_0 + u32(1);\n        lo_0 = lo_2;\n    }\n    var f_ibl_0 : vec3<f32> = fresnel_schlick_roughness_0(_S5, f0_4, _S4);\n    var brdf_sample_0 : vec2<f32> = (textureSample((brdf_lut_0), (ibl_sampler_0), (vec2<f32>(_S5, _S4)))).xy;\n    var _S8 : pixelOutput_0 = pixelOutput_0( vec4<f32>(((vec3<f32>(1.0f) - f_ibl_0) * vec3<f32>((1.0f - metallic_2)) * ((textureSample((irradiance_map_0), (ibl_sampler_0), (normal_0))).xyz * albedo_3) + (textureSampleLevel((prefilter_map_0), (ibl_sampler_0), (r_1), (_S4 * ResolveUniforms_0.camera_pos_0.w))).xyz * (f_ibl_0 * vec3<f32>(brdf_sample_0.x) + vec3<f32>(brdf_sample_0.y))) * vec3<f32>(ao_0) + lo_0, 1.0f) );\n    return _S8;\n}\n\n",
     ),
     (
         0x2ca86afc784db551,
@@ -72,8 +84,8 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    return output_0;\n}\n\n",
     ),
     (
-        0x3f5ddb3d77361b1c,
-        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nfn tonemap_pbr_neutral_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S1 : f32 = min(color_0.x, min(color_0.y, color_0.z));\n    var offset_0 : f32;\n    if(_S1 < 0.07999999821186066f)\n    {\n        offset_0 = _S1 - 6.25f * _S1 * _S1;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S2 : vec3<f32> = color_0 - vec3<f32>(offset_0);\n    var _S3 : f32 = max(_S2.x, max(_S2.y, _S2.z));\n    if(_S3 < 0.75999999046325684f)\n    {\n        return _S2;\n    }\n    var new_peak_0 : f32 = 1.0f - 0.0576000027358532f / (_S3 + 0.24000000953674316f - 0.75999999046325684f);\n    return mix(_S2 * vec3<f32>((new_peak_0 / _S3)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S3 - new_peak_0) + 1.0f))));\n}\n\nfn linear_to_srgb_0( color_1 : vec3<f32>) -> vec3<f32>\n{\n    return mix(color_1 * vec3<f32>(12.92000007629394531f), pow(color_1, vec3<f32>(0.4166666567325592f)) * vec3<f32>(1.0549999475479126f) - vec3<f32>(0.05499999970197678f), step(vec3<f32>(0.00313080009073019f), color_1));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S4 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(linear_to_srgb_0(tonemap_pbr_neutral_0((textureSample((scene_color_0), (scene_sampler_0), (_S4.uv_0))).xyz * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x))), 1.0f) );\n    return _S5;\n}\n\n",
+        0x4708f1b9a324731a,
+        "struct SLANG_ParameterGroup_BloomUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> BloomUniforms_0 : SLANG_ParameterGroup_BloomUniforms_std140_0;\n@binding(1) @group(0) var source_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var linear_sampler_0 : sampler;\n\nfn sanitize_0( x_0 : f32) -> f32\n{\n    var _S1 : f32;\n    if(x_0 == x_0)\n    {\n        _S1 = clamp(x_0, 0.0f, 65504.0f);\n    }\n    else\n    {\n        _S1 = 0.0f;\n    }\n    return _S1;\n}\n\nfn fetch_0( uv_0 : vec2<f32>) -> vec3<f32>\n{\n    var c_0 : vec3<f32> = (textureSample((source_0), (linear_sampler_0), (uv_0))).xyz;\n    return vec3<f32>(sanitize_0(c_0.x), sanitize_0(c_0.y), sanitize_0(c_0.z));\n}\n\nfn luma_0( c_1 : vec3<f32>) -> f32\n{\n    return dot(c_1, vec3<f32>(0.2125999927520752f, 0.71520000696182251f, 0.07220000028610229f));\n}\n\nfn karis_box_0( a_0 : vec3<f32>,  b_0 : vec3<f32>,  c_2 : vec3<f32>,  d_0 : vec3<f32>) -> vec3<f32>\n{\n    var wa_0 : f32 = 1.0f / (1.0f + luma_0(a_0));\n    var wb_0 : f32 = 1.0f / (1.0f + luma_0(b_0));\n    var wc_0 : f32 = 1.0f / (1.0f + luma_0(c_2));\n    var wd_0 : f32 = 1.0f / (1.0f + luma_0(d_0));\n    return (a_0 * vec3<f32>(wa_0) + b_0 * vec3<f32>(wb_0) + c_2 * vec3<f32>(wc_0) + d_0 * vec3<f32>(wd_0)) / vec3<f32>((wa_0 + wb_0 + wc_0 + wd_0));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_1 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S2 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var t_0 : vec2<f32> = BloomUniforms_0.params_0.xy;\n    var b_1 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, -2.0f));\n    var d_1 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, 0.0f));\n    var e_0 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, 0.0f));\n    var f_0 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, 0.0f));\n    var h_0 : vec3<f32> = fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, 2.0f));\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(karis_box_0(fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-1.0f, -1.0f)), fetch_0(_S2.uv_1 + t_0 * vec2<f32>(1.0f, -1.0f)), fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-1.0f, 1.0f)), fetch_0(_S2.uv_1 + t_0)) * vec3<f32>(0.5f) + (karis_box_0(fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, -2.0f)), b_1, d_1, e_0) + karis_box_0(b_1, fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, -2.0f)), e_0, f_0) + karis_box_0(d_1, e_0, fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, 2.0f)), h_0) + karis_box_0(e_0, f_0, h_0, fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, 2.0f)))) * vec3<f32>(0.125f), 1.0f) );\n    return _S3;\n}\n\n",
     ),
     (
         0x5a0484e3568dd6ba,
@@ -92,6 +104,10 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "@binding(0) @group(1) var egui_texture_0 : texture_2d<f32>;\n\n@binding(1) @group(1) var egui_sampler_0 : sampler;\n\nfn linear_to_srgb_0( linear_color_0 : vec3<f32>) -> vec3<f32>\n{\n    return mix(linear_color_0 * vec3<f32>(12.92000007629394531f), vec3<f32>(1.0549999475479126f) * pow(linear_color_0, vec3<f32>(0.4166666567325592f)) - vec3<f32>(0.05499999970197678f), step(vec3<f32>(0.00313080009073019f), linear_color_0));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texture_color_linear_0 : vec4<f32> = (textureSample((egui_texture_0), (egui_sampler_0), (_S1.tex_coords_0)));\n    var _S2 : f32 = texture_color_linear_0.w;\n    var texture_color_linear_premultiplied_0 : vec4<f32> = vec4<f32>(texture_color_linear_0.xyz * vec3<f32>(_S2), _S2);\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(linear_to_srgb_0(texture_color_linear_premultiplied_0.xyz), texture_color_linear_premultiplied_0.w) * _S1.color_0 );\n    return _S3;\n}\n\n",
     ),
     (
+        0x6cae4b8385e69aa0,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
         0x6dae561f607ef805,
         "@binding(1) @group(0) var quad_texture_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var quad_sampler_0 : sampler;\n\nstruct _MatrixStorage_float4x4std140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct Uniforms_std140_0\n{\n    @align(16) mvp_0 : _MatrixStorage_float4x4std140_0,\n    @align(16) mode_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> uniforms_0 : Uniforms_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texel_0 : vec4<f32> = (textureSample((quad_texture_0), (quad_sampler_0), (_S1.uv_0)));\n    if((uniforms_0.mode_0) == u32(1))\n    {\n        var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(texel_0.xxx, 1.0f) );\n        return _S2;\n    }\n    if((uniforms_0.mode_0) == u32(2))\n    {\n        var xy_0 : vec2<f32> = texel_0.xy * vec2<f32>(2.0f) - vec2<f32>(1.0f);\n        var shade_0 : f32 = 0.07999999821186066f + 0.92000001668930054f * saturate(dot(normalize(vec3<f32>(xy_0, sqrt(saturate(1.0f - dot(xy_0, xy_0))))), normalize(vec3<f32>(0.40000000596046448f, 0.5f, 0.75f))));\n        var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(shade_0, shade_0, shade_0, 1.0f) );\n        return _S3;\n    }\n    var _S4 : pixelOutput_0 = pixelOutput_0( texel_0 );\n    return _S4;\n}\n\n",
     ),
@@ -100,8 +116,28 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "@binding(0) @group(1) var egui_texture_0 : texture_2d<f32>;\n\n@binding(1) @group(1) var egui_sampler_0 : sampler;\n\nfn srgb_to_linear_0( srgb_0 : vec3<f32>) -> vec3<f32>\n{\n    return mix(srgb_0 / vec3<f32>(12.92000007629394531f), pow((srgb_0 + vec3<f32>(0.05499999970197678f)) / vec3<f32>(1.0549999475479126f), vec3<f32>(2.40000009536743164f)), step(vec3<f32>(0.04044999927282333f), srgb_0));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texture_color_linear_0 : vec4<f32> = (textureSample((egui_texture_0), (egui_sampler_0), (_S1.tex_coords_0)));\n    var _S2 : f32 = texture_color_linear_0.w;\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(texture_color_linear_0.xyz * vec3<f32>(_S2), _S2) * vec4<f32>(srgb_to_linear_0(_S1.color_0.xyz), _S1.color_0.w) );\n    return _S3;\n}\n\n",
     ),
     (
-        0x7a904edfeeef67d2,
-        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(clamp((textureSample((scene_color_0), (scene_sampler_0), (_S1.uv_0))).xyz * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x), vec3<f32>(0.0f), vec3<f32>(10.0f)), 1.0f) );\n    return _S2;\n}\n\n",
+        0x7a9cb550557e9882,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0x7de263a283afe28e,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0x7e0e3b3f18d1e78d,
+        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\n@binding(3) @group(0) var bloom_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var bloom_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\n@binding(5) @group(0) var<storage, read> auto_exposure_0 : array<f32>;\n\nfn tonemap_pbr_neutral_headroom_0( color_0 : vec3<f32>,  headroom_0 : f32) -> vec3<f32>\n{\n    var _S1 : vec3<f32> = max(color_0, vec3<f32>(0.0f));\n    var _S2 : f32 = max(headroom_0, 1.0f);\n    var _S3 : f32 = min(_S1.x, min(_S1.y, _S1.z));\n    var offset_0 : f32;\n    if(_S3 < 0.07999999821186066f)\n    {\n        offset_0 = _S3 - 6.25f * _S3 * _S3;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S4 : vec3<f32> = _S1 - vec3<f32>(offset_0);\n    var _S5 : f32 = max(_S4.x, max(_S4.y, _S4.z));\n    if(_S5 < 0.75999999046325684f)\n    {\n        return _S4;\n    }\n    var d_0 : f32 = _S2 - 0.75999999046325684f;\n    var new_peak_0 : f32 = _S2 - d_0 * d_0 / (_S5 + d_0 - 0.75999999046325684f);\n    return mix(_S4 * vec3<f32>((new_peak_0 / _S5)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S5 - new_peak_0) + 1.0f))));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S6 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S7 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_pbr_neutral_headroom_0(mix((textureSample((scene_color_0), (scene_sampler_0), (_S6.uv_0))).xyz, (textureSample((bloom_0), (bloom_sampler_0), (_S6.uv_0))).xyz, vec3<f32>(DisplayOutputUniforms_0.exposure_0.y)) * vec3<f32>((DisplayOutputUniforms_0.exposure_0.x * auto_exposure_0[i32(0)])), DisplayOutputUniforms_0.exposure_0.z), 1.0f) );\n    return _S7;\n}\n\n",
+    ),
+    (
+        0x81f6a3748775615b,
+        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\n@binding(3) @group(0) var bloom_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var bloom_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\n@binding(5) @group(0) var<storage, read> auto_exposure_0 : array<f32>;\n\nfn tonemap_pbr_neutral_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S1 : f32 = min(color_0.x, min(color_0.y, color_0.z));\n    var offset_0 : f32;\n    if(_S1 < 0.07999999821186066f)\n    {\n        offset_0 = _S1 - 6.25f * _S1 * _S1;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S2 : vec3<f32> = color_0 - vec3<f32>(offset_0);\n    var _S3 : f32 = max(_S2.x, max(_S2.y, _S2.z));\n    if(_S3 < 0.75999999046325684f)\n    {\n        return _S2;\n    }\n    var new_peak_0 : f32 = 1.0f - 0.0576000027358532f / (_S3 + 0.24000000953674316f - 0.75999999046325684f);\n    return mix(_S2 * vec3<f32>((new_peak_0 / _S3)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S3 - new_peak_0) + 1.0f))));\n}\n\nfn linear_to_srgb_0( color_1 : vec3<f32>) -> vec3<f32>\n{\n    return mix(color_1 * vec3<f32>(12.92000007629394531f), pow(color_1, vec3<f32>(0.4166666567325592f)) * vec3<f32>(1.0549999475479126f) - vec3<f32>(0.05499999970197678f), step(vec3<f32>(0.00313080009073019f), color_1));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S4 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(linear_to_srgb_0(tonemap_pbr_neutral_0(mix((textureSample((scene_color_0), (scene_sampler_0), (_S4.uv_0))).xyz, (textureSample((bloom_0), (bloom_sampler_0), (_S4.uv_0))).xyz, vec3<f32>(DisplayOutputUniforms_0.exposure_0.y)) * vec3<f32>((DisplayOutputUniforms_0.exposure_0.x * auto_exposure_0[i32(0)])))), 1.0f) );\n    return _S5;\n}\n\n",
+    ),
+    (
+        0x873cdff3c78ccf3f,
+        "struct SLANG_ParameterGroup_ResolveUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n    @align(16) limits_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> ResolveUniforms_0 : SLANG_ParameterGroup_ResolveUniforms_std140_0;\n@binding(1) @group(0) var<storage, read> histogram_0 : array<u32>;\n\n@binding(2) @group(0) var<storage, read_write> exposure_0 : array<f32>;\n\n@compute\n@workgroup_size(1, 1, 1)\nfn cs_main(@builtin(global_invocation_id) tid_0 : vec3<u32>)\n{\n    var _S1 : f32 = ResolveUniforms_0.params_0.x;\n    var _S2 : f32 = ResolveUniforms_0.params_0.y;\n    var rate_up_0 : f32 = ResolveUniforms_0.params_0.z;\n    var key_0 : f32 = ResolveUniforms_0.params_0.w;\n    var min_mult_0 : f32 = ResolveUniforms_0.limits_0.x;\n    var max_mult_0 : f32 = ResolveUniforms_0.limits_0.y;\n    var rate_down_0 : f32 = ResolveUniforms_0.limits_0.z;\n    var i_0 : u32 = u32(1);\n    var weighted_0 : f32 = 0.0f;\n    var total_0 : f32 = 0.0f;\n    for(;;)\n    {\n        if(i_0 < u32(256))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var count_0 : f32 = f32(histogram_0[i_0]);\n        var weighted_1 : f32 = weighted_0 + mix(_S1, _S2, (f32(i_0) - 0.5f) / 255.0f) * count_0;\n        var total_1 : f32 = total_0 + count_0;\n        i_0 = i_0 + u32(1);\n        weighted_0 = weighted_1;\n        total_0 = total_1;\n    }\n    var prev_0 : f32 = exposure_0[i32(0)];\n    if(total_0 < 1.0f)\n    {\n        return;\n    }\n    var target_0 : f32 = clamp(key_0 / max(exp2(weighted_0 / total_0), 0.00009999999747379f), min_mult_0, max_mult_0);\n    var rate_0 : f32;\n    if(target_0 > prev_0)\n    {\n        rate_0 = rate_up_0;\n    }\n    else\n    {\n        rate_0 = rate_down_0;\n    }\n    exposure_0[i32(0)] = prev_0 + (target_0 - prev_0) * rate_0;\n    return;\n}\n\n",
+    ),
+    (
+        0x8af2142b78da2b6a,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
         0x8d1c4a3c5b011219,
@@ -110,14 +146,6 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
     (
         0x8dac5871efa0030a,
         "struct MaterialParams_std140_0\n{\n    @align(16) base_color_0 : vec4<f32>,\n};\n\n@binding(0) @group(2) var<uniform> gMaterial_0 : MaterialParams_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) world_normal_0 : vec3<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) clip_position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(vec3<f32>(0.15000000596046448f, 0.15000000596046448f, 0.18000000715255737f) + gMaterial_0.base_color_0.xyz * vec3<f32>(max(dot(normalize(_S1.world_normal_0), normalize(vec3<f32>(0.5f, 1.0f, 0.30000001192092896f))), 0.0f)), 1.0f) );\n    return _S2;\n}\n\n",
-    ),
-    (
-        0x90c1dab7cddabcb4,
-        "@binding(0) @group(1) var gbuffer_albedo_0 : texture_2d<f32>;\n\n@binding(3) @group(1) var gbuffer_sampler_0 : sampler;\n\n@binding(1) @group(1) var gbuffer_normal_metallic_0 : texture_2d<f32>;\n\n@binding(2) @group(1) var gbuffer_position_roughness_0 : texture_2d<f32>;\n\nstruct DirectionalLightData_std140_0\n{\n    @align(16) dir_to_light_0 : vec4<f32>,\n    @align(16) color_0 : vec4<f32>,\n};\n\nstruct _Array_std140_DirectionalLightData4_0\n{\n    @align(16) data_0 : array<DirectionalLightData_std140_0, i32(4)>,\n};\n\nstruct PointLightData_std140_0\n{\n    @align(16) position_range_0 : vec4<f32>,\n    @align(16) color_1 : vec4<f32>,\n};\n\nstruct _Array_std140_PointLightData16_0\n{\n    @align(16) data_1 : array<PointLightData_std140_0, i32(16)>,\n};\n\nstruct SLANG_ParameterGroup_ResolveUniforms_std140_0\n{\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) light_counts_0 : vec4<u32>,\n    @align(16) dir_lights_0 : _Array_std140_DirectionalLightData4_0,\n    @align(16) point_lights_0 : _Array_std140_PointLightData16_0,\n};\n\n@binding(0) @group(0) var<uniform> ResolveUniforms_0 : SLANG_ParameterGroup_ResolveUniforms_std140_0;\n@binding(0) @group(2) var irradiance_map_0 : texture_cube<f32>;\n\n@binding(3) @group(2) var ibl_sampler_0 : sampler;\n\n@binding(1) @group(2) var prefilter_map_0 : texture_cube<f32>;\n\n@binding(2) @group(2) var brdf_lut_0 : texture_2d<f32>;\n\nfn calculate_f0_0( albedo_0 : vec3<f32>,  metallic_0 : f32) -> vec3<f32>\n{\n    return mix(vec3<f32>(0.03999999910593033f), albedo_0, vec3<f32>(metallic_0));\n}\n\nfn distribution_ggx_0( n_0 : vec3<f32>,  h_0 : vec3<f32>,  roughness_0 : f32) -> f32\n{\n    var a_0 : f32 = roughness_0 * roughness_0;\n    var a2_0 : f32 = a_0 * a_0;\n    var _S1 : f32 = max(dot(n_0, h_0), 0.0f);\n    var denom_0 : f32 = _S1 * _S1 * (a2_0 - 1.0f) + 1.0f;\n    return a2_0 / (3.14159274101257324f * denom_0 * denom_0);\n}\n\nfn geometry_schlick_ggx_0( n_dot_v_0 : f32,  roughness_1 : f32) -> f32\n{\n    var r_0 : f32 = roughness_1 + 1.0f;\n    var k_0 : f32 = r_0 * r_0 / 8.0f;\n    return n_dot_v_0 / (n_dot_v_0 * (1.0f - k_0) + k_0);\n}\n\nfn geometry_smith_0( n_1 : vec3<f32>,  v_0 : vec3<f32>,  l_0 : vec3<f32>,  roughness_2 : f32) -> f32\n{\n    return geometry_schlick_ggx_0(max(dot(n_1, v_0), 0.0f), roughness_2) * geometry_schlick_ggx_0(max(dot(n_1, l_0), 0.0f), roughness_2);\n}\n\nfn saturate_f_0( x_0 : f32) -> f32\n{\n    return saturate(x_0);\n}\n\nfn fresnel_schlick_0( cos_theta_0 : f32,  f0_0 : vec3<f32>) -> vec3<f32>\n{\n    return f0_0 + (vec3<f32>(1.0f) - f0_0) * vec3<f32>(pow(saturate_f_0(1.0f - cos_theta_0), 5.0f));\n}\n\nfn cook_torrance_specular_0( n_2 : vec3<f32>,  v_1 : vec3<f32>,  l_1 : vec3<f32>,  h_1 : vec3<f32>,  roughness_3 : f32,  f0_1 : vec3<f32>) -> vec3<f32>\n{\n    return vec3<f32>((distribution_ggx_0(n_2, h_1, roughness_3) * geometry_smith_0(n_2, v_1, l_1, roughness_3))) * fresnel_schlick_0(max(dot(h_1, v_1), 0.0f), f0_1) / vec3<f32>((4.0f * max(dot(n_2, v_1), 0.0f) * max(dot(n_2, l_1), 0.0f) + 0.00009999999747379f));\n}\n\nfn lambertian_diffuse_0( albedo_1 : vec3<f32>) -> vec3<f32>\n{\n    return albedo_1 * vec3<f32>(0.31830987334251404f);\n}\n\nfn pbr_direct_lighting_0( n_3 : vec3<f32>,  v_2 : vec3<f32>,  l_2 : vec3<f32>,  albedo_2 : vec3<f32>,  metallic_1 : f32,  roughness_4 : f32,  light_color_0 : vec3<f32>) -> vec3<f32>\n{\n    var h_2 : vec3<f32> = normalize(v_2 + l_2);\n    var f0_2 : vec3<f32> = calculate_f0_0(albedo_2, metallic_1);\n    return ((vec3<f32>(1.0f) - fresnel_schlick_0(max(dot(h_2, v_2), 0.0f), f0_2)) * vec3<f32>((1.0f - metallic_1)) * lambertian_diffuse_0(albedo_2) + cook_torrance_specular_0(n_3, v_2, l_2, h_2, roughness_4, f0_2)) * light_color_0 * vec3<f32>(max(dot(n_3, l_2), 0.0f));\n}\n\nfn fresnel_schlick_roughness_0( cos_theta_1 : f32,  f0_3 : vec3<f32>,  roughness_5 : f32) -> vec3<f32>\n{\n    return f0_3 + (max(vec3<f32>((1.0f - roughness_5)), f0_3) - f0_3) * vec3<f32>(pow(saturate_f_0(1.0f - cos_theta_1), 5.0f));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S2 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var albedo_sample_0 : vec4<f32> = (textureSample((gbuffer_albedo_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    var normal_metallic_sample_0 : vec4<f32> = (textureSample((gbuffer_normal_metallic_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    var position_roughness_sample_0 : vec4<f32> = (textureSample((gbuffer_position_roughness_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    var _S3 : f32 = albedo_sample_0.w;\n    if(_S3 < 0.0078125f)\n    {\n        discard;\n    }\n    var albedo_3 : vec3<f32> = albedo_sample_0.xyz;\n    var normal_0 : vec3<f32> = normalize(normal_metallic_sample_0.xyz * vec3<f32>(2.0f) - vec3<f32>(1.0f));\n    var metallic_2 : f32 = normal_metallic_sample_0.w;\n    var world_position_0 : vec3<f32> = position_roughness_sample_0.xyz;\n    var _S4 : f32 = max(position_roughness_sample_0.w, 0.03999999910593033f);\n    var v_3 : vec3<f32> = normalize(ResolveUniforms_0.camera_pos_0.xyz - world_position_0);\n    var r_1 : vec3<f32> = reflect((vec3<f32>(0) - v_3), normal_0);\n    var _S5 : f32 = max(dot(normal_0, v_3), 0.0f);\n    var f0_4 : vec3<f32> = calculate_f0_0(albedo_3, metallic_2);\n    var _S6 : vec3<f32> = vec3<f32>(0.0f);\n    var i_0 : u32 = u32(0);\n    var lo_0 : vec3<f32> = _S6;\n    for(;;)\n    {\n        if(i_0 < (ResolveUniforms_0.light_counts_0.x))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var lo_1 : vec3<f32> = lo_0 + pbr_direct_lighting_0(normal_0, v_3, ResolveUniforms_0.dir_lights_0.data_0[i_0].dir_to_light_0.xyz, albedo_3, metallic_2, _S4, ResolveUniforms_0.dir_lights_0.data_0[i_0].color_0.xyz);\n        i_0 = i_0 + u32(1);\n        lo_0 = lo_1;\n    }\n    i_0 = u32(0);\n    for(;;)\n    {\n        if(i_0 < (ResolveUniforms_0.light_counts_0.y))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var to_light_0 : vec3<f32> = ResolveUniforms_0.point_lights_0.data_1[i_0].position_range_0.xyz - world_position_0;\n        var _S7 : f32 = max(dot(to_light_0, to_light_0), 9.99999997475242708e-07f);\n        var dist_0 : f32 = sqrt(_S7);\n        var l_3 : vec3<f32> = to_light_0 / vec3<f32>(dist_0);\n        var attenuation_0 : f32 = 1.0f / _S7;\n        var range_0 : f32 = ResolveUniforms_0.point_lights_0.data_1[i_0].position_range_0.w;\n        var attenuation_1 : f32;\n        if(range_0 > 0.0f)\n        {\n            var q_0 : f32 = dist_0 / range_0;\n            var q_1 : f32 = q_0 * q_0;\n            var window_0 : f32 = saturate(1.0f - q_1 * q_1);\n            attenuation_1 = attenuation_0 * (window_0 * window_0);\n        }\n        else\n        {\n            attenuation_1 = attenuation_0;\n        }\n        var lo_2 : vec3<f32> = lo_0 + pbr_direct_lighting_0(normal_0, v_3, l_3, albedo_3, metallic_2, _S4, ResolveUniforms_0.point_lights_0.data_1[i_0].color_1.xyz * vec3<f32>(attenuation_1));\n        i_0 = i_0 + u32(1);\n        lo_0 = lo_2;\n    }\n    var f_ibl_0 : vec3<f32> = fresnel_schlick_roughness_0(_S5, f0_4, _S4);\n    var brdf_sample_0 : vec2<f32> = (textureSample((brdf_lut_0), (ibl_sampler_0), (vec2<f32>(_S5, _S4)))).xy;\n    var _S8 : pixelOutput_0 = pixelOutput_0( vec4<f32>(((vec3<f32>(1.0f) - f_ibl_0) * vec3<f32>((1.0f - metallic_2)) * ((textureSample((irradiance_map_0), (ibl_sampler_0), (normal_0))).xyz * albedo_3) + (textureSampleLevel((prefilter_map_0), (ibl_sampler_0), (r_1), (_S4 * 7.0f))).xyz * (f_ibl_0 * vec3<f32>(brdf_sample_0.x) + vec3<f32>(brdf_sample_0.y))) * vec3<f32>(_S3) + lo_0, 1.0f) );\n    return _S8;\n}\n\n",
-    ),
-    (
-        0x945fbc5e5b2a8d99,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
         0x9652c850be7527f5,
@@ -144,12 +172,20 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct SLANG_ParameterGroup_EguiUniforms_std140_0\n{\n    @align(16) screen_size_0 : vec2<f32>,\n    @align(8) _padding_0 : vec2<f32>,\n};\n\n@binding(0) @group(0) var<uniform> EguiUniforms_0 : SLANG_ParameterGroup_EguiUniforms_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_1 : vec2<f32>,\n    @location(1) tex_coords_1 : vec2<f32>,\n    @location(2) color_1 : vec4<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(vec2<f32>(2.0f * _S1.position_1.x / EguiUniforms_0.screen_size_0.x - 1.0f, 1.0f - 2.0f * _S1.position_1.y / EguiUniforms_0.screen_size_0.y), 0.0f, 1.0f);\n    output_0.tex_coords_0 = _S1.tex_coords_1;\n    output_0.color_0 = _S1.color_1;\n    return output_0;\n}\n\n",
     ),
     (
-        0x9fb97ed1c6842f49,
-        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nfn tonemap_pbr_neutral_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S1 : f32 = min(color_0.x, min(color_0.y, color_0.z));\n    var offset_0 : f32;\n    if(_S1 < 0.07999999821186066f)\n    {\n        offset_0 = _S1 - 6.25f * _S1 * _S1;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S2 : vec3<f32> = color_0 - vec3<f32>(offset_0);\n    var _S3 : f32 = max(_S2.x, max(_S2.y, _S2.z));\n    if(_S3 < 0.75999999046325684f)\n    {\n        return _S2;\n    }\n    var new_peak_0 : f32 = 1.0f - 0.0576000027358532f / (_S3 + 0.24000000953674316f - 0.75999999046325684f);\n    return mix(_S2 * vec3<f32>((new_peak_0 / _S3)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S3 - new_peak_0) + 1.0f))));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S4 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_pbr_neutral_0((textureSample((scene_color_0), (scene_sampler_0), (_S4.uv_0))).xyz * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x)), 1.0f) );\n    return _S5;\n}\n\n",
+        0x9fcc0e5cd07d1ef9,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
         0x9fe4d6183467fbcb,
         "@binding(1) @group(0) var color_0 : texture_2d<f32>;\n\n@binding(7) @group(0) var linear_sampler_0 : sampler;\n\n@binding(2) @group(0) var neighbor_max_0 : texture_2d<f32>;\n\n@binding(6) @group(0) var nearest_sampler_0 : sampler;\n\n@binding(3) @group(0) var gbuffer_velocity_0 : texture_2d<f32>;\n\nstruct SLANG_ParameterGroup_MbReconstructUniforms_std140_0\n{\n    @align(16) inv_resolution_0 : vec2<f32>,\n    @align(8) resolution_0 : vec2<f32>,\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) shutter_0 : f32,\n    @align(4) tile_size_0 : f32,\n    @align(8) samples_0 : f32,\n    @align(4) _pad_0 : f32,\n};\n\n@binding(0) @group(0) var<uniform> MbReconstructUniforms_0 : SLANG_ParameterGroup_MbReconstructUniforms_std140_0;\n@binding(5) @group(0) var gbuffer_albedo_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var gbuffer_position_0 : texture_2d<f32>;\n\nfn velocity_px_0( uv_0 : vec2<f32>) -> vec2<f32>\n{\n    return (textureSample((gbuffer_velocity_0), (nearest_sampler_0), (uv_0))).xy * vec2<f32>(0.5f, -0.5f) * MbReconstructUniforms_0.resolution_0 * vec2<f32>(MbReconstructUniforms_0.shutter_0);\n}\n\nfn view_depth_0( uv_1 : vec2<f32>) -> f32\n{\n    if(((textureSample((gbuffer_albedo_0), (nearest_sampler_0), (uv_1))).w) < 0.0078125f)\n    {\n        return 1.0e+07f;\n    }\n    return length(MbReconstructUniforms_0.camera_pos_0.xyz - (textureSample((gbuffer_position_0), (nearest_sampler_0), (uv_1))).xyz);\n}\n\nfn ign_0( p_0 : vec2<f32>) -> f32\n{\n    return fract(52.98291778564453125f * fract(dot(p_0, vec2<f32>(0.06711056083440781f, 0.00583714991807938f))));\n}\n\nfn soft_z_0( a_0 : f32,  b_0 : f32) -> f32\n{\n    return saturate(1.0f - (a_0 - b_0) / max(0.05000000074505806f * max(a_0, b_0), 0.00000999999974738f));\n}\n\nfn cone_0( dist_0 : f32,  v_0 : f32) -> f32\n{\n    return saturate(1.0f - dist_0 / max(v_0, 0.00000999999974738f));\n}\n\nfn cylinder_0( dist_1 : f32,  v_1 : f32) -> f32\n{\n    return 1.0f - smoothstep(0.94999998807907104f * v_1, 1.04999995231628418f * v_1, dist_1);\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_2 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var center_color_0 : vec3<f32> = (textureSample((color_0), (linear_sampler_0), (_S1.uv_2))).xyz;\n    var v_max_0 : vec2<f32> = (textureSample((neighbor_max_0), (nearest_sampler_0), (_S1.uv_2))).xy;\n    if((length(v_max_0)) < 0.5f)\n    {\n        var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(center_color_0, 1.0f) );\n        return _S2;\n    }\n    var _S3 : f32 = max(length(velocity_px_0(_S1.uv_2)), 0.5f);\n    var _S4 : f32 = view_depth_0(_S1.uv_2);\n    var _S5 : i32 = max(i32(MbReconstructUniforms_0.samples_0), i32(1));\n    var _S6 : f32 = ign_0(position_0.xy) - 0.5f;\n    var weight_0 : f32 = 1.0f / _S3;\n    var _S7 : vec3<f32> = center_color_0 * vec3<f32>(weight_0);\n    var i_0 : i32 = i32(0);\n    var weight_1 : f32 = weight_0;\n    var sum_0 : vec3<f32> = _S7;\n    for(;;)\n    {\n        if(i_0 < _S5)\n        {\n        }\n        else\n        {\n            break;\n        }\n        var offset_0 : vec2<f32> = v_max_0 * vec2<f32>((0.5f * mix(-1.0f, 1.0f, (f32(i_0) + _S6 + 1.0f) / (f32(_S5) + 1.0f))));\n        var dist_2 : f32 = length(offset_0);\n        var s_uv_0 : vec2<f32> = _S1.uv_2 + offset_0 * MbReconstructUniforms_0.inv_resolution_0;\n        var _S8 : f32 = max(length(velocity_px_0(s_uv_0)), 0.5f);\n        var s_depth_0 : f32 = view_depth_0(s_uv_0);\n        var w_0 : f32 = soft_z_0(_S4, s_depth_0) * cone_0(dist_2, _S8) + soft_z_0(s_depth_0, _S4) * cone_0(dist_2, _S3) + cylinder_0(dist_2, _S8) * cylinder_0(dist_2, _S3) * 2.0f;\n        var weight_2 : f32 = weight_1 + w_0;\n        var sum_1 : vec3<f32> = sum_0 + (textureSample((color_0), (linear_sampler_0), (s_uv_0))).xyz * vec3<f32>(w_0);\n        i_0 = i_0 + i32(1);\n        weight_1 = weight_2;\n        sum_0 = sum_1;\n    }\n    var _S9 : pixelOutput_0 = pixelOutput_0( vec4<f32>(sum_0 / vec3<f32>(max(weight_1, 0.00000999999974738f)), 1.0f) );\n    return _S9;\n}\n\n",
+    ),
+    (
+        0xa4a0a6ff2fdde47b,
+        "struct SLANG_ParameterGroup_BloomUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> BloomUniforms_0 : SLANG_ParameterGroup_BloomUniforms_std140_0;\n@binding(1) @group(0) var source_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var linear_sampler_0 : sampler;\n\nfn sanitize_0( x_0 : f32) -> f32\n{\n    var _S1 : f32;\n    if(x_0 == x_0)\n    {\n        _S1 = clamp(x_0, 0.0f, 65504.0f);\n    }\n    else\n    {\n        _S1 = 0.0f;\n    }\n    return _S1;\n}\n\nfn fetch_0( uv_0 : vec2<f32>) -> vec3<f32>\n{\n    var c_0 : vec3<f32> = (textureSample((source_0), (linear_sampler_0), (uv_0))).xyz;\n    return vec3<f32>(sanitize_0(c_0.x), sanitize_0(c_0.y), sanitize_0(c_0.z));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_1 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S2 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var t_0 : vec2<f32> = BloomUniforms_0.params_0.xy;\n    var _S3 : vec3<f32> = vec3<f32>(0.125f);\n    var _S4 : pixelOutput_0 = pixelOutput_0( vec4<f32>(fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, 0.0f)) * _S3 + (fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, -2.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, -2.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, 2.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, 2.0f))) * vec3<f32>(0.03125f) + (fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, -2.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-2.0f, 0.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(2.0f, 0.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(0.0f, 2.0f))) * vec3<f32>(0.0625f) + (fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-1.0f, -1.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(1.0f, -1.0f)) + fetch_0(_S2.uv_1 + t_0 * vec2<f32>(-1.0f, 1.0f)) + fetch_0(_S2.uv_1 + t_0)) * _S3, 1.0f) );\n    return _S4;\n}\n\n",
+    ),
+    (
+        0xabb3f92c7d74e08b,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
         0xb6c7e0e2ffb9ab18,
@@ -158,10 +194,6 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
     (
         0xc317c54788d7be76,
         "struct MaterialParams_std140_0\n{\n    @align(16) base_color_0 : vec4<f32>,\n    @align(16) pbr_params_0 : vec4<f32>,\n};\n\n@binding(0) @group(2) var<uniform> gMaterial_0 : MaterialParams_std140_0;\n@binding(1) @group(2) var gMaterial_base_color_texture_0 : texture_2d<f32>;\n\n@binding(2) @group(2) var gMaterial_base_color_texture_sampler_0 : sampler;\n\n@binding(3) @group(2) var gMaterial_orm_texture_0 : texture_2d<f32>;\n\n@binding(4) @group(2) var gMaterial_orm_texture_sampler_0 : sampler;\n\nstruct FsOutput_0\n{\n    @location(0) albedo_0 : vec4<f32>,\n    @location(1) normal_metallic_0 : vec4<f32>,\n    @location(2) position_roughness_0 : vec4<f32>,\n    @location(3) velocity_0 : vec2<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) world_position_0 : vec3<f32>,\n    @location(4) world_normal_0 : vec3<f32>,\n    @location(1) uv_0 : vec2<f32>,\n    @location(2) curr_clip_0 : vec4<f32>,\n    @location(3) prev_clip_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) clip_position_0 : vec4<f32>) -> FsOutput_0\n{\n    var normal_0 : vec3<f32> = normalize(_S1.world_normal_0);\n    var orm_0 : vec3<f32> = (textureSample((gMaterial_orm_texture_0), (gMaterial_orm_texture_sampler_0), (_S1.uv_0))).xyz;\n    var metallic_0 : f32 = saturate(gMaterial_0.pbr_params_0.x * orm_0.z);\n    var _S2 : f32 = max(gMaterial_0.pbr_params_0.y * orm_0.y, 0.03999999910593033f);\n    var output_0 : FsOutput_0;\n    output_0.albedo_0 = vec4<f32>(gMaterial_0.base_color_0.xyz * (textureSample((gMaterial_base_color_texture_0), (gMaterial_base_color_texture_sampler_0), (_S1.uv_0))).xyz, max(orm_0.x, 0.015625f));\n    var _S3 : vec3<f32> = vec3<f32>(0.5f);\n    output_0.normal_metallic_0 = vec4<f32>(normal_0 * _S3 + _S3, metallic_0);\n    output_0.position_roughness_0 = vec4<f32>(_S1.world_position_0, _S2);\n    output_0.velocity_0 = _S1.curr_clip_0.xy / vec2<f32>(_S1.curr_clip_0.w) - _S1.prev_clip_0.xy / vec2<f32>(_S1.prev_clip_0.w);\n    return output_0;\n}\n\n",
-    ),
-    (
-        0xc431c5ffacfead84,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
     ),
     (
         0xc49af10895c2cae5,
@@ -176,12 +208,32 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_TaaUniforms_std140_0\n{\n    @align(16) inv_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) prev_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> TaaUniforms_0 : SLANG_ParameterGroup_TaaUniforms_std140_0;\n@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(5) @group(0) var nearest_sampler_0 : sampler;\n\n@binding(4) @group(0) var gbuffer_albedo_0 : texture_2d<f32>;\n\n@binding(3) @group(0) var gbuffer_velocity_0 : texture_2d<f32>;\n\n@binding(7) @group(0) var gbuffer_position_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var history_0 : texture_2d<f32>;\n\n@binding(6) @group(0) var linear_sampler_0 : sampler;\n\nfn isnan_0( x_0 : f32) -> bool\n{\n    var _S1 : u32 = (bitcast<u32>((x_0)));\n    var _S2 : u32 = (_S1 & (u32(8388607)));\n    var _S3 : bool;\n    if(((((_S1 >> (u32(23)))) & (u32(255)))) == u32(255))\n    {\n        _S3 = _S2 != u32(0);\n    }\n    else\n    {\n        _S3 = false;\n    }\n    return _S3;\n}\n\nfn isnan_1( x_1 : vec3<f32>) -> vec3<bool>\n{\n    var result_0 : vec3<bool>;\n    var i_0 : i32 = i32(0);\n    for(;;)\n    {\n        if(i_0 < i32(3))\n        {\n        }\n        else\n        {\n            break;\n        }\n        result_0[i_0] = isnan_0(x_1[i_0]);\n        i_0 = i_0 + i32(1);\n    }\n    return result_0;\n}\n\nfn uv_to_ndc_0( uv_0 : vec2<f32>) -> vec2<f32>\n{\n    return (uv_0 - vec2<f32>(0.5f)) * vec2<f32>(2.0f, -2.0f);\n}\n\nfn far_plane_world_0( inv_view_proj_1 : mat4x4<f32>,  uv_1 : vec2<f32>) -> vec3<f32>\n{\n    var w_0 : vec4<f32> = (((vec4<f32>(uv_to_ndc_0(uv_1), 0.0f, 1.0f)) * (inv_view_proj_1)));\n    return w_0.xyz / vec3<f32>(w_0.w);\n}\n\nfn project_ndc_0( view_proj_0 : mat4x4<f32>,  world_pos_0 : vec3<f32>) -> vec2<f32>\n{\n    var c_0 : vec4<f32> = (((vec4<f32>(world_pos_0, 1.0f)) * (view_proj_0)));\n    return c_0.xy / vec2<f32>(max(c_0.w, 9.99999997475242708e-07f));\n}\n\nfn ndc_to_uv_0( ndc_0 : vec2<f32>) -> vec2<f32>\n{\n    return ndc_0 * vec2<f32>(0.5f, -0.5f) + vec2<f32>(0.5f);\n}\n\nfn project_uv_0( view_proj_1 : mat4x4<f32>,  world_pos_1 : vec3<f32>) -> vec2<f32>\n{\n    return ndc_to_uv_0(project_ndc_0(view_proj_1, world_pos_1));\n}\n\nfn reproject_prev_uv_0( uv_2 : vec2<f32>,  velocity_ndc_0 : vec2<f32>) -> vec2<f32>\n{\n    return uv_2 - velocity_ndc_0 * vec2<f32>(0.5f, -0.5f);\n}\n\nfn rgb_to_ycocg_0( c_1 : vec3<f32>) -> vec3<f32>\n{\n    var _S4 : f32 = c_1.x;\n    var _S5 : f32 = 0.5f * c_1.y;\n    var _S6 : f32 = c_1.z;\n    var _S7 : f32 = 0.25f * _S6;\n    return vec3<f32>(0.25f * _S4 + _S5 + _S7, 0.5f * _S4 - 0.5f * _S6, -0.25f * _S4 + _S5 - _S7);\n}\n\nfn clip_to_aabb_0( aabb_min_0 : vec3<f32>,  aabb_max_0 : vec3<f32>,  q_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S8 : vec3<f32> = vec3<f32>(0.5f);\n    var center_0 : vec3<f32> = _S8 * (aabb_max_0 + aabb_min_0);\n    var v_0 : vec3<f32> = q_0 - center_0;\n    var t_0 : vec3<f32> = abs(v_0 / (_S8 * (aabb_max_0 - aabb_min_0) + vec3<f32>(9.99999997475242708e-07f)));\n    var _S9 : f32 = max(t_0.x, max(t_0.y, t_0.z));\n    if(_S9 > 1.0f)\n    {\n        return center_0 + v_0 / vec3<f32>(_S9);\n    }\n    return q_0;\n}\n\nfn ycocg_to_rgb_0( c_2 : vec3<f32>) -> vec3<f32>\n{\n    var _S10 : f32 = c_2.x;\n    var _S11 : f32 = c_2.y;\n    var _S12 : f32 = c_2.z;\n    return vec3<f32>(_S10 + _S11 - _S12, _S10 + _S12, _S10 - _S11 - _S12);\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_3 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S13 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texel_0 : vec2<f32> = TaaUniforms_0.params_0.zw;\n    var current_0 : vec3<f32> = (textureSample((scene_color_0), (nearest_sampler_0), (_S13.uv_3))).xyz;\n    var cam_uv_0 : vec2<f32>;\n    var prev_uv_0 : vec2<f32>;\n    if(((textureSample((gbuffer_albedo_0), (nearest_sampler_0), (_S13.uv_3))).w) < 0.0078125f)\n    {\n        var prev_uv_1 : vec2<f32> = project_uv_0(mat4x4<f32>(mat4x4<f32>(TaaUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(0)], TaaUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(0)], TaaUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(0)], TaaUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(0)], TaaUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(1)], TaaUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(1)], TaaUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(1)], TaaUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(1)], TaaUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(2)], TaaUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(2)], TaaUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(2)], TaaUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(2)], TaaUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(3)], TaaUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(3)], TaaUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(3)], TaaUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(3)])), far_plane_world_0(mat4x4<f32>(mat4x4<f32>(TaaUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(0)], TaaUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(0)], TaaUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(0)], TaaUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(0)], TaaUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(1)], TaaUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(1)], TaaUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(1)], TaaUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(1)], TaaUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(2)], TaaUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(2)], TaaUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(2)], TaaUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(2)], TaaUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(3)], TaaUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(3)], TaaUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(3)], TaaUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(3)])), _S13.uv_3));\n        cam_uv_0 = prev_uv_1;\n        prev_uv_0 = prev_uv_1;\n    }\n    else\n    {\n        var _S14 : vec2<f32> = reproject_prev_uv_0(_S13.uv_3, (textureSample((gbuffer_velocity_0), (nearest_sampler_0), (_S13.uv_3))).xy);\n        cam_uv_0 = project_uv_0(mat4x4<f32>(mat4x4<f32>(TaaUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(0)], TaaUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(0)], TaaUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(0)], TaaUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(0)], TaaUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(1)], TaaUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(1)], TaaUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(1)], TaaUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(1)], TaaUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(2)], TaaUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(2)], TaaUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(2)], TaaUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(2)], TaaUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(3)], TaaUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(3)], TaaUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(3)], TaaUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(3)])), (textureSample((gbuffer_position_0), (nearest_sampler_0), (_S13.uv_3))).xyz);\n        prev_uv_0 = _S14;\n    }\n    var blend_0 : f32 = mix(TaaUniforms_0.params_0.x, 0.5f, saturate(length((_S13.uv_3 - cam_uv_0) / texel_0) * 0.05000000074505806f));\n    var _S15 : vec3<f32> = vec3<f32>(0.0f);\n    var dy_0 : i32 = i32(-1);\n    var mean_0 : vec3<f32> = _S15;\n    var mean_sq_0 : vec3<f32> = _S15;\n    for(;;)\n    {\n        if(dy_0 <= i32(1))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var dx_0 : i32 = i32(-1);\n        for(;;)\n        {\n            if(dx_0 <= i32(1))\n            {\n            }\n            else\n            {\n                break;\n            }\n            var s_0 : vec3<f32> = rgb_to_ycocg_0((textureSample((scene_color_0), (nearest_sampler_0), (_S13.uv_3 + vec2<f32>(f32(dx_0), f32(dy_0)) * texel_0))).xyz);\n            var mean_1 : vec3<f32> = mean_0 + s_0;\n            var mean_sq_1 : vec3<f32> = mean_sq_0 + s_0 * s_0;\n            dx_0 = dx_0 + i32(1);\n            mean_0 = mean_1;\n            mean_sq_0 = mean_sq_1;\n        }\n        dy_0 = dy_0 + i32(1);\n    }\n    var _S16 : vec3<f32> = vec3<f32>(9.0f);\n    var mean_2 : vec3<f32> = mean_0 / _S16;\n    var sigma_0 : vec3<f32> = sqrt(max(mean_sq_0 / _S16 - mean_2 * mean_2, _S15));\n    var aabb_min_1 : vec3<f32> = mean_2 - sigma_0;\n    var aabb_max_1 : vec3<f32> = mean_2 + sigma_0;\n    var on_screen_0 : bool;\n    if((all((prev_uv_0 >= vec2<f32>(0.0f)))))\n    {\n        on_screen_0 = (all((prev_uv_0 <= vec2<f32>(1.0f))));\n    }\n    else\n    {\n        on_screen_0 = false;\n    }\n    if((TaaUniforms_0.params_0.y) < 0.5f)\n    {\n        on_screen_0 = true;\n    }\n    else\n    {\n        on_screen_0 = !on_screen_0;\n    }\n    if(on_screen_0)\n    {\n        var _S17 : pixelOutput_0 = pixelOutput_0( vec4<f32>(current_0, 1.0f) );\n        return _S17;\n    }\n    var history_color_0 : vec3<f32> = (textureSample((history_0), (linear_sampler_0), (prev_uv_0))).xyz;\n    var history_color_1 : vec3<f32>;\n    if((any((isnan_1(history_color_0)))))\n    {\n        history_color_1 = current_0;\n    }\n    else\n    {\n        history_color_1 = history_color_0;\n    }\n    var _S18 : pixelOutput_0 = pixelOutput_0( vec4<f32>(mix(ycocg_to_rgb_0(clip_to_aabb_0(aabb_min_1, aabb_max_1, rgb_to_ycocg_0(history_color_1))), current_0, vec3<f32>(blend_0)), 1.0f) );\n    return _S18;\n}\n\n",
     ),
     (
+        0xc97b5be8cd9a483c,
+        "struct SLANG_ParameterGroup_BloomUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> BloomUniforms_0 : SLANG_ParameterGroup_BloomUniforms_std140_0;\n@binding(1) @group(0) var source_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var linear_sampler_0 : sampler;\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var t_0 : vec2<f32> = BloomUniforms_0.params_0.xy;\n    var _S2 : vec3<f32> = vec3<f32>(2.0f);\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(((textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, -1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, -1.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(1.0f, -1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, 0.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, 0.0f)))).xyz * vec3<f32>(4.0f) + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(1.0f, 0.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, 1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, 1.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0))).xyz) * vec3<f32>(0.0625f), 0.5f) );\n    return _S3;\n}\n\n",
+    ),
+    (
+        0xcd423f0cb0fd8973,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
         0xda322d2dbf33dcba,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n    @location(0) world_normal_0 : vec3<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_normal_0 = (((vec4<f32>(_S1.normal_0, 0.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)]))))).xyz;\n    return output_0;\n}\n\n",
     ),
     (
+        0xdc14287a4231fc6b,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
+        0xdfc0946ea55558ac,
+        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
+    ),
+    (
         0xe2584ce62daf47d9,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n    @location(0) world_normal_0 : vec3<f32>,\n    @location(1) uv_0 : vec2<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n    @location(2) uv_1 : vec2<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_normal_0 = (((vec4<f32>(_S1.normal_0, 0.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)]))))).xyz;\n    output_0.uv_0 = _S1.uv_1;\n    return output_0;\n}\n\n",
+    ),
+    (
+        0xe85dfd33cdcd6c92,
+        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\n@binding(3) @group(0) var bloom_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var bloom_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\n@binding(5) @group(0) var<storage, read> auto_exposure_0 : array<f32>;\n\nfn tonemap_pbr_neutral_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    var _S1 : f32 = min(color_0.x, min(color_0.y, color_0.z));\n    var offset_0 : f32;\n    if(_S1 < 0.07999999821186066f)\n    {\n        offset_0 = _S1 - 6.25f * _S1 * _S1;\n    }\n    else\n    {\n        offset_0 = 0.03999999910593033f;\n    }\n    var _S2 : vec3<f32> = color_0 - vec3<f32>(offset_0);\n    var _S3 : f32 = max(_S2.x, max(_S2.y, _S2.z));\n    if(_S3 < 0.75999999046325684f)\n    {\n        return _S2;\n    }\n    var new_peak_0 : f32 = 1.0f - 0.0576000027358532f / (_S3 + 0.24000000953674316f - 0.75999999046325684f);\n    return mix(_S2 * vec3<f32>((new_peak_0 / _S3)), vec3<f32>(new_peak_0), vec3<f32>((1.0f - 1.0f / (0.15000000596046448f * (_S3 - new_peak_0) + 1.0f))));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S4 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_pbr_neutral_0(mix((textureSample((scene_color_0), (scene_sampler_0), (_S4.uv_0))).xyz, (textureSample((bloom_0), (bloom_sampler_0), (_S4.uv_0))).xyz, vec3<f32>(DisplayOutputUniforms_0.exposure_0.y)) * vec3<f32>((DisplayOutputUniforms_0.exposure_0.x * auto_exposure_0[i32(0)]))), 1.0f) );\n    return _S5;\n}\n\n",
     ),
     (
         0xeb0347465565078a,
@@ -204,16 +256,8 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "@binding(1) @group(0) var gbuffer_albedo_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var nearest_sampler_0 : sampler;\n\nstruct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_VelocityCompleteUniforms_std140_0\n{\n    @align(16) inv_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) prev_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> VelocityCompleteUniforms_0 : SLANG_ParameterGroup_VelocityCompleteUniforms_std140_0;\nfn uv_to_ndc_0( uv_0 : vec2<f32>) -> vec2<f32>\n{\n    return (uv_0 - vec2<f32>(0.5f)) * vec2<f32>(2.0f, -2.0f);\n}\n\nfn far_plane_world_0( inv_view_proj_1 : mat4x4<f32>,  uv_1 : vec2<f32>) -> vec3<f32>\n{\n    var w_0 : vec4<f32> = (((vec4<f32>(uv_to_ndc_0(uv_1), 0.0f, 1.0f)) * (inv_view_proj_1)));\n    return w_0.xyz / vec3<f32>(w_0.w);\n}\n\nfn project_ndc_0( view_proj_0 : mat4x4<f32>,  world_pos_0 : vec3<f32>) -> vec2<f32>\n{\n    var c_0 : vec4<f32> = (((vec4<f32>(world_pos_0, 1.0f)) * (view_proj_0)));\n    return c_0.xy / vec2<f32>(max(c_0.w, 9.99999997475242708e-07f));\n}\n\nfn camera_velocity_ndc_0( prev_view_proj_1 : mat4x4<f32>,  curr_ndc_0 : vec2<f32>,  world_pos_1 : vec3<f32>) -> vec2<f32>\n{\n    return curr_ndc_0 - project_ndc_0(prev_view_proj_1, world_pos_1);\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec2<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_2 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    if(((textureSample((gbuffer_albedo_0), (nearest_sampler_0), (_S1.uv_2))).w) >= 0.0078125f)\n    {\n        discard;\n    }\n    var _S2 : pixelOutput_0 = pixelOutput_0( camera_velocity_ndc_0(mat4x4<f32>(mat4x4<f32>(VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(0)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(0)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(0)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(0)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(1)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(1)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(1)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(1)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(2)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(2)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(2)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(2)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(0)][i32(3)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(1)][i32(3)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(2)][i32(3)], VelocityCompleteUniforms_0.prev_view_proj_0.data_0[i32(3)][i32(3)])), uv_to_ndc_0(_S1.uv_2), far_plane_world_0(mat4x4<f32>(mat4x4<f32>(VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(0)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(0)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(0)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(0)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(1)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(1)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(1)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(1)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(2)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(2)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(2)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(2)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(3)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(3)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(3)], VelocityCompleteUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(3)])), _S1.uv_2)) );\n    return _S2;\n}\n\n",
     ),
     (
-        0xf30a5e0b21563ba2,
-        "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
-    ),
-    (
         0xf4aa7b8fc915c3bb,
         "struct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var positions_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(-1.0f, -1.0f), vec2<f32>(3.0f, -1.0f), vec2<f32>(-1.0f, 3.0f) );\n    var uvs_0 : array<vec2<f32>, i32(3)> = array<vec2<f32>, i32(3)>( vec2<f32>(0.0f, 1.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(0.0f, -1.0f) );\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(positions_0[vertex_id_0], 0.0f, 1.0f);\n    output_0.uv_0 = uvs_0[vertex_id_0];\n    return output_0;\n}\n\n",
-    ),
-    (
-        0xfc5fd4807a2b6b9b,
-        "@binding(1) @group(0) var scene_color_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var scene_sampler_0 : sampler;\n\nstruct SLANG_ParameterGroup_DisplayOutputUniforms_std140_0\n{\n    @align(16) exposure_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> DisplayOutputUniforms_0 : SLANG_ParameterGroup_DisplayOutputUniforms_std140_0;\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(clamp((textureSample((scene_color_0), (scene_sampler_0), (_S1.uv_0))).xyz * vec3<f32>(DisplayOutputUniforms_0.exposure_0.x), vec3<f32>(0.0f), vec3<f32>(10.0f)), 1.0f) );\n    return _S2;\n}\n\n",
     ),
 ];
 
@@ -223,6 +267,7 @@ pub static BAKED_SPIRV: &[(u64, &[u8])] = &[
     (0x54f9997540610987, b"\x03\x02#\x07\x00\x05\x01\x00\x00\x00(\x00\x89\x00\x00\x00\x00\x00\x00\x00\x11\x00\x02\x00\xa3\x14\x00\x00\x11\x00\x02\x00\x01\x00\x00\x00\x0a\x00\x0b\x00SPV_KHR_storage_buffer_storage_class\x00\x00\x00\x00\x0a\x00\x06\x00SPV_EXT_mesh_shader\x00\x0b\x00\x06\x00\x01\x00\x00\x00GLSL.std.450\x00\x00\x00\x00\x0e\x00\x03\x00\x00\x00\x00\x00\x01\x00\x00\x00\x0f\x00\x0c\x00\xf4\x14\x00\x00\x02\x00\x00\x00main\x00\x00\x00\x00\x03\x00\x00\x00\x04\x00\x00\x00\x05\x00\x00\x00\x06\x00\x00\x00\x07\x00\x00\x00\x08\x00\x00\x00\x09\x00\x00\x00\x10\x00\x06\x00\x02\x00\x00\x00\x11\x00\x00\x00 \x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x03\x00\x03\x00\x0b\x00\x00\x00\x01\x00\x00\x00\x05\x00\x07\x00\x03\x00\x00\x00s_survivor_count\x00\x00\x00\x00\x05\x00\x04\x00\x0a\x00\x00\x00Payload\x00\x06\x00\x07\x00\x0a\x00\x00\x00\x00\x00\x00\x00instance_index\x00\x00\x06\x00\x07\x00\x0a\x00\x00\x00\x01\x00\x00\x00meshlet_indices\x00\x05\x00\x05\x00\x04\x00\x00\x00s_payload\x00\x00\x00\x05\x00\x06\x00\x0b\x00\x00\x00meshlet_index\x00\x00\x00\x05\x00\x0a\x00\x0c\x00\x00\x00_Array_std140_vector<float,4>6\x00\x00\x06\x00\x05\x00\x0c\x00\x00\x00\x00\x00\x00\x00data\x00\x00\x00\x00\x05\x00\x0d\x00\x0d\x00\x00\x00SLANG_ParameterGroup_SceneUniforms_std140\x00\x00\x00\x06\x00\x06\x00\x0d\x00\x00\x00\x00\x00\x00\x00view_proj\x00\x00\x00\x06\x00\x06\x00\x0d\x00\x00\x00\x01\x00\x00\x00cull_planes\x00\x06\x00\x07\x00\x0d\x00\x00\x00\x02\x00\x00\x00cull_camera_pos\x00\x06\x00\x06\x00\x0d\x00\x00\x00\x03\x00\x00\x00light_dir\x00\x00\x00\x06\x00\x07\x00\x0d\x00\x00\x00\x04\x00\x00\x00meshlet_count\x00\x00\x00\x06\x00\x07\x00\x0d\x00\x00\x00\x05\x00\x00\x00instance_count\x00\x00\x06\x00\x05\x00\x0d\x00\x00\x00\x06\x00\x00\x00_pad0\x00\x00\x00\x06\x00\x05\x00\x0d\x00\x00\x00\x07\x00\x00\x00_pad1\x00\x00\x00\x05\x00\x06\x00\x05\x00\x00\x00SceneUniforms\x00\x00\x00\x05\x00\x07\x00\x0e\x00\x00\x00InstanceData_std430\x00\x06\x00\x07\x00\x0e\x00\x00\x00\x00\x00\x00\x00position_scale\x00\x00\x06\x00\x05\x00\x0e\x00\x00\x00\x01\x00\x00\x00color\x00\x00\x00\x05\x00\x07\x00\x0f\x00\x00\x00StructuredBuffer\x00\x00\x00\x00\x06\x00\x06\x00\x0f\x00\x00\x00\x00\x00\x00\x00__member0\x00\x00\x00\x05\x00\x05\x00\x06\x00\x00\x00instances\x00\x00\x00\x05\x00\x06\x00\x10\x00\x00\x00Meshlet_std430\x00\x00\x06\x00\x07\x00\x10\x00\x00\x00\x00\x00\x00\x00vertex_offset\x00\x00\x00\x06\x00\x07\x00\x10\x00\x00\x00\x01\x00\x00\x00vertex_count\x00\x00\x00\x00\x06\x00\x07\x00\x10\x00\x00\x00\x02\x00\x00\x00triangle_offset\x00\x06\x00\x07\x00\x10\x00\x00\x00\x03\x00\x00\x00triangle_count\x00\x00\x06\x00\x05\x00\x10\x00\x00\x00\x04\x00\x00\x00sphere\x00\x00\x06\x00\x05\x00\x10\x00\x00\x00\x05\x00\x00\x00cone\x00\x00\x00\x00\x05\x00\x07\x00\x11\x00\x00\x00StructuredBuffer\x00\x00\x00\x00\x06\x00\x06\x00\x11\x00\x00\x00\x00\x00\x00\x00__member0\x00\x00\x00\x05\x00\x05\x00\x07\x00\x00\x00meshlets\x00\x00\x00\x00\x05\x00\x04\x00\x12\x00\x00\x00slot\x00\x00\x00\x00\x05\x00\x04\x00\x02\x00\x00\x00ts_main\x00G\x00\x04\x00\x08\x00\x00\x00\x0b\x00\x00\x00\x1d\x00\x00\x00G\x00\x04\x00\x09\x00\x00\x00\x0b\x00\x00\x00\x1a\x00\x00\x00G\x00\x04\x00\x13\x00\x00\x00\x06\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x0c\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x0d\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x04\x00\x0d\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x00\x00\x00\x00\x07\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00@\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x02\x00\x00\x00#\x00\x00\x00\xa0\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x03\x00\x00\x00#\x00\x00\x00\xb0\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x04\x00\x00\x00#\x00\x00\x00\xc0\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x05\x00\x00\x00#\x00\x00\x00\xc4\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x06\x00\x00\x00#\x00\x00\x00\xc8\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x07\x00\x00\x00#\x00\x00\x00\xcc\x00\x00\x00G\x00\x04\x00\x05\x00\x00\x00!\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x05\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00H\x00\x05\x00\x0e\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x05\x00\x0e\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00\x10\x00\x00\x00G\x00\x04\x00\x14\x00\x00\x00\x06\x00\x00\x00 \x00\x00\x00G\x00\x04\x00\x15\x00\x00\x00\x06\x00\x00\x00 \x00\x00\x00G\x00\x03\x00\x0f\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x0f\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x06\x00\x00\x00!\x00\x00\x00\x05\x00\x00\x00G\x00\x04\x00\x06\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x06\x00\x00\x00\x18\x00\x00\x00H\x00\x05\x00\x10\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x05\x00\x10\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00\x04\x00\x00\x00H\x00\x05\x00\x10\x00\x00\x00\x02\x00\x00\x00#\x00\x00\x00\x08\x00\x00\x00H\x00\x05\x00\x10\x00\x00\x00\x03\x00\x00\x00#\x00\x00\x00\x0c\x00\x00\x00H\x00\x05\x00\x10\x00\x00\x00\x04\x00\x00\x00#\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x10\x00\x00\x00\x05\x00\x00\x00#\x00\x00\x00 \x00\x00\x00G\x00\x04\x00\x16\x00\x00\x00\x06\x00\x00\x000\x00\x00\x00G\x00\x04\x00\x17\x00\x00\x00\x06\x00\x00\x000\x00\x00\x00G\x00\x03\x00\x11\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x11\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x07\x00\x00\x00!\x00\x00\x00\x04\x00\x00\x00G\x00\x04\x00\x07\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x07\x00\x00\x00\x18\x00\x00\x00\x13\x00\x02\x00\x18\x00\x00\x00!\x00\x03\x00\x19\x00\x00\x00\x18\x00\x00\x00\x16\x00\x03\x00\x1a\x00\x00\x00 \x00\x00\x00\x17\x00\x04\x00\x1b\x00\x00\x00\x1a\x00\x00\x00\x04\x00\x00\x00\x15\x00\x04\x00\x1c\x00\x00\x00 \x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00\x1d\x00\x00\x00\x01\x00\x00\x00\x1c\x00\x00\x00\x14\x00\x02\x00\x1e\x00\x00\x00+\x00\x04\x00\x1c\x00\x00\x00\x1f\x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00 \x00\x00\x00\x04\x00\x00\x00\x1c\x00\x00\x00\x15\x00\x04\x00!\x00\x00\x00 \x00\x00\x00\x01\x00\x00\x00+\x00\x04\x00!\x00\x00\x00\"\x00\x00\x00 \x00\x00\x00\x1c\x00\x04\x00#\x00\x00\x00\x1c\x00\x00\x00\"\x00\x00\x00\x1e\x00\x04\x00\x0a\x00\x00\x00\x1c\x00\x00\x00#\x00\x00\x00 \x00\x04\x00$\x00\x00\x00\x1a\x15\x00\x00\x0a\x00\x00\x00+\x00\x04\x00!\x00\x00\x00%\x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00&\x00\x00\x00\x1a\x15\x00\x00\x1c\x00\x00\x00\x17\x00\x04\x00'\x00\x00\x00\x1c\x00\x00\x00\x03\x00\x00\x00 \x00\x04\x00(\x00\x00\x00\x01\x00\x00\x00'\x00\x00\x00+\x00\x04\x00\x1c\x00\x00\x00)\x00\x00\x00\x02\x00\x00\x00+\x00\x04\x00\x1c\x00\x00\x00*\x00\x00\x00\x08\x01\x00\x00+\x00\x04\x00\x1c\x00\x00\x00+\x00\x00\x00 \x00\x00\x00\x18\x00\x04\x00,\x00\x00\x00\x1b\x00\x00\x00\x04\x00\x00\x00+\x00\x04\x00!\x00\x00\x00-\x00\x00\x00\x06\x00\x00\x00\x1c\x00\x04\x00\x13\x00\x00\x00\x1b\x00\x00\x00-\x00\x00\x00\x1e\x00\x03\x00\x0c\x00\x00\x00\x13\x00\x00\x00\x1e\x00\x0a\x00\x0d\x00\x00\x00,\x00\x00\x00\x0c\x00\x00\x00\x1b\x00\x00\x00\x1b\x00\x00\x00\x1c\x00\x00\x00\x1c\x00\x00\x00\x1c\x00\x00\x00\x1c\x00\x00\x00 \x00\x04\x00.\x00\x00\x00\x02\x00\x00\x00\x0d\x00\x00\x00+\x00\x04\x00!\x00\x00\x00/\x00\x00\x00\x04\x00\x00\x00 \x00\x04\x000\x00\x00\x00\x02\x00\x00\x00\x1c\x00\x00\x00\x1e\x00\x04\x00\x0e\x00\x00\x00\x1b\x00\x00\x00\x1b\x00\x00\x00 \x00\x04\x00\x14\x00\x00\x00\x0c\x00\x00\x00\x0e\x00\x00\x00\x1d\x00\x03\x00\x15\x00\x00\x00\x0e\x00\x00\x00\x1e\x00\x03\x00\x0f\x00\x00\x00\x15\x00\x00\x00 \x00\x04\x001\x00\x00\x00\x0c\x00\x00\x00\x0f\x00\x00\x00\x1e\x00\x08\x00\x10\x00\x00\x00\x1c\x00\x00\x00\x1c\x00\x00\x00\x1c\x00\x00\x00\x1c\x00\x00\x00\x1b\x00\x00\x00\x1b\x00\x00\x00 \x00\x04\x00\x16\x00\x00\x00\x0c\x00\x00\x00\x10\x00\x00\x00\x1d\x00\x03\x00\x17\x00\x00\x00\x10\x00\x00\x00\x1e\x00\x03\x00\x11\x00\x00\x00\x17\x00\x00\x00 \x00\x04\x002\x00\x00\x00\x0c\x00\x00\x00\x11\x00\x00\x00\x17\x00\x04\x003\x00\x00\x00\x1a\x00\x00\x00\x03\x00\x00\x00+\x00\x04\x00\x1c\x00\x00\x004\x00\x00\x00\x06\x00\x00\x00+\x00\x04\x00!\x00\x00\x005\x00\x00\x00\x01\x00\x00\x00 \x00\x04\x006\x00\x00\x00\x02\x00\x00\x00\x1b\x00\x00\x00*\x00\x03\x00\x1e\x00\x00\x007\x00\x00\x00+\x00\x04\x00\x1c\x00\x00\x008\x00\x00\x00\x01\x00\x00\x00+\x00\x04\x00!\x00\x00\x009\x00\x00\x00\x02\x00\x00\x00)\x00\x03\x00\x1e\x00\x00\x00:\x00\x00\x00;\x00\x04\x00\x1d\x00\x00\x00\x08\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00 \x00\x00\x00\x03\x00\x00\x00\x04\x00\x00\x00;\x00\x04\x00$\x00\x00\x00\x04\x00\x00\x00\x1a\x15\x00\x00;\x00\x04\x00(\x00\x00\x00\x09\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00.\x00\x00\x00\x05\x00\x00\x00\x02\x00\x00\x00;\x00\x04\x001\x00\x00\x00\x06\x00\x00\x00\x0c\x00\x00\x00;\x00\x04\x002\x00\x00\x00\x07\x00\x00\x00\x0c\x00\x00\x00\x01\x00\x03\x00\x1e\x00\x00\x00;\x00\x00\x00 \x00\x04\x00<\x00\x00\x00\x0c\x00\x00\x00\x1b\x00\x00\x00+\x00\x04\x00\x1c\x00\x00\x00=\x00\x00\x00\x04\x00\x00\x00+\x00\x04\x00\x1c\x00\x00\x00>\x00\x00\x00\x05\x00\x00\x006\x00\x05\x00\x18\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x19\x00\x00\x00\xf8\x00\x02\x00?\x00\x00\x00=\x00\x04\x00\x1c\x00\x00\x00@\x00\x00\x00\x08\x00\x00\x00\xaa\x00\x05\x00\x1e\x00\x00\x00A\x00\x00\x00@\x00\x00\x00\x1f\x00\x00\x00\xf7\x00\x03\x00B\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00A\x00\x00\x00C\x00\x00\x00B\x00\x00\x00\xf8\x00\x02\x00C\x00\x00\x00>\x00\x03\x00\x03\x00\x00\x00\x1f\x00\x00\x00A\x00\x05\x00&\x00\x00\x00D\x00\x00\x00\x04\x00\x00\x00%\x00\x00\x00=\x00\x04\x00'\x00\x00\x00E\x00\x00\x00\x09\x00\x00\x00Q\x00\x05\x00\x1c\x00\x00\x00F\x00\x00\x00E\x00\x00\x00\x01\x00\x00\x00>\x00\x03\x00D\x00\x00\x00F\x00\x00\x00\xf9\x00\x02\x00B\x00\x00\x00\xf8\x00\x02\x00B\x00\x00\x00\xe0\x00\x04\x00)\x00\x00\x00)\x00\x00\x00*\x00\x00\x00=\x00\x04\x00'\x00\x00\x00G\x00\x00\x00\x09\x00\x00\x00Q\x00\x05\x00\x1c\x00\x00\x00H\x00\x00\x00G\x00\x00\x00\x00\x00\x00\x00\x84\x00\x05\x00\x1c\x00\x00\x00I\x00\x00\x00H\x00\x00\x00+\x00\x00\x00\x80\x00\x05\x00\x1c\x00\x00\x00\x0b\x00\x00\x00I\x00\x00\x00@\x00\x00\x00A\x00\x05\x000\x00\x00\x00J\x00\x00\x00\x05\x00\x00\x00/\x00\x00\x00=\x00\x04\x00\x1c\x00\x00\x00K\x00\x00\x00J\x00\x00\x00\xb0\x00\x05\x00\x1e\x00\x00\x00L\x00\x00\x00\x0b\x00\x00\x00K\x00\x00\x00\xf7\x00\x03\x00M\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00L\x00\x00\x00N\x00\x00\x00M\x00\x00\x00\xf8\x00\x02\x00N\x00\x00\x00Q\x00\x05\x00\x1c\x00\x00\x00O\x00\x00\x00G\x00\x00\x00\x01\x00\x00\x00A\x00\x06\x00\x14\x00\x00\x00P\x00\x00\x00\x06\x00\x00\x00%\x00\x00\x00O\x00\x00\x00A\x00\x05\x00<\x00\x00\x00Q\x00\x00\x00P\x00\x00\x00\x1f\x00\x00\x00=\x00\x04\x00\x1b\x00\x00\x00R\x00\x00\x00Q\x00\x00\x00A\x00\x06\x00\x16\x00\x00\x00S\x00\x00\x00\x07\x00\x00\x00%\x00\x00\x00\x0b\x00\x00\x00A\x00\x05\x00<\x00\x00\x00T\x00\x00\x00S\x00\x00\x00=\x00\x00\x00=\x00\x04\x00\x1b\x00\x00\x00U\x00\x00\x00T\x00\x00\x00A\x00\x05\x00<\x00\x00\x00V\x00\x00\x00S\x00\x00\x00>\x00\x00\x00=\x00\x04\x00\x1b\x00\x00\x00W\x00\x00\x00V\x00\x00\x00\xf7\x00\x03\x00X\x00\x00\x00\x00\x00\x00\x00\xfb\x00\x03\x00\x1f\x00\x00\x00Y\x00\x00\x00\xf8\x00\x02\x00Y\x00\x00\x00Q\x00\x05\x00\x1a\x00\x00\x00Z\x00\x00\x00R\x00\x00\x00\x03\x00\x00\x00O\x00\x08\x003\x00\x00\x00[\x00\x00\x00U\x00\x00\x00U\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x8e\x00\x05\x003\x00\x00\x00\\\x00\x00\x00[\x00\x00\x00Z\x00\x00\x00O\x00\x08\x003\x00\x00\x00]\x00\x00\x00R\x00\x00\x00R\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x81\x00\x05\x003\x00\x00\x00^\x00\x00\x00\\\x00\x00\x00]\x00\x00\x00Q\x00\x05\x00\x1a\x00\x00\x00_\x00\x00\x00U\x00\x00\x00\x03\x00\x00\x00\x85\x00\x05\x00\x1a\x00\x00\x00`\x00\x00\x00_\x00\x00\x00Z\x00\x00\x00\xf9\x00\x02\x00a\x00\x00\x00\xf8\x00\x02\x00a\x00\x00\x00\xf5\x00\x07\x00\x1c\x00\x00\x00b\x00\x00\x00\x1f\x00\x00\x00Y\x00\x00\x00c\x00\x00\x00d\x00\x00\x00\xf6\x00\x04\x00e\x00\x00\x00d\x00\x00\x00\x00\x00\x00\x00\xf9\x00\x02\x00f\x00\x00\x00\xf8\x00\x02\x00f\x00\x00\x00\xb0\x00\x05\x00\x1e\x00\x00\x00g\x00\x00\x00b\x00\x00\x004\x00\x00\x00\xf7\x00\x03\x00h\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00g\x00\x00\x00h\x00\x00\x00i\x00\x00\x00\xf8\x00\x02\x00i\x00\x00\x00\xf9\x00\x02\x00e\x00\x00\x00\xf8\x00\x02\x00h\x00\x00\x00A\x00\x07\x006\x00\x00\x00j\x00\x00\x00\x05\x00\x00\x005\x00\x00\x00%\x00\x00\x00b\x00\x00\x00=\x00\x04\x00\x1b\x00\x00\x00k\x00\x00\x00j\x00\x00\x00O\x00\x08\x003\x00\x00\x00l\x00\x00\x00k\x00\x00\x00k\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x94\x00\x05\x00\x1a\x00\x00\x00m\x00\x00\x00l\x00\x00\x00^\x00\x00\x00Q\x00\x05\x00\x1a\x00\x00\x00n\x00\x00\x00k\x00\x00\x00\x03\x00\x00\x00\x81\x00\x05\x00\x1a\x00\x00\x00o\x00\x00\x00m\x00\x00\x00n\x00\x00\x00\x7f\x00\x04\x00\x1a\x00\x00\x00p\x00\x00\x00`\x00\x00\x00\xb8\x00\x05\x00\x1e\x00\x00\x00q\x00\x00\x00o\x00\x00\x00p\x00\x00\x00\xf7\x00\x03\x00r\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00q\x00\x00\x00s\x00\x00\x00r\x00\x00\x00\xf8\x00\x02\x00s\x00\x00\x00\xf9\x00\x02\x00e\x00\x00\x00\xf8\x00\x02\x00r\x00\x00\x00\x80\x00\x05\x00\x1c\x00\x00\x00c\x00\x00\x00b\x00\x00\x008\x00\x00\x00\xf9\x00\x02\x00d\x00\x00\x00\xf8\x00\x02\x00d\x00\x00\x00\xf9\x00\x02\x00a\x00\x00\x00\xf8\x00\x02\x00e\x00\x00\x00\xf5\x00\x07\x00\x1e\x00\x00\x00t\x00\x00\x00;\x00\x00\x00i\x00\x00\x007\x00\x00\x00s\x00\x00\x00\xf5\x00\x07\x00\x1e\x00\x00\x00u\x00\x00\x007\x00\x00\x00i\x00\x00\x00:\x00\x00\x00s\x00\x00\x00\xf7\x00\x03\x00v\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00u\x00\x00\x00X\x00\x00\x00v\x00\x00\x00\xf8\x00\x02\x00v\x00\x00\x00A\x00\x05\x006\x00\x00\x00w\x00\x00\x00\x05\x00\x00\x009\x00\x00\x00=\x00\x04\x00\x1b\x00\x00\x00x\x00\x00\x00w\x00\x00\x00O\x00\x08\x003\x00\x00\x00y\x00\x00\x00x\x00\x00\x00x\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x83\x00\x05\x003\x00\x00\x00z\x00\x00\x00^\x00\x00\x00y\x00\x00\x00O\x00\x08\x003\x00\x00\x00{\x00\x00\x00W\x00\x00\x00W\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x94\x00\x05\x00\x1a\x00\x00\x00|\x00\x00\x00z\x00\x00\x00{\x00\x00\x00Q\x00\x05\x00\x1a\x00\x00\x00}\x00\x00\x00W\x00\x00\x00\x03\x00\x00\x00\x0c\x00\x06\x00\x1a\x00\x00\x00~\x00\x00\x00\x01\x00\x00\x00B\x00\x00\x00z\x00\x00\x00\x85\x00\x05\x00\x1a\x00\x00\x00\x7f\x00\x00\x00}\x00\x00\x00~\x00\x00\x00\x81\x00\x05\x00\x1a\x00\x00\x00\x80\x00\x00\x00\x7f\x00\x00\x00`\x00\x00\x00\xbe\x00\x05\x00\x1e\x00\x00\x00\x81\x00\x00\x00|\x00\x00\x00\x80\x00\x00\x00\xf7\x00\x03\x00\x82\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00\x81\x00\x00\x00\x83\x00\x00\x00\x82\x00\x00\x00\xf8\x00\x02\x00\x83\x00\x00\x00\xf9\x00\x02\x00X\x00\x00\x00\xf8\x00\x02\x00\x82\x00\x00\x00\xf9\x00\x02\x00X\x00\x00\x00\xf8\x00\x02\x00X\x00\x00\x00\xf5\x00\x09\x00\x1e\x00\x00\x00\x84\x00\x00\x00t\x00\x00\x00e\x00\x00\x007\x00\x00\x00\x83\x00\x00\x00:\x00\x00\x00\x82\x00\x00\x00\xf7\x00\x03\x00\x85\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00\x84\x00\x00\x00\x86\x00\x00\x00\x85\x00\x00\x00\xf8\x00\x02\x00\x86\x00\x00\x00\xea\x00\x07\x00\x1c\x00\x00\x00\x12\x00\x00\x00\x03\x00\x00\x008\x00\x00\x00\x1f\x00\x00\x008\x00\x00\x00A\x00\x06\x00&\x00\x00\x00\x87\x00\x00\x00\x04\x00\x00\x005\x00\x00\x00\x12\x00\x00\x00>\x00\x03\x00\x87\x00\x00\x00\x0b\x00\x00\x00\xf9\x00\x02\x00\x85\x00\x00\x00\xf8\x00\x02\x00\x85\x00\x00\x00\xf9\x00\x02\x00M\x00\x00\x00\xf8\x00\x02\x00M\x00\x00\x00\xe0\x00\x04\x00)\x00\x00\x00)\x00\x00\x00*\x00\x00\x00=\x00\x04\x00\x1c\x00\x00\x00\x88\x00\x00\x00\x03\x00\x00\x00\xae\x14\x05\x00\x88\x00\x00\x008\x00\x00\x008\x00\x00\x00\x04\x00\x00\x008\x00\x01\x00"),
     (0xa4178f564b30de43, b"\x03\x02#\x07\x00\x05\x01\x00\x00\x00(\x00(\x00\x00\x00\x00\x00\x00\x00\x11\x00\x02\x00\xb5\x14\x00\x00\x11\x00\x02\x00\xb6\x14\x00\x00\x11\x00\x02\x00\x01\x00\x00\x00\x0e\x00\x03\x00\x00\x00\x00\x00\x01\x00\x00\x00\x0f\x00\x0b\x00\x04\x00\x00\x00\x01\x00\x00\x00main\x00\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\x04\x00\x00\x00\x05\x00\x00\x00\x06\x00\x00\x00\x07\x00\x00\x00\x10\x00\x03\x00\x01\x00\x00\x00\x07\x00\x00\x00\x03\x00\x03\x00\x0b\x00\x00\x00\x01\x00\x00\x00\x05\x00\x07\x00\x06\x00\x00\x00input.texture_index\x00\x05\x00\x07\x00\x02\x00\x00\x00bindless_textures\x00\x00\x00\x05\x00\x07\x00\x07\x00\x00\x00input.sampler_index\x00\x05\x00\x07\x00\x03\x00\x00\x00bindless_samplers\x00\x00\x00\x05\x00\x05\x00\x05\x00\x00\x00input.uv\x00\x00\x00\x00\x05\x00\x06\x00\x08\x00\x00\x00sampledImage\x00\x00\x00\x00\x05\x00\x04\x00\x09\x00\x00\x00sampled\x00\x05\x00\x08\x00\x04\x00\x00\x00entryPointParam_fs_main\x00\x05\x00\x04\x00\x01\x00\x00\x00fs_main\x00G\x00\x04\x00\x06\x00\x00\x00\x1e\x00\x00\x00\x01\x00\x00\x00G\x00\x03\x00\x06\x00\x00\x00\x0e\x00\x00\x00G\x00\x03\x00\x0a\x00\x00\x00\xb4\x14\x00\x00G\x00\x04\x00\x02\x00\x00\x00!\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x02\x00\x00\x00\"\x00\x00\x00\x01\x00\x00\x00G\x00\x03\x00\x0b\x00\x00\x00\xb4\x14\x00\x00G\x00\x04\x00\x07\x00\x00\x00\x1e\x00\x00\x00\x02\x00\x00\x00G\x00\x03\x00\x07\x00\x00\x00\x0e\x00\x00\x00G\x00\x03\x00\x0c\x00\x00\x00\xb4\x14\x00\x00G\x00\x04\x00\x03\x00\x00\x00!\x00\x00\x00\x01\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00\"\x00\x00\x00\x01\x00\x00\x00G\x00\x03\x00\x0d\x00\x00\x00\xb4\x14\x00\x00G\x00\x04\x00\x05\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x04\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00\x13\x00\x02\x00\x0e\x00\x00\x00!\x00\x03\x00\x0f\x00\x00\x00\x0e\x00\x00\x00\x15\x00\x04\x00\x10\x00\x00\x00 \x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00\x11\x00\x00\x00\x01\x00\x00\x00\x10\x00\x00\x00\x16\x00\x03\x00\x12\x00\x00\x00 \x00\x00\x00\x19\x00\x09\x00\x13\x00\x00\x00\x12\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x1d\x00\x03\x00\x14\x00\x00\x00\x13\x00\x00\x00 \x00\x04\x00\x15\x00\x00\x00\x00\x00\x00\x00\x14\x00\x00\x00 \x00\x04\x00\x16\x00\x00\x00\x00\x00\x00\x00\x13\x00\x00\x00\x1a\x00\x02\x00\x17\x00\x00\x00\x1d\x00\x03\x00\x18\x00\x00\x00\x17\x00\x00\x00 \x00\x04\x00\x19\x00\x00\x00\x00\x00\x00\x00\x18\x00\x00\x00 \x00\x04\x00\x1a\x00\x00\x00\x00\x00\x00\x00\x17\x00\x00\x00\x17\x00\x04\x00\x1b\x00\x00\x00\x12\x00\x00\x00\x02\x00\x00\x00 \x00\x04\x00\x1c\x00\x00\x00\x01\x00\x00\x00\x1b\x00\x00\x00\x1b\x00\x03\x00\x1d\x00\x00\x00\x13\x00\x00\x00\x17\x00\x04\x00\x1e\x00\x00\x00\x12\x00\x00\x00\x04\x00\x00\x00\x17\x00\x04\x00\x1f\x00\x00\x00\x12\x00\x00\x00\x03\x00\x00\x00+\x00\x04\x00\x12\x00\x00\x00 \x00\x00\x00\x00\x00\x80? \x00\x04\x00!\x00\x00\x00\x03\x00\x00\x00\x1e\x00\x00\x00;\x00\x04\x00\x11\x00\x00\x00\x06\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00\x15\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00;\x00\x04\x00\x11\x00\x00\x00\x07\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00\x19\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00;\x00\x04\x00\x1c\x00\x00\x00\x05\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00!\x00\x00\x00\x04\x00\x00\x00\x03\x00\x00\x006\x00\x05\x00\x0e\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x0f\x00\x00\x00\xf8\x00\x02\x00\"\x00\x00\x00=\x00\x04\x00\x10\x00\x00\x00\x0a\x00\x00\x00\x06\x00\x00\x00A\x00\x05\x00\x16\x00\x00\x00\x0b\x00\x00\x00\x02\x00\x00\x00\x0a\x00\x00\x00=\x00\x04\x00\x10\x00\x00\x00\x0c\x00\x00\x00\x07\x00\x00\x00A\x00\x05\x00\x1a\x00\x00\x00\x0d\x00\x00\x00\x03\x00\x00\x00\x0c\x00\x00\x00=\x00\x04\x00\x1b\x00\x00\x00#\x00\x00\x00\x05\x00\x00\x00=\x00\x04\x00\x13\x00\x00\x00$\x00\x00\x00\x0b\x00\x00\x00=\x00\x04\x00\x17\x00\x00\x00%\x00\x00\x00\x0d\x00\x00\x00V\x00\x05\x00\x1d\x00\x00\x00\x08\x00\x00\x00$\x00\x00\x00%\x00\x00\x00W\x00\x06\x00\x1e\x00\x00\x00\x09\x00\x00\x00\x08\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00O\x00\x08\x00\x1f\x00\x00\x00&\x00\x00\x00\x09\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00P\x00\x05\x00\x1e\x00\x00\x00'\x00\x00\x00&\x00\x00\x00 \x00\x00\x00>\x00\x03\x00\x04\x00\x00\x00'\x00\x00\x00\xfd\x00\x01\x008\x00\x01\x00"),
     (0xba0dde239d9ffd81, b"\x03\x02#\x07\x00\x05\x01\x00\x00\x00(\x00*\x00\x00\x00\x00\x00\x00\x00\x11\x00\x02\x00\x01\x00\x00\x00\x0b\x00\x06\x00\x01\x00\x00\x00GLSL.std.450\x00\x00\x00\x00\x0e\x00\x03\x00\x00\x00\x00\x00\x01\x00\x00\x00\x0f\x00\x09\x00\x04\x00\x00\x00\x02\x00\x00\x00main\x00\x00\x00\x00\x03\x00\x00\x00\x04\x00\x00\x00\x05\x00\x00\x00\x06\x00\x00\x00\x10\x00\x03\x00\x02\x00\x00\x00\x07\x00\x00\x00\x03\x00\x03\x00\x0b\x00\x00\x00\x01\x00\x00\x00\x05\x00\x07\x00\x05\x00\x00\x00input.world_normal\x00\x00\x05\x00\x0a\x00\x07\x00\x00\x00_Array_std140_vector<float,4>6\x00\x00\x06\x00\x05\x00\x07\x00\x00\x00\x00\x00\x00\x00data\x00\x00\x00\x00\x05\x00\x0d\x00\x08\x00\x00\x00SLANG_ParameterGroup_SceneUniforms_std140\x00\x00\x00\x06\x00\x06\x00\x08\x00\x00\x00\x00\x00\x00\x00view_proj\x00\x00\x00\x06\x00\x06\x00\x08\x00\x00\x00\x01\x00\x00\x00cull_planes\x00\x06\x00\x07\x00\x08\x00\x00\x00\x02\x00\x00\x00cull_camera_pos\x00\x06\x00\x06\x00\x08\x00\x00\x00\x03\x00\x00\x00light_dir\x00\x00\x00\x06\x00\x07\x00\x08\x00\x00\x00\x04\x00\x00\x00meshlet_count\x00\x00\x00\x06\x00\x07\x00\x08\x00\x00\x00\x05\x00\x00\x00instance_count\x00\x00\x06\x00\x05\x00\x08\x00\x00\x00\x06\x00\x00\x00_pad0\x00\x00\x00\x06\x00\x05\x00\x08\x00\x00\x00\x07\x00\x00\x00_pad1\x00\x00\x00\x05\x00\x06\x00\x03\x00\x00\x00SceneUniforms\x00\x00\x00\x05\x00\x05\x00\x06\x00\x00\x00input.color\x00\x05\x00\x04\x00\x09\x00\x00\x00color\x00\x00\x00\x05\x00\x08\x00\x04\x00\x00\x00entryPointParam_fs_main\x00\x05\x00\x04\x00\x02\x00\x00\x00fs_main\x00G\x00\x04\x00\x05\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x0a\x00\x00\x00\x06\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x07\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x08\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x04\x00\x08\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x00\x00\x00\x00\x07\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00@\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x02\x00\x00\x00#\x00\x00\x00\xa0\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x03\x00\x00\x00#\x00\x00\x00\xb0\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x04\x00\x00\x00#\x00\x00\x00\xc0\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x05\x00\x00\x00#\x00\x00\x00\xc4\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x06\x00\x00\x00#\x00\x00\x00\xc8\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x07\x00\x00\x00#\x00\x00\x00\xcc\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00!\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x06\x00\x00\x00\x1e\x00\x00\x00\x01\x00\x00\x00G\x00\x04\x00\x04\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00\x13\x00\x02\x00\x0b\x00\x00\x00!\x00\x03\x00\x0c\x00\x00\x00\x0b\x00\x00\x00\x16\x00\x03\x00\x0d\x00\x00\x00 \x00\x00\x00\x17\x00\x04\x00\x0e\x00\x00\x00\x0d\x00\x00\x00\x03\x00\x00\x00 \x00\x04\x00\x0f\x00\x00\x00\x01\x00\x00\x00\x0e\x00\x00\x00\x17\x00\x04\x00\x10\x00\x00\x00\x0d\x00\x00\x00\x04\x00\x00\x00\x18\x00\x04\x00\x11\x00\x00\x00\x10\x00\x00\x00\x04\x00\x00\x00\x15\x00\x04\x00\x12\x00\x00\x00 \x00\x00\x00\x01\x00\x00\x00+\x00\x04\x00\x12\x00\x00\x00\x13\x00\x00\x00\x06\x00\x00\x00\x1c\x00\x04\x00\x0a\x00\x00\x00\x10\x00\x00\x00\x13\x00\x00\x00\x1e\x00\x03\x00\x07\x00\x00\x00\x0a\x00\x00\x00\x15\x00\x04\x00\x14\x00\x00\x00 \x00\x00\x00\x00\x00\x00\x00\x1e\x00\x0a\x00\x08\x00\x00\x00\x11\x00\x00\x00\x07\x00\x00\x00\x10\x00\x00\x00\x10\x00\x00\x00\x14\x00\x00\x00\x14\x00\x00\x00\x14\x00\x00\x00\x14\x00\x00\x00 \x00\x04\x00\x15\x00\x00\x00\x02\x00\x00\x00\x08\x00\x00\x00+\x00\x04\x00\x12\x00\x00\x00\x16\x00\x00\x00\x03\x00\x00\x00 \x00\x04\x00\x17\x00\x00\x00\x02\x00\x00\x00\x10\x00\x00\x00+\x00\x04\x00\x0d\x00\x00\x00\x18\x00\x00\x00\x00\x00\x00\x00+\x00\x04\x00\x0d\x00\x00\x00\x19\x00\x00\x00\x9a\x99Y?+\x00\x04\x00\x0d\x00\x00\x00\x1a\x00\x00\x00\x9a\x99\x19>+\x00\x04\x00\x0d\x00\x00\x00\x1b\x00\x00\x00\x00\x00\x80? \x00\x04\x00\x1c\x00\x00\x00\x03\x00\x00\x00\x10\x00\x00\x00;\x00\x04\x00\x0f\x00\x00\x00\x05\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00\x15\x00\x00\x00\x03\x00\x00\x00\x02\x00\x00\x00;\x00\x04\x00\x0f\x00\x00\x00\x06\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00\x1c\x00\x00\x00\x04\x00\x00\x00\x03\x00\x00\x006\x00\x05\x00\x0b\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x0c\x00\x00\x00\xf8\x00\x02\x00\x1d\x00\x00\x00=\x00\x04\x00\x0e\x00\x00\x00\x1e\x00\x00\x00\x05\x00\x00\x00\x0c\x00\x06\x00\x0e\x00\x00\x00\x1f\x00\x00\x00\x01\x00\x00\x00E\x00\x00\x00\x1e\x00\x00\x00A\x00\x05\x00\x17\x00\x00\x00 \x00\x00\x00\x03\x00\x00\x00\x16\x00\x00\x00=\x00\x04\x00\x10\x00\x00\x00!\x00\x00\x00 \x00\x00\x00O\x00\x08\x00\x0e\x00\x00\x00\"\x00\x00\x00!\x00\x00\x00!\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x7f\x00\x04\x00\x0e\x00\x00\x00#\x00\x00\x00\"\x00\x00\x00\x94\x00\x05\x00\x0d\x00\x00\x00$\x00\x00\x00\x1f\x00\x00\x00#\x00\x00\x00\x0c\x00\x07\x00\x0d\x00\x00\x00%\x00\x00\x00\x01\x00\x00\x00(\x00\x00\x00$\x00\x00\x00\x18\x00\x00\x00=\x00\x04\x00\x0e\x00\x00\x00&\x00\x00\x00\x06\x00\x00\x00\x85\x00\x05\x00\x0d\x00\x00\x00'\x00\x00\x00\x19\x00\x00\x00%\x00\x00\x00\x81\x00\x05\x00\x0d\x00\x00\x00(\x00\x00\x00\x1a\x00\x00\x00'\x00\x00\x00\x8e\x00\x05\x00\x0e\x00\x00\x00\x09\x00\x00\x00&\x00\x00\x00(\x00\x00\x00P\x00\x05\x00\x10\x00\x00\x00)\x00\x00\x00\x09\x00\x00\x00\x1b\x00\x00\x00>\x00\x03\x00\x04\x00\x00\x00)\x00\x00\x00\xfd\x00\x01\x008\x00\x01\x00"),
+    (0xc18bd8e38291ec41, b"\x03\x02#\x07\x00\x05\x01\x00\x00\x00(\x00b\x00\x00\x00\x00\x00\x00\x00\x11\x00\x02\x00\x01\x00\x00\x00\x0a\x00\x0b\x00SPV_KHR_storage_buffer_storage_class\x00\x00\x00\x00\x0b\x00\x06\x00\x01\x00\x00\x00GLSL.std.450\x00\x00\x00\x00\x0e\x00\x03\x00\x00\x00\x00\x00\x01\x00\x00\x00\x0f\x00\x0a\x00\x05\x00\x00\x00\x02\x00\x00\x00main\x00\x00\x00\x00\x03\x00\x00\x00\x04\x00\x00\x00\x05\x00\x00\x00\x06\x00\x00\x00\x07\x00\x00\x00\x10\x00\x06\x00\x02\x00\x00\x00\x11\x00\x00\x00\x10\x00\x00\x00\x10\x00\x00\x00\x01\x00\x00\x00\x03\x00\x03\x00\x0b\x00\x00\x00\x01\x00\x00\x00\x05\x00\x0d\x00\x08\x00\x00\x00SLANG_ParameterGroup_BuildUniforms_std140\x00\x00\x00\x06\x00\x05\x00\x08\x00\x00\x00\x00\x00\x00\x00params\x00\x00\x05\x00\x06\x00\x03\x00\x00\x00BuildUniforms\x00\x00\x00\x05\x00\x03\x00\x09\x00\x00\x00dim\x00\x05\x00\x03\x00\x0a\x00\x00\x00uv\x00\x00\x05\x00\x05\x00\x04\x00\x00\x00scene_color\x00\x05\x00\x06\x00\x05\x00\x00\x00scene_sampler\x00\x00\x00\x05\x00\x06\x00\x0b\x00\x00\x00sampledImage\x00\x00\x00\x00\x05\x00\x04\x00\x0c\x00\x00\x00sampled\x00\x05\x00\x03\x00\x0d\x00\x00\x00c\x00\x00\x00\x05\x00\x04\x00\x0e\x00\x00\x00log_min\x00\x05\x00\x04\x00\x0f\x00\x00\x00log_max\x00\x05\x00\x03\x00\x10\x00\x00\x00t\x00\x00\x00\x05\x00\x07\x00\x11\x00\x00\x00RWStructuredBuffer\x00\x00\x06\x00\x06\x00\x11\x00\x00\x00\x00\x00\x00\x00__member0\x00\x00\x00\x05\x00\x05\x00\x06\x00\x00\x00histogram\x00\x00\x00\x05\x00\x04\x00\x02\x00\x00\x00cs_main\x00G\x00\x03\x00\x08\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x08\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00!\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x07\x00\x00\x00\x0b\x00\x00\x00\x1c\x00\x00\x00G\x00\x04\x00\x04\x00\x00\x00!\x00\x00\x00\x01\x00\x00\x00G\x00\x04\x00\x04\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x05\x00\x00\x00!\x00\x00\x00\x02\x00\x00\x00G\x00\x04\x00\x05\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x12\x00\x00\x00\x06\x00\x00\x00\x04\x00\x00\x00G\x00\x04\x00\x13\x00\x00\x00\x06\x00\x00\x00\x04\x00\x00\x00G\x00\x03\x00\x11\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x11\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x06\x00\x00\x00!\x00\x00\x00\x03\x00\x00\x00G\x00\x04\x00\x06\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00\x13\x00\x02\x00\x14\x00\x00\x00!\x00\x03\x00\x15\x00\x00\x00\x14\x00\x00\x00\x14\x00\x02\x00\x16\x00\x00\x00\x16\x00\x03\x00\x17\x00\x00\x00 \x00\x00\x00\x15\x00\x04\x00\x18\x00\x00\x00 \x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\x00\x19\x00\x00\x00\x17\x00\x00\x00\x04\x00\x00\x00\x1e\x00\x03\x00\x08\x00\x00\x00\x19\x00\x00\x00 \x00\x04\x00\x1a\x00\x00\x00\x02\x00\x00\x00\x08\x00\x00\x00\x15\x00\x04\x00\x1b\x00\x00\x00 \x00\x00\x00\x01\x00\x00\x00+\x00\x04\x00\x1b\x00\x00\x00\x1c\x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00\x1d\x00\x00\x00\x02\x00\x00\x00\x19\x00\x00\x00\x17\x00\x04\x00\x1e\x00\x00\x00\x18\x00\x00\x00\x03\x00\x00\x00 \x00\x04\x00\x1f\x00\x00\x00\x01\x00\x00\x00\x1e\x00\x00\x00)\x00\x03\x00\x16\x00\x00\x00 \x00\x00\x00\x17\x00\x04\x00!\x00\x00\x00\x18\x00\x00\x00\x02\x00\x00\x00\x17\x00\x04\x00\"\x00\x00\x00\x17\x00\x00\x00\x02\x00\x00\x00+\x00\x04\x00\x17\x00\x00\x00#\x00\x00\x00\x00\x00\x00?\x19\x00\x09\x00$\x00\x00\x00\x17\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00%\x00\x00\x00\x00\x00\x00\x00$\x00\x00\x00\x1a\x00\x02\x00&\x00\x00\x00 \x00\x04\x00'\x00\x00\x00\x00\x00\x00\x00&\x00\x00\x00\x1b\x00\x03\x00(\x00\x00\x00$\x00\x00\x00+\x00\x04\x00\x17\x00\x00\x00)\x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\x00*\x00\x00\x00\x17\x00\x00\x00\x03\x00\x00\x00+\x00\x04\x00\x17\x00\x00\x00+\x00\x00\x00\xd0\xb3Y>+\x00\x04\x00\x17\x00\x00\x00,\x00\x00\x00Y\x177?+\x00\x04\x00\x17\x00\x00\x00-\x00\x00\x00\x98\xdd\x93=,\x00\x06\x00*\x00\x00\x00.\x00\x00\x00+\x00\x00\x00,\x00\x00\x00-\x00\x00\x00+\x00\x04\x00\x17\x00\x00\x00/\x00\x00\x00\x00\xe0\x7fG+\x00\x04\x00\x17\x00\x00\x000\x00\x00\x00\x17\xb7\xd18+\x00\x04\x00\x17\x00\x00\x001\x00\x00\x00\x00\x00\x80?+\x00\x04\x00\x17\x00\x00\x002\x00\x00\x00\x00\x00~C+\x00\x04\x00\x18\x00\x00\x003\x00\x00\x00\x01\x00\x00\x00+\x00\x04\x00\x18\x00\x00\x004\x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00\x12\x00\x00\x00\x0c\x00\x00\x00\x18\x00\x00\x00\x1d\x00\x03\x00\x13\x00\x00\x00\x18\x00\x00\x00\x1e\x00\x03\x00\x11\x00\x00\x00\x13\x00\x00\x00 \x00\x04\x005\x00\x00\x00\x0c\x00\x00\x00\x11\x00\x00\x00;\x00\x04\x00\x1a\x00\x00\x00\x03\x00\x00\x00\x02\x00\x00\x00;\x00\x04\x00\x1f\x00\x00\x00\x07\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00%\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00;\x00\x04\x00'\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00;\x00\x04\x005\x00\x00\x00\x06\x00\x00\x00\x0c\x00\x00\x00,\x00\x05\x00\"\x00\x00\x006\x00\x00\x00#\x00\x00\x00#\x00\x00\x006\x00\x05\x00\x14\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x15\x00\x00\x00\xf8\x00\x02\x007\x00\x00\x00\xf7\x00\x03\x008\x00\x00\x00\x00\x00\x00\x00\xfb\x00\x03\x004\x00\x00\x009\x00\x00\x00\xf8\x00\x02\x009\x00\x00\x00A\x00\x05\x00\x1d\x00\x00\x00:\x00\x00\x00\x03\x00\x00\x00\x1c\x00\x00\x00=\x00\x04\x00\x19\x00\x00\x00;\x00\x00\x00:\x00\x00\x00Q\x00\x05\x00\x17\x00\x00\x00\x09\x00\x00\x00;\x00\x00\x00\x02\x00\x00\x00=\x00\x04\x00\x1e\x00\x00\x00<\x00\x00\x00\x07\x00\x00\x00Q\x00\x05\x00\x18\x00\x00\x00=\x00\x00\x00<\x00\x00\x00\x00\x00\x00\x00p\x00\x04\x00\x17\x00\x00\x00>\x00\x00\x00=\x00\x00\x00\xbe\x00\x05\x00\x16\x00\x00\x00?\x00\x00\x00>\x00\x00\x00\x09\x00\x00\x00\xf7\x00\x03\x00@\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00?\x00\x00\x00A\x00\x00\x00B\x00\x00\x00\xf8\x00\x02\x00A\x00\x00\x00\xf9\x00\x02\x00@\x00\x00\x00\xf8\x00\x02\x00B\x00\x00\x00Q\x00\x05\x00\x18\x00\x00\x00C\x00\x00\x00<\x00\x00\x00\x01\x00\x00\x00p\x00\x04\x00\x17\x00\x00\x00D\x00\x00\x00C\x00\x00\x00\xbe\x00\x05\x00\x16\x00\x00\x00E\x00\x00\x00D\x00\x00\x00\x09\x00\x00\x00\xf9\x00\x02\x00@\x00\x00\x00\xf8\x00\x02\x00@\x00\x00\x00\xf5\x00\x07\x00\x16\x00\x00\x00F\x00\x00\x00 \x00\x00\x00A\x00\x00\x00E\x00\x00\x00B\x00\x00\x00\xf7\x00\x03\x00G\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00F\x00\x00\x00H\x00\x00\x00G\x00\x00\x00\xf8\x00\x02\x00H\x00\x00\x00\xf9\x00\x02\x008\x00\x00\x00\xf8\x00\x02\x00G\x00\x00\x00O\x00\x07\x00!\x00\x00\x00I\x00\x00\x00<\x00\x00\x00<\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00p\x00\x04\x00\"\x00\x00\x00J\x00\x00\x00I\x00\x00\x00\x81\x00\x05\x00\"\x00\x00\x00K\x00\x00\x00J\x00\x00\x006\x00\x00\x00P\x00\x05\x00\"\x00\x00\x00L\x00\x00\x00\x09\x00\x00\x00\x09\x00\x00\x00\x88\x00\x05\x00\"\x00\x00\x00\x0a\x00\x00\x00K\x00\x00\x00L\x00\x00\x00=\x00\x04\x00$\x00\x00\x00M\x00\x00\x00\x04\x00\x00\x00=\x00\x04\x00&\x00\x00\x00N\x00\x00\x00\x05\x00\x00\x00V\x00\x05\x00(\x00\x00\x00\x0b\x00\x00\x00M\x00\x00\x00N\x00\x00\x00X\x00\x07\x00\x19\x00\x00\x00\x0c\x00\x00\x00\x0b\x00\x00\x00\x0a\x00\x00\x00\x02\x00\x00\x00)\x00\x00\x00O\x00\x08\x00*\x00\x00\x00\x0d\x00\x00\x00\x0c\x00\x00\x00\x0c\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x94\x00\x05\x00\x17\x00\x00\x00O\x00\x00\x00\x0d\x00\x00\x00.\x00\x00\x00\xb7\x00\x05\x00\x16\x00\x00\x00P\x00\x00\x00O\x00\x00\x00O\x00\x00\x00\xa9\x00\x06\x00\x17\x00\x00\x00Q\x00\x00\x00P\x00\x00\x00)\x00\x00\x00O\x00\x00\x00\x0c\x00\x08\x00\x17\x00\x00\x00R\x00\x00\x00\x01\x00\x00\x00+\x00\x00\x00Q\x00\x00\x00)\x00\x00\x00/\x00\x00\x00Q\x00\x05\x00\x17\x00\x00\x00\x0e\x00\x00\x00;\x00\x00\x00\x00\x00\x00\x00Q\x00\x05\x00\x17\x00\x00\x00\x0f\x00\x00\x00;\x00\x00\x00\x01\x00\x00\x00\xba\x00\x05\x00\x16\x00\x00\x00S\x00\x00\x00R\x00\x00\x000\x00\x00\x00\xf7\x00\x03\x00T\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00S\x00\x00\x00U\x00\x00\x00V\x00\x00\x00\xf8\x00\x02\x00U\x00\x00\x00\x0c\x00\x06\x00\x17\x00\x00\x00W\x00\x00\x00\x01\x00\x00\x00\x1e\x00\x00\x00R\x00\x00\x00\x83\x00\x05\x00\x17\x00\x00\x00X\x00\x00\x00W\x00\x00\x00\x0e\x00\x00\x00\x83\x00\x05\x00\x17\x00\x00\x00Y\x00\x00\x00\x0f\x00\x00\x00\x0e\x00\x00\x00\x88\x00\x05\x00\x17\x00\x00\x00\x10\x00\x00\x00X\x00\x00\x00Y\x00\x00\x00\x0c\x00\x08\x00\x17\x00\x00\x00Z\x00\x00\x00\x01\x00\x00\x00+\x00\x00\x00\x10\x00\x00\x00)\x00\x00\x001\x00\x00\x00\x85\x00\x05\x00\x17\x00\x00\x00[\x00\x00\x00Z\x00\x00\x002\x00\x00\x00\x81\x00\x05\x00\x17\x00\x00\x00\\\x00\x00\x00[\x00\x00\x00#\x00\x00\x00m\x00\x04\x00\x18\x00\x00\x00]\x00\x00\x00\\\x00\x00\x00\x80\x00\x05\x00\x18\x00\x00\x00^\x00\x00\x003\x00\x00\x00]\x00\x00\x00\xf9\x00\x02\x00T\x00\x00\x00\xf8\x00\x02\x00V\x00\x00\x00\xf9\x00\x02\x00T\x00\x00\x00\xf8\x00\x02\x00T\x00\x00\x00\xf5\x00\x07\x00\x18\x00\x00\x00_\x00\x00\x00^\x00\x00\x00U\x00\x00\x004\x00\x00\x00V\x00\x00\x00A\x00\x06\x00\x12\x00\x00\x00`\x00\x00\x00\x06\x00\x00\x00\x1c\x00\x00\x00_\x00\x00\x00\xea\x00\x07\x00\x18\x00\x00\x00a\x00\x00\x00`\x00\x00\x003\x00\x00\x004\x00\x00\x003\x00\x00\x00\xf9\x00\x02\x008\x00\x00\x00\xf8\x00\x02\x008\x00\x00\x00\xfd\x00\x01\x008\x00\x01\x00"),
     (0xe04dc0dbaf2b11fe, b"\x03\x02#\x07\x00\x05\x01\x00\x00\x00(\x00\xa4\x00\x00\x00\x00\x00\x00\x00\x11\x00\x02\x00\xa3\x14\x00\x00\x11\x00\x02\x00\x01\x00\x00\x00\x0a\x00\x0b\x00SPV_KHR_storage_buffer_storage_class\x00\x00\x00\x00\x0a\x00\x06\x00SPV_EXT_mesh_shader\x00\x0e\x00\x03\x00\x00\x00\x00\x00\x01\x00\x00\x00\x0f\x00\x12\x00\xf5\x14\x00\x00\x01\x00\x00\x00main\x00\x00\x00\x00\x02\x00\x00\x00\x03\x00\x00\x00\x04\x00\x00\x00\x05\x00\x00\x00\x06\x00\x00\x00\x07\x00\x00\x00\x08\x00\x00\x00\x09\x00\x00\x00\x0a\x00\x00\x00\x0b\x00\x00\x00\x0c\x00\x00\x00\x0d\x00\x00\x00\x0e\x00\x00\x00\x10\x00\x04\x00\x01\x00\x00\x00\x96\x14\x00\x00|\x00\x00\x00\x10\x00\x04\x00\x01\x00\x00\x00\x1a\x00\x00\x00@\x00\x00\x00\x10\x00\x06\x00\x01\x00\x00\x00\x11\x00\x00\x00@\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x10\x00\x03\x00\x01\x00\x00\x00\xb2\x14\x00\x00\x03\x00\x03\x00\x0b\x00\x00\x00\x01\x00\x00\x00\x05\x00\x04\x00\x0f\x00\x00\x00Payload\x00\x06\x00\x07\x00\x0f\x00\x00\x00\x00\x00\x00\x00instance_index\x00\x00\x06\x00\x07\x00\x0f\x00\x00\x00\x01\x00\x00\x00meshlet_indices\x00\x05\x00\x04\x00\x0e\x00\x00\x00payload\x00\x05\x00\x06\x00\x10\x00\x00\x00meshlet_index\x00\x00\x00\x05\x00\x06\x00\x11\x00\x00\x00Meshlet_std430\x00\x00\x06\x00\x07\x00\x11\x00\x00\x00\x00\x00\x00\x00vertex_offset\x00\x00\x00\x06\x00\x07\x00\x11\x00\x00\x00\x01\x00\x00\x00vertex_count\x00\x00\x00\x00\x06\x00\x07\x00\x11\x00\x00\x00\x02\x00\x00\x00triangle_offset\x00\x06\x00\x07\x00\x11\x00\x00\x00\x03\x00\x00\x00triangle_count\x00\x00\x06\x00\x05\x00\x11\x00\x00\x00\x04\x00\x00\x00sphere\x00\x00\x06\x00\x05\x00\x11\x00\x00\x00\x05\x00\x00\x00cone\x00\x00\x00\x00\x05\x00\x07\x00\x12\x00\x00\x00StructuredBuffer\x00\x00\x00\x00\x06\x00\x06\x00\x12\x00\x00\x00\x00\x00\x00\x00__member0\x00\x00\x00\x05\x00\x05\x00\x02\x00\x00\x00meshlets\x00\x00\x00\x00\x05\x00\x07\x00\x13\x00\x00\x00InstanceData_std430\x00\x06\x00\x07\x00\x13\x00\x00\x00\x00\x00\x00\x00position_scale\x00\x00\x06\x00\x05\x00\x13\x00\x00\x00\x01\x00\x00\x00color\x00\x00\x00\x05\x00\x07\x00\x14\x00\x00\x00StructuredBuffer\x00\x00\x00\x00\x06\x00\x06\x00\x14\x00\x00\x00\x00\x00\x00\x00__member0\x00\x00\x00\x05\x00\x05\x00\x03\x00\x00\x00instances\x00\x00\x00\x05\x00\x07\x00\x15\x00\x00\x00StructuredBuffer\x00\x00\x00\x00\x06\x00\x06\x00\x15\x00\x00\x00\x00\x00\x00\x00__member0\x00\x00\x00\x05\x00\x06\x00\x04\x00\x00\x00vertex_indices\x00\x00\x05\x00\x08\x00\x16\x00\x00\x00MeshletVertex_std430\x00\x00\x00\x00\x06\x00\x06\x00\x16\x00\x00\x00\x00\x00\x00\x00position\x00\x00\x00\x00\x06\x00\x05\x00\x16\x00\x00\x00\x01\x00\x00\x00normal\x00\x00\x05\x00\x07\x00\x17\x00\x00\x00StructuredBuffer\x00\x00\x00\x00\x06\x00\x06\x00\x17\x00\x00\x00\x00\x00\x00\x00__member0\x00\x00\x00\x05\x00\x05\x00\x05\x00\x00\x00vertices\x00\x00\x00\x00\x05\x00\x05\x00\x18\x00\x00\x00world_pos\x00\x00\x00\x05\x00\x0a\x00\x19\x00\x00\x00_Array_std140_vector<float,4>6\x00\x00\x06\x00\x05\x00\x19\x00\x00\x00\x00\x00\x00\x00data\x00\x00\x00\x00\x05\x00\x0d\x00\x1a\x00\x00\x00SLANG_ParameterGroup_SceneUniforms_std140\x00\x00\x00\x06\x00\x06\x00\x1a\x00\x00\x00\x00\x00\x00\x00view_proj\x00\x00\x00\x06\x00\x06\x00\x1a\x00\x00\x00\x01\x00\x00\x00cull_planes\x00\x06\x00\x07\x00\x1a\x00\x00\x00\x02\x00\x00\x00cull_camera_pos\x00\x06\x00\x06\x00\x1a\x00\x00\x00\x03\x00\x00\x00light_dir\x00\x00\x00\x06\x00\x07\x00\x1a\x00\x00\x00\x04\x00\x00\x00meshlet_count\x00\x00\x00\x06\x00\x07\x00\x1a\x00\x00\x00\x05\x00\x00\x00instance_count\x00\x00\x06\x00\x05\x00\x1a\x00\x00\x00\x06\x00\x00\x00_pad0\x00\x00\x00\x06\x00\x05\x00\x1a\x00\x00\x00\x07\x00\x00\x00_pad1\x00\x00\x00\x05\x00\x06\x00\x06\x00\x00\x00SceneUniforms\x00\x00\x00\x05\x00\x09\x00\x0b\x00\x00\x00out_vertices.world_normal\x00\x00\x00\x05\x00\x07\x00\x0c\x00\x00\x00out_vertices.color\x00\x00\x05\x00\x05\x00\x07\x00\x00\x00triangles\x00\x00\x00\x05\x00\x03\x00\x1b\x00\x00\x00t\x00\x00\x00\x05\x00\x04\x00\x01\x00\x00\x00ms_main\x00G\x00\x04\x00\x09\x00\x00\x00\x0b\x00\x00\x00\x1a\x00\x00\x00H\x00\x05\x00\x11\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x05\x00\x11\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00\x04\x00\x00\x00H\x00\x05\x00\x11\x00\x00\x00\x02\x00\x00\x00#\x00\x00\x00\x08\x00\x00\x00H\x00\x05\x00\x11\x00\x00\x00\x03\x00\x00\x00#\x00\x00\x00\x0c\x00\x00\x00H\x00\x05\x00\x11\x00\x00\x00\x04\x00\x00\x00#\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x11\x00\x00\x00\x05\x00\x00\x00#\x00\x00\x00 \x00\x00\x00G\x00\x04\x00\x1c\x00\x00\x00\x06\x00\x00\x000\x00\x00\x00G\x00\x04\x00\x1d\x00\x00\x00\x06\x00\x00\x000\x00\x00\x00G\x00\x03\x00\x12\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x12\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x02\x00\x00\x00!\x00\x00\x00\x04\x00\x00\x00G\x00\x04\x00\x02\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x02\x00\x00\x00\x18\x00\x00\x00H\x00\x05\x00\x13\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x05\x00\x13\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00\x10\x00\x00\x00G\x00\x04\x00\x1e\x00\x00\x00\x06\x00\x00\x00 \x00\x00\x00G\x00\x04\x00\x1f\x00\x00\x00\x06\x00\x00\x00 \x00\x00\x00G\x00\x03\x00\x14\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x14\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00!\x00\x00\x00\x05\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x03\x00\x00\x00\x18\x00\x00\x00G\x00\x04\x00\x08\x00\x00\x00\x0b\x00\x00\x00\x1d\x00\x00\x00G\x00\x04\x00 \x00\x00\x00\x06\x00\x00\x00\x04\x00\x00\x00G\x00\x04\x00!\x00\x00\x00\x06\x00\x00\x00\x04\x00\x00\x00G\x00\x03\x00\x15\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x15\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x04\x00\x00\x00!\x00\x00\x00\x02\x00\x00\x00G\x00\x04\x00\x04\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x04\x00\x00\x00\x18\x00\x00\x00H\x00\x05\x00\x16\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x05\x00\x16\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00\x10\x00\x00\x00G\x00\x04\x00\"\x00\x00\x00\x06\x00\x00\x00 \x00\x00\x00G\x00\x04\x00#\x00\x00\x00\x06\x00\x00\x00 \x00\x00\x00G\x00\x03\x00\x17\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x17\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x05\x00\x00\x00!\x00\x00\x00\x01\x00\x00\x00G\x00\x04\x00\x05\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x05\x00\x00\x00\x18\x00\x00\x00G\x00\x04\x00$\x00\x00\x00\x06\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x19\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x1a\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x04\x00\x1a\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x00\x00\x00\x00\x07\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00@\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x02\x00\x00\x00#\x00\x00\x00\xa0\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x03\x00\x00\x00#\x00\x00\x00\xb0\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x04\x00\x00\x00#\x00\x00\x00\xc0\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x05\x00\x00\x00#\x00\x00\x00\xc4\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x06\x00\x00\x00#\x00\x00\x00\xc8\x00\x00\x00H\x00\x05\x00\x1a\x00\x00\x00\x07\x00\x00\x00#\x00\x00\x00\xcc\x00\x00\x00G\x00\x04\x00\x06\x00\x00\x00!\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x06\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x0a\x00\x00\x00\x0b\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x0b\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x0c\x00\x00\x00\x1e\x00\x00\x00\x01\x00\x00\x00G\x00\x04\x00\x07\x00\x00\x00!\x00\x00\x00\x03\x00\x00\x00G\x00\x04\x00\x07\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x07\x00\x00\x00\x18\x00\x00\x00G\x00\x04\x00\x0d\x00\x00\x00\x0b\x00\x00\x00\xb0\x14\x00\x00\x13\x00\x02\x00%\x00\x00\x00!\x00\x03\x00&\x00\x00\x00%\x00\x00\x00\x15\x00\x04\x00'\x00\x00\x00 \x00\x00\x00\x00\x00\x00\x00\x16\x00\x03\x00(\x00\x00\x00 \x00\x00\x00\x17\x00\x04\x00)\x00\x00\x00(\x00\x00\x00\x04\x00\x00\x00\x17\x00\x04\x00*\x00\x00\x00(\x00\x00\x00\x03\x00\x00\x00\x15\x00\x04\x00+\x00\x00\x00 \x00\x00\x00\x01\x00\x00\x00+\x00\x04\x00+\x00\x00\x00,\x00\x00\x00 \x00\x00\x00\x1c\x00\x04\x00-\x00\x00\x00'\x00\x00\x00,\x00\x00\x00\x1e\x00\x04\x00\x0f\x00\x00\x00'\x00\x00\x00-\x00\x00\x00 \x00\x04\x00.\x00\x00\x00\x1a\x15\x00\x00\x0f\x00\x00\x00+\x00\x04\x00+\x00\x00\x00/\x00\x00\x00\x01\x00\x00\x00\x17\x00\x04\x000\x00\x00\x00'\x00\x00\x00\x03\x00\x00\x00 \x00\x04\x001\x00\x00\x00\x01\x00\x00\x000\x00\x00\x00 \x00\x04\x002\x00\x00\x00\x1a\x15\x00\x00'\x00\x00\x00+\x00\x04\x00+\x00\x00\x003\x00\x00\x00\x00\x00\x00\x00\x1e\x00\x08\x00\x11\x00\x00\x00'\x00\x00\x00'\x00\x00\x00'\x00\x00\x00'\x00\x00\x00)\x00\x00\x00)\x00\x00\x00 \x00\x04\x00\x1c\x00\x00\x00\x0c\x00\x00\x00\x11\x00\x00\x00\x1d\x00\x03\x00\x1d\x00\x00\x00\x11\x00\x00\x00\x1e\x00\x03\x00\x12\x00\x00\x00\x1d\x00\x00\x00 \x00\x04\x004\x00\x00\x00\x0c\x00\x00\x00\x12\x00\x00\x00\x1e\x00\x04\x00\x13\x00\x00\x00)\x00\x00\x00)\x00\x00\x00 \x00\x04\x00\x1e\x00\x00\x00\x0c\x00\x00\x00\x13\x00\x00\x00\x1d\x00\x03\x00\x1f\x00\x00\x00\x13\x00\x00\x00\x1e\x00\x03\x00\x14\x00\x00\x00\x1f\x00\x00\x00 \x00\x04\x005\x00\x00\x00\x0c\x00\x00\x00\x14\x00\x00\x00 \x00\x04\x006\x00\x00\x00\x01\x00\x00\x00'\x00\x00\x00\x14\x00\x02\x007\x00\x00\x00 \x00\x04\x00 \x00\x00\x00\x0c\x00\x00\x00'\x00\x00\x00\x1d\x00\x03\x00!\x00\x00\x00'\x00\x00\x00\x1e\x00\x03\x00\x15\x00\x00\x00!\x00\x00\x00 \x00\x04\x008\x00\x00\x00\x0c\x00\x00\x00\x15\x00\x00\x00\x1e\x00\x04\x00\x16\x00\x00\x00)\x00\x00\x00)\x00\x00\x00 \x00\x04\x00\"\x00\x00\x00\x0c\x00\x00\x00\x16\x00\x00\x00\x1d\x00\x03\x00#\x00\x00\x00\x16\x00\x00\x00\x1e\x00\x03\x00\x17\x00\x00\x00#\x00\x00\x00 \x00\x04\x009\x00\x00\x00\x0c\x00\x00\x00\x17\x00\x00\x00\x18\x00\x04\x00:\x00\x00\x00)\x00\x00\x00\x04\x00\x00\x00+\x00\x04\x00+\x00\x00\x00;\x00\x00\x00\x06\x00\x00\x00\x1c\x00\x04\x00$\x00\x00\x00)\x00\x00\x00;\x00\x00\x00\x1e\x00\x03\x00\x19\x00\x00\x00$\x00\x00\x00\x1e\x00\x0a\x00\x1a\x00\x00\x00:\x00\x00\x00\x19\x00\x00\x00)\x00\x00\x00)\x00\x00\x00'\x00\x00\x00'\x00\x00\x00'\x00\x00\x00'\x00\x00\x00 \x00\x04\x00<\x00\x00\x00\x02\x00\x00\x00\x1a\x00\x00\x00 \x00\x04\x00=\x00\x00\x00\x02\x00\x00\x00:\x00\x00\x00+\x00\x04\x00(\x00\x00\x00>\x00\x00\x00\x00\x00\x80?+\x00\x04\x00'\x00\x00\x00?\x00\x00\x00\xb1y7\x9e+\x00\x04\x00'\x00\x00\x00@\x00\x00\x00\xff\x00\x00\x00+\x00\x04\x00+\x00\x00\x00A\x00\x00\x00\x08\x00\x00\x00+\x00\x04\x00+\x00\x00\x00B\x00\x00\x00\x10\x00\x00\x00+\x00\x04\x00(\x00\x00\x00C\x00\x00\x00\x00\x00@?+\x00\x04\x00(\x00\x00\x00D\x00\x00\x00\x00\x00\x80>+\x00\x04\x00'\x00\x00\x00E\x00\x00\x00@\x00\x00\x00\x1c\x00\x04\x00F\x00\x00\x00)\x00\x00\x00E\x00\x00\x00 \x00\x04\x00G\x00\x00\x00\x03\x00\x00\x00F\x00\x00\x00 \x00\x04\x00H\x00\x00\x00\x03\x00\x00\x00)\x00\x00\x00\x1c\x00\x04\x00I\x00\x00\x00*\x00\x00\x00E\x00\x00\x00 \x00\x04\x00J\x00\x00\x00\x03\x00\x00\x00I\x00\x00\x00 \x00\x04\x00K\x00\x00\x00\x03\x00\x00\x00*\x00\x00\x00+\x00\x04\x00'\x00\x00\x00L\x00\x00\x00|\x00\x00\x00\x1c\x00\x04\x00M\x00\x00\x000\x00\x00\x00L\x00\x00\x00 \x00\x04\x00N\x00\x00\x00\x03\x00\x00\x00M\x00\x00\x00 \x00\x04\x00O\x00\x00\x00\x03\x00\x00\x000\x00\x00\x00;\x00\x04\x00.\x00\x00\x00\x0e\x00\x00\x00\x1a\x15\x00\x00;\x00\x04\x001\x00\x00\x00\x09\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x004\x00\x00\x00\x02\x00\x00\x00\x0c\x00\x00\x00;\x00\x04\x005\x00\x00\x00\x03\x00\x00\x00\x0c\x00\x00\x00;\x00\x04\x006\x00\x00\x00\x08\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x008\x00\x00\x00\x04\x00\x00\x00\x0c\x00\x00\x00;\x00\x04\x009\x00\x00\x00\x05\x00\x00\x00\x0c\x00\x00\x00;\x00\x04\x00<\x00\x00\x00\x06\x00\x00\x00\x02\x00\x00\x00;\x00\x04\x00G\x00\x00\x00\x0a\x00\x00\x00\x03\x00\x00\x00;\x00\x04\x00J\x00\x00\x00\x0b\x00\x00\x00\x03\x00\x00\x00;\x00\x04\x00J\x00\x00\x00\x0c\x00\x00\x00\x03\x00\x00\x00;\x00\x04\x008\x00\x00\x00\x07\x00\x00\x00\x0c\x00\x00\x00;\x00\x04\x00N\x00\x00\x00\x0d\x00\x00\x00\x03\x00\x00\x00,\x00\x06\x00*\x00\x00\x00P\x00\x00\x00D\x00\x00\x00D\x00\x00\x00D\x00\x00\x00+\x00\x04\x00(\x00\x00\x00Q\x00\x00\x00\x81\x80\x80;,\x00\x06\x00*\x00\x00\x00R\x00\x00\x00Q\x00\x00\x00Q\x00\x00\x00Q\x00\x00\x00+\x00\x04\x00'\x00\x00\x00S\x00\x00\x00\x00\x00\x00\x00+\x00\x04\x00'\x00\x00\x00T\x00\x00\x00\x01\x00\x00\x00+\x00\x04\x00'\x00\x00\x00U\x00\x00\x00\x02\x00\x00\x00+\x00\x04\x00'\x00\x00\x00V\x00\x00\x00\x03\x00\x00\x00 \x00\x04\x00W\x00\x00\x00\x0c\x00\x00\x00)\x00\x00\x006\x00\x05\x00%\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00&\x00\x00\x00\xf8\x00\x02\x00X\x00\x00\x00=\x00\x04\x000\x00\x00\x00Y\x00\x00\x00\x09\x00\x00\x00Q\x00\x05\x00'\x00\x00\x00Z\x00\x00\x00Y\x00\x00\x00\x00\x00\x00\x00A\x00\x06\x002\x00\x00\x00[\x00\x00\x00\x0e\x00\x00\x00/\x00\x00\x00Z\x00\x00\x00=\x00\x04\x00'\x00\x00\x00\x10\x00\x00\x00[\x00\x00\x00A\x00\x06\x00\x1c\x00\x00\x00\\\x00\x00\x00\x02\x00\x00\x003\x00\x00\x00\x10\x00\x00\x00A\x00\x05\x00 \x00\x00\x00]\x00\x00\x00\\\x00\x00\x00S\x00\x00\x00=\x00\x04\x00'\x00\x00\x00^\x00\x00\x00]\x00\x00\x00A\x00\x05\x00 \x00\x00\x00_\x00\x00\x00\\\x00\x00\x00T\x00\x00\x00=\x00\x04\x00'\x00\x00\x00`\x00\x00\x00_\x00\x00\x00A\x00\x05\x00 \x00\x00\x00a\x00\x00\x00\\\x00\x00\x00U\x00\x00\x00=\x00\x04\x00'\x00\x00\x00b\x00\x00\x00a\x00\x00\x00A\x00\x05\x00 \x00\x00\x00c\x00\x00\x00\\\x00\x00\x00V\x00\x00\x00=\x00\x04\x00'\x00\x00\x00d\x00\x00\x00c\x00\x00\x00A\x00\x05\x002\x00\x00\x00e\x00\x00\x00\x0e\x00\x00\x003\x00\x00\x00=\x00\x04\x00'\x00\x00\x00f\x00\x00\x00e\x00\x00\x00A\x00\x06\x00\x1e\x00\x00\x00g\x00\x00\x00\x03\x00\x00\x003\x00\x00\x00f\x00\x00\x00A\x00\x05\x00W\x00\x00\x00h\x00\x00\x00g\x00\x00\x00S\x00\x00\x00=\x00\x04\x00)\x00\x00\x00i\x00\x00\x00h\x00\x00\x00A\x00\x05\x00W\x00\x00\x00j\x00\x00\x00g\x00\x00\x00T\x00\x00\x00=\x00\x04\x00)\x00\x00\x00k\x00\x00\x00j\x00\x00\x00\xaf\x14\x03\x00`\x00\x00\x00d\x00\x00\x00=\x00\x04\x00'\x00\x00\x00l\x00\x00\x00\x08\x00\x00\x00\xb0\x00\x05\x007\x00\x00\x00m\x00\x00\x00l\x00\x00\x00`\x00\x00\x00\xf7\x00\x03\x00n\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00m\x00\x00\x00o\x00\x00\x00n\x00\x00\x00\xf8\x00\x02\x00o\x00\x00\x00\x80\x00\x05\x00'\x00\x00\x00p\x00\x00\x00^\x00\x00\x00l\x00\x00\x00A\x00\x06\x00 \x00\x00\x00q\x00\x00\x00\x04\x00\x00\x003\x00\x00\x00p\x00\x00\x00=\x00\x04\x00'\x00\x00\x00r\x00\x00\x00q\x00\x00\x00A\x00\x06\x00\"\x00\x00\x00s\x00\x00\x00\x05\x00\x00\x003\x00\x00\x00r\x00\x00\x00A\x00\x05\x00W\x00\x00\x00t\x00\x00\x00s\x00\x00\x00S\x00\x00\x00=\x00\x04\x00)\x00\x00\x00u\x00\x00\x00t\x00\x00\x00A\x00\x05\x00W\x00\x00\x00v\x00\x00\x00s\x00\x00\x00T\x00\x00\x00=\x00\x04\x00)\x00\x00\x00w\x00\x00\x00v\x00\x00\x00O\x00\x08\x00*\x00\x00\x00x\x00\x00\x00u\x00\x00\x00u\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00Q\x00\x05\x00(\x00\x00\x00y\x00\x00\x00i\x00\x00\x00\x03\x00\x00\x00\x8e\x00\x05\x00*\x00\x00\x00z\x00\x00\x00x\x00\x00\x00y\x00\x00\x00O\x00\x08\x00*\x00\x00\x00{\x00\x00\x00i\x00\x00\x00i\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x81\x00\x05\x00*\x00\x00\x00\x18\x00\x00\x00z\x00\x00\x00{\x00\x00\x00A\x00\x05\x00=\x00\x00\x00|\x00\x00\x00\x06\x00\x00\x003\x00\x00\x00=\x00\x04\x00:\x00\x00\x00}\x00\x00\x00|\x00\x00\x00P\x00\x05\x00)\x00\x00\x00~\x00\x00\x00\x18\x00\x00\x00>\x00\x00\x00\x90\x00\x05\x00)\x00\x00\x00\x7f\x00\x00\x00~\x00\x00\x00}\x00\x00\x00O\x00\x08\x00*\x00\x00\x00\x80\x00\x00\x00w\x00\x00\x00w\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x84\x00\x05\x00'\x00\x00\x00\x81\x00\x00\x00\x10\x00\x00\x00?\x00\x00\x00\xc7\x00\x05\x00'\x00\x00\x00\x82\x00\x00\x00\x81\x00\x00\x00@\x00\x00\x00p\x00\x04\x00(\x00\x00\x00\x83\x00\x00\x00\x82\x00\x00\x00\xc2\x00\x05\x00'\x00\x00\x00\x84\x00\x00\x00\x81\x00\x00\x00A\x00\x00\x00\xc7\x00\x05\x00'\x00\x00\x00\x85\x00\x00\x00\x84\x00\x00\x00@\x00\x00\x00p\x00\x04\x00(\x00\x00\x00\x86\x00\x00\x00\x85\x00\x00\x00\xc2\x00\x05\x00'\x00\x00\x00\x87\x00\x00\x00\x81\x00\x00\x00B\x00\x00\x00\xc7\x00\x05\x00'\x00\x00\x00\x88\x00\x00\x00\x87\x00\x00\x00@\x00\x00\x00p\x00\x04\x00(\x00\x00\x00\x89\x00\x00\x00\x88\x00\x00\x00P\x00\x06\x00*\x00\x00\x00\x8a\x00\x00\x00\x83\x00\x00\x00\x86\x00\x00\x00\x89\x00\x00\x00\x85\x00\x05\x00*\x00\x00\x00\x8b\x00\x00\x00\x8a\x00\x00\x00R\x00\x00\x00\x8e\x00\x05\x00*\x00\x00\x00\x8c\x00\x00\x00\x8b\x00\x00\x00C\x00\x00\x00\x81\x00\x05\x00*\x00\x00\x00\x8d\x00\x00\x00P\x00\x00\x00\x8c\x00\x00\x00O\x00\x08\x00*\x00\x00\x00\x8e\x00\x00\x00k\x00\x00\x00k\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x85\x00\x05\x00*\x00\x00\x00\x8f\x00\x00\x00\x8d\x00\x00\x00\x8e\x00\x00\x00A\x00\x05\x00H\x00\x00\x00\x90\x00\x00\x00\x0a\x00\x00\x00l\x00\x00\x00A\x00\x05\x00K\x00\x00\x00\x91\x00\x00\x00\x0b\x00\x00\x00l\x00\x00\x00A\x00\x05\x00K\x00\x00\x00\x92\x00\x00\x00\x0c\x00\x00\x00l\x00\x00\x00>\x00\x03\x00\x90\x00\x00\x00\x7f\x00\x00\x00>\x00\x03\x00\x91\x00\x00\x00\x80\x00\x00\x00>\x00\x03\x00\x92\x00\x00\x00\x8f\x00\x00\x00\xf9\x00\x02\x00n\x00\x00\x00\xf8\x00\x02\x00n\x00\x00\x00\xf9\x00\x02\x00\x93\x00\x00\x00\xf8\x00\x02\x00\x93\x00\x00\x00\xf5\x00\x07\x00'\x00\x00\x00\x94\x00\x00\x00l\x00\x00\x00n\x00\x00\x00\x1b\x00\x00\x00\x95\x00\x00\x00\xf6\x00\x04\x00\x96\x00\x00\x00\x95\x00\x00\x00\x00\x00\x00\x00\xf9\x00\x02\x00\x97\x00\x00\x00\xf8\x00\x02\x00\x97\x00\x00\x00\xb0\x00\x05\x007\x00\x00\x00\x98\x00\x00\x00\x94\x00\x00\x00d\x00\x00\x00\xf7\x00\x03\x00\x99\x00\x00\x00\x00\x00\x00\x00\xfa\x00\x04\x00\x98\x00\x00\x00\x99\x00\x00\x00\x96\x00\x00\x00\xf8\x00\x02\x00\x96\x00\x00\x00\xfd\x00\x01\x00\xf8\x00\x02\x00\x99\x00\x00\x00\x80\x00\x05\x00'\x00\x00\x00\x9a\x00\x00\x00b\x00\x00\x00\x94\x00\x00\x00A\x00\x06\x00 \x00\x00\x00\x9b\x00\x00\x00\x07\x00\x00\x003\x00\x00\x00\x9a\x00\x00\x00=\x00\x04\x00'\x00\x00\x00\x9c\x00\x00\x00\x9b\x00\x00\x00\xc7\x00\x05\x00'\x00\x00\x00\x9d\x00\x00\x00\x9c\x00\x00\x00@\x00\x00\x00\xc2\x00\x05\x00'\x00\x00\x00\x9e\x00\x00\x00\x9c\x00\x00\x00A\x00\x00\x00\xc7\x00\x05\x00'\x00\x00\x00\x9f\x00\x00\x00\x9e\x00\x00\x00@\x00\x00\x00\xc2\x00\x05\x00'\x00\x00\x00\xa0\x00\x00\x00\x9c\x00\x00\x00B\x00\x00\x00\xc7\x00\x05\x00'\x00\x00\x00\xa1\x00\x00\x00\xa0\x00\x00\x00@\x00\x00\x00P\x00\x06\x000\x00\x00\x00\xa2\x00\x00\x00\x9d\x00\x00\x00\x9f\x00\x00\x00\xa1\x00\x00\x00A\x00\x05\x00O\x00\x00\x00\xa3\x00\x00\x00\x0d\x00\x00\x00\x94\x00\x00\x00>\x00\x03\x00\xa3\x00\x00\x00\xa2\x00\x00\x00\x80\x00\x05\x00'\x00\x00\x00\x1b\x00\x00\x00\x94\x00\x00\x00E\x00\x00\x00\xf9\x00\x02\x00\x95\x00\x00\x00\xf8\x00\x02\x00\x95\x00\x00\x00\xf9\x00\x02\x00\x93\x00\x00\x008\x00\x01\x00"),
     (0xff00a868f4c65b33, b"\x03\x02#\x07\x00\x05\x01\x00\x00\x00(\x00P\x00\x00\x00\x00\x00\x00\x00\x11\x00\x02\x00K\x11\x00\x00\x11\x00\x02\x00\x01\x00\x00\x00\x0a\x00\x0b\x00SPV_KHR_storage_buffer_storage_class\x00\x00\x00\x00\x0b\x00\x06\x00\x01\x00\x00\x00GLSL.std.450\x00\x00\x00\x00\x0e\x00\x03\x00\x00\x00\x00\x00\x01\x00\x00\x00\x0f\x00\x0f\x00\x00\x00\x00\x00\x02\x00\x00\x00main\x00\x00\x00\x00\x03\x00\x00\x00\x04\x00\x00\x00\x05\x00\x00\x00\x06\x00\x00\x00\x07\x00\x00\x00\x08\x00\x00\x00\x09\x00\x00\x00\x0a\x00\x00\x00\x0b\x00\x00\x00\x0c\x00\x00\x00\x03\x00\x03\x00\x0b\x00\x00\x00\x01\x00\x00\x00\x05\x00\x07\x00\x0d\x00\x00\x00InstanceData_std430\x00\x06\x00\x06\x00\x0d\x00\x00\x00\x00\x00\x00\x00center_size\x00\x06\x00\x07\x00\x0d\x00\x00\x00\x01\x00\x00\x00texture_index\x00\x00\x00\x06\x00\x07\x00\x0d\x00\x00\x00\x02\x00\x00\x00sampler_index\x00\x00\x00\x06\x00\x05\x00\x0d\x00\x00\x00\x03\x00\x00\x00_pad0\x00\x00\x00\x06\x00\x05\x00\x0d\x00\x00\x00\x04\x00\x00\x00_pad1\x00\x00\x00\x05\x00\x07\x00\x0e\x00\x00\x00StructuredBuffer\x00\x00\x00\x00\x06\x00\x06\x00\x0e\x00\x00\x00\x00\x00\x00\x00__member0\x00\x00\x00\x05\x00\x05\x00\x03\x00\x00\x00instances\x00\x00\x00\x05\x00\x0d\x00\x0f\x00\x00\x00SLANG_ParameterGroup_SceneUniforms_std140\x00\x00\x00\x06\x00\x06\x00\x0f\x00\x00\x00\x00\x00\x00\x00time_aspect\x00\x05\x00\x06\x00\x04\x00\x00\x00SceneUniforms\x00\x00\x00\x05\x00\x04\x00\x10\x00\x00\x00pulse\x00\x00\x00\x05\x00\x05\x00\x11\x00\x00\x00half_size\x00\x00\x00\x05\x00\x06\x00\x09\x00\x00\x00input.position\x00\x00\x05\x00\x03\x00\x12\x00\x00\x00ndc\x00\x05\x00\x05\x00\x0a\x00\x00\x00input.uv\x00\x00\x00\x00\x05\x00\x09\x00\x06\x00\x00\x00entryPointParam_vs_main.uv\x00\x00\x05\x00\x0c\x00\x07\x00\x00\x00entryPointParam_vs_main.texture_index\x00\x00\x00\x05\x00\x0c\x00\x08\x00\x00\x00entryPointParam_vs_main.sampler_index\x00\x00\x00\x05\x00\x04\x00\x02\x00\x00\x00vs_main\x00G\x00\x04\x00\x0c\x00\x00\x00\x0b\x00\x00\x00I\x11\x00\x00G\x00\x04\x00\x0b\x00\x00\x00\x0b\x00\x00\x00+\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x01\x00\x00\x00#\x00\x00\x00\x10\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x02\x00\x00\x00#\x00\x00\x00\x14\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x03\x00\x00\x00#\x00\x00\x00\x18\x00\x00\x00H\x00\x05\x00\x0d\x00\x00\x00\x04\x00\x00\x00#\x00\x00\x00\x1c\x00\x00\x00G\x00\x04\x00\x13\x00\x00\x00\x06\x00\x00\x00 \x00\x00\x00G\x00\x04\x00\x14\x00\x00\x00\x06\x00\x00\x00 \x00\x00\x00G\x00\x03\x00\x0e\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x0e\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00!\x00\x00\x00\x01\x00\x00\x00G\x00\x04\x00\x03\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x03\x00\x03\x00\x00\x00\x18\x00\x00\x00G\x00\x03\x00\x0f\x00\x00\x00\x02\x00\x00\x00H\x00\x05\x00\x0f\x00\x00\x00\x00\x00\x00\x00#\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x04\x00\x00\x00!\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x04\x00\x00\x00\"\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x09\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x0a\x00\x00\x00\x1e\x00\x00\x00\x01\x00\x00\x00G\x00\x04\x00\x05\x00\x00\x00\x0b\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x06\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00G\x00\x04\x00\x07\x00\x00\x00\x1e\x00\x00\x00\x01\x00\x00\x00G\x00\x03\x00\x07\x00\x00\x00\x0e\x00\x00\x00G\x00\x04\x00\x08\x00\x00\x00\x1e\x00\x00\x00\x02\x00\x00\x00G\x00\x03\x00\x08\x00\x00\x00\x0e\x00\x00\x00\x13\x00\x02\x00\x15\x00\x00\x00!\x00\x03\x00\x16\x00\x00\x00\x15\x00\x00\x00\x16\x00\x03\x00\x17\x00\x00\x00 \x00\x00\x00\x17\x00\x04\x00\x18\x00\x00\x00\x17\x00\x00\x00\x04\x00\x00\x00\x15\x00\x04\x00\x19\x00\x00\x00 \x00\x00\x00\x00\x00\x00\x00\x17\x00\x04\x00\x1a\x00\x00\x00\x17\x00\x00\x00\x02\x00\x00\x00\x15\x00\x04\x00\x1b\x00\x00\x00 \x00\x00\x00\x01\x00\x00\x00 \x00\x04\x00\x1c\x00\x00\x00\x01\x00\x00\x00\x1b\x00\x00\x00+\x00\x04\x00\x1b\x00\x00\x00\x1d\x00\x00\x00\x00\x00\x00\x00\x1e\x00\x07\x00\x0d\x00\x00\x00\x18\x00\x00\x00\x19\x00\x00\x00\x19\x00\x00\x00\x19\x00\x00\x00\x19\x00\x00\x00 \x00\x04\x00\x13\x00\x00\x00\x0c\x00\x00\x00\x0d\x00\x00\x00\x1d\x00\x03\x00\x14\x00\x00\x00\x0d\x00\x00\x00\x1e\x00\x03\x00\x0e\x00\x00\x00\x14\x00\x00\x00 \x00\x04\x00\x1e\x00\x00\x00\x0c\x00\x00\x00\x0e\x00\x00\x00\x1e\x00\x03\x00\x0f\x00\x00\x00\x18\x00\x00\x00 \x00\x04\x00\x1f\x00\x00\x00\x02\x00\x00\x00\x0f\x00\x00\x00 \x00\x04\x00 \x00\x00\x00\x02\x00\x00\x00\x18\x00\x00\x00+\x00\x04\x00\x17\x00\x00\x00!\x00\x00\x00\x00\x00\x00@+\x00\x04\x00\x17\x00\x00\x00\"\x00\x00\x00333?+\x00\x04\x00\x17\x00\x00\x00#\x00\x00\x00\x8f\xc2u=+\x00\x04\x00\x17\x00\x00\x00$\x00\x00\x00\x00\x00\x80?\x17\x00\x04\x00%\x00\x00\x00\x17\x00\x00\x00\x03\x00\x00\x00 \x00\x04\x00&\x00\x00\x00\x01\x00\x00\x00%\x00\x00\x00+\x00\x04\x00\x17\x00\x00\x00'\x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00(\x00\x00\x00\x01\x00\x00\x00\x1a\x00\x00\x00 \x00\x04\x00)\x00\x00\x00\x03\x00\x00\x00\x18\x00\x00\x00 \x00\x04\x00*\x00\x00\x00\x03\x00\x00\x00\x1a\x00\x00\x00 \x00\x04\x00+\x00\x00\x00\x03\x00\x00\x00\x19\x00\x00\x00;\x00\x04\x00\x1c\x00\x00\x00\x0c\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00\x1c\x00\x00\x00\x0b\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00\x1e\x00\x00\x00\x03\x00\x00\x00\x0c\x00\x00\x00;\x00\x04\x00\x1f\x00\x00\x00\x04\x00\x00\x00\x02\x00\x00\x00;\x00\x04\x00&\x00\x00\x00\x09\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00(\x00\x00\x00\x0a\x00\x00\x00\x01\x00\x00\x00;\x00\x04\x00)\x00\x00\x00\x05\x00\x00\x00\x03\x00\x00\x00;\x00\x04\x00*\x00\x00\x00\x06\x00\x00\x00\x03\x00\x00\x00;\x00\x04\x00+\x00\x00\x00\x07\x00\x00\x00\x03\x00\x00\x00;\x00\x04\x00+\x00\x00\x00\x08\x00\x00\x00\x03\x00\x00\x00+\x00\x04\x00\x19\x00\x00\x00,\x00\x00\x00\x00\x00\x00\x00 \x00\x04\x00-\x00\x00\x00\x0c\x00\x00\x00\x18\x00\x00\x00+\x00\x04\x00\x19\x00\x00\x00.\x00\x00\x00\x01\x00\x00\x00 \x00\x04\x00/\x00\x00\x00\x0c\x00\x00\x00\x19\x00\x00\x00+\x00\x04\x00\x19\x00\x00\x000\x00\x00\x00\x02\x00\x00\x006\x00\x05\x00\x15\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x16\x00\x00\x00\xf8\x00\x02\x001\x00\x00\x00=\x00\x04\x00\x1b\x00\x00\x002\x00\x00\x00\x0c\x00\x00\x00=\x00\x04\x00\x1b\x00\x00\x003\x00\x00\x00\x0b\x00\x00\x00\x82\x00\x05\x00\x1b\x00\x00\x004\x00\x00\x003\x00\x00\x002\x00\x00\x00|\x00\x04\x00\x19\x00\x00\x005\x00\x00\x004\x00\x00\x00A\x00\x06\x00\x13\x00\x00\x006\x00\x00\x00\x03\x00\x00\x00\x1d\x00\x00\x005\x00\x00\x00A\x00\x05\x00-\x00\x00\x007\x00\x00\x006\x00\x00\x00,\x00\x00\x00=\x00\x04\x00\x18\x00\x00\x008\x00\x00\x007\x00\x00\x00A\x00\x05\x00/\x00\x00\x009\x00\x00\x006\x00\x00\x00.\x00\x00\x00=\x00\x04\x00\x19\x00\x00\x00:\x00\x00\x009\x00\x00\x00A\x00\x05\x00/\x00\x00\x00;\x00\x00\x006\x00\x00\x000\x00\x00\x00=\x00\x04\x00\x19\x00\x00\x00<\x00\x00\x00;\x00\x00\x00A\x00\x05\x00 \x00\x00\x00=\x00\x00\x00\x04\x00\x00\x00\x1d\x00\x00\x00=\x00\x04\x00\x18\x00\x00\x00>\x00\x00\x00=\x00\x00\x00Q\x00\x05\x00\x17\x00\x00\x00?\x00\x00\x00>\x00\x00\x00\x00\x00\x00\x00\x85\x00\x05\x00\x17\x00\x00\x00@\x00\x00\x00?\x00\x00\x00!\x00\x00\x00p\x00\x04\x00\x17\x00\x00\x00A\x00\x00\x005\x00\x00\x00\x85\x00\x05\x00\x17\x00\x00\x00B\x00\x00\x00A\x00\x00\x00\"\x00\x00\x00\x81\x00\x05\x00\x17\x00\x00\x00C\x00\x00\x00@\x00\x00\x00B\x00\x00\x00\x0c\x00\x06\x00\x17\x00\x00\x00D\x00\x00\x00\x01\x00\x00\x00\x0d\x00\x00\x00C\x00\x00\x00\x85\x00\x05\x00\x17\x00\x00\x00E\x00\x00\x00#\x00\x00\x00D\x00\x00\x00\x81\x00\x05\x00\x17\x00\x00\x00\x10\x00\x00\x00$\x00\x00\x00E\x00\x00\x00Q\x00\x05\x00\x17\x00\x00\x00F\x00\x00\x008\x00\x00\x00\x02\x00\x00\x00Q\x00\x05\x00\x17\x00\x00\x00G\x00\x00\x00>\x00\x00\x00\x01\x00\x00\x00\x88\x00\x05\x00\x17\x00\x00\x00H\x00\x00\x00F\x00\x00\x00G\x00\x00\x00P\x00\x05\x00\x1a\x00\x00\x00I\x00\x00\x00H\x00\x00\x00F\x00\x00\x00\x8e\x00\x05\x00\x1a\x00\x00\x00\x11\x00\x00\x00I\x00\x00\x00\x10\x00\x00\x00O\x00\x07\x00\x1a\x00\x00\x00J\x00\x00\x008\x00\x00\x008\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00=\x00\x04\x00%\x00\x00\x00K\x00\x00\x00\x09\x00\x00\x00O\x00\x07\x00\x1a\x00\x00\x00L\x00\x00\x00K\x00\x00\x00K\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x85\x00\x05\x00\x1a\x00\x00\x00M\x00\x00\x00L\x00\x00\x00\x11\x00\x00\x00\x81\x00\x05\x00\x1a\x00\x00\x00\x12\x00\x00\x00J\x00\x00\x00M\x00\x00\x00P\x00\x06\x00\x18\x00\x00\x00N\x00\x00\x00\x12\x00\x00\x00'\x00\x00\x00$\x00\x00\x00=\x00\x04\x00\x1a\x00\x00\x00O\x00\x00\x00\x0a\x00\x00\x00>\x00\x03\x00\x05\x00\x00\x00N\x00\x00\x00>\x00\x03\x00\x06\x00\x00\x00O\x00\x00\x00>\x00\x03\x00\x07\x00\x00\x00:\x00\x00\x00>\x00\x03\x00\x08\x00\x00\x00<\x00\x00\x00\xfd\x00\x01\x008\x00\x01\x00"),
 ];
@@ -230,18 +275,24 @@ pub static BAKED_SPIRV: &[(u64, &[u8])] = &[
 /// key -> human-readable `shader / entry / defines`, sorted ascending by key.
 pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0x08e31e095c5c901a, "std_taa_resolve / vs_main / []"),
-    (
-        0x0b6931beb5b94fcb,
-        "std_display_output / vs_main / [HDR_OUTPUT]",
-    ),
-    (0x0e7a6ff59a3c890c, "std_display_output / vs_main / []"),
     (0x16f8ac0466375732, "std_deferred_gbuffer / vs_main / []"),
     (
         0x19a8ef38f32401a6,
         "std_deferred_gbuffer_textured / vs_main / []",
     ),
     (0x1c34d7a79c2d572a, "std_mb_tile_max / fs_main / []"),
+    (
+        0x1da1806d4b488890,
+        "std_display_output / fs_main / [HDR_OUTPUT]",
+    ),
+    (0x1e792af98e860649, "std_ssao / fs_main / []"),
     (0x20ee92ec75c13d5a, "std_mb_tile_max / vs_main / []"),
+    (
+        0x2534c532aeab9bfd,
+        "std_display_output / vs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
+    ),
+    (0x2897935200bbc983, "std_ssao_blur / fs_main / []"),
+    (0x2c7f0873b466991e, "std_deferred_resolve / fs_main / []"),
     (
         0x2ca86afc784db551,
         "opaque_textured / fs_main / [ALPHA_CUTOUT]",
@@ -251,28 +302,35 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0x398a25d3582968bd, "entity_index / fs_main / []"),
     (0x3c17f254ff226f8b, "debug_draw / vs_main / []"),
     (0x3cd445cedfea47df, "depth_only / vs_main / []"),
-    (0x3f5ddb3d77361b1c, "std_display_output / fs_main / []"),
+    (0x4708f1b9a324731a, "std_bloom_down / fs_main / [KARIS]"),
     (0x54f9997540610987, "meshlet / ts_main / []"),
     (0x5a0484e3568dd6ba, "egui / vs_main / [HDR_OUTPUT]"),
     (0x62641e520ef56d29, "opaque_textured / fs_main / []"),
     (0x635dba31fed8212d, "entity_index / vs_main / []"),
     (0x67a25e7dfb4ebd69, "egui / fs_main / []"),
+    (
+        0x6cae4b8385e69aa0,
+        "std_display_output / vs_main / [HDR_OUTPUT]",
+    ),
     (0x6dae561f607ef805, "compressed_quad / fs_main / []"),
     (
         0x6dcd912de89429a3,
         "egui / fs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
     ),
     (
-        0x7a904edfeeef67d2,
-        "std_display_output / fs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
-    ),
-    (0x8d1c4a3c5b011219, "egui / vs_main / []"),
-    (0x8dac5871efa0030a, "opaque_color / fs_main / []"),
-    (0x90c1dab7cddabcb4, "std_deferred_resolve / fs_main / []"),
-    (
-        0x945fbc5e5b2a8d99,
+        0x7a9cb550557e9882,
         "std_display_output / vs_main / [SRGB_FRAMEBUFFER]",
     ),
+    (0x7de263a283afe28e, "std_deferred_resolve / vs_main / []"),
+    (
+        0x7e0e3b3f18d1e78d,
+        "std_display_output / fs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
+    ),
+    (0x81f6a3748775615b, "std_display_output / fs_main / []"),
+    (0x873cdff3c78ccf3f, "std_histogram_resolve / cs_main / []"),
+    (0x8af2142b78da2b6a, "std_bloom_down / vs_main / [KARIS]"),
+    (0x8d1c4a3c5b011219, "egui / vs_main / []"),
+    (0x8dac5871efa0030a, "opaque_color / fs_main / []"),
     (0x9652c850be7527f5, "compressed_quad / vs_main / []"),
     (
         0x97838dfa39845db3,
@@ -282,25 +340,32 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0x99dfbc448bb0b676, "std_mb_neighbor_max / vs_main / []"),
     (0x9ac3d8e81fe61fd5, "std_skybox / vs_main / []"),
     (0x9f888e2e52877f3c, "egui / vs_main / [SRGB_FRAMEBUFFER]"),
-    (
-        0x9fb97ed1c6842f49,
-        "std_display_output / fs_main / [SRGB_FRAMEBUFFER]",
-    ),
+    (0x9fcc0e5cd07d1ef9, "std_ssao / vs_main / []"),
     (0x9fe4d6183467fbcb, "std_mb_reconstruct / fs_main / []"),
     (0xa4178f564b30de43, "bindless / fs_main / []"),
+    (0xa4a0a6ff2fdde47b, "std_bloom_down / fs_main / []"),
+    (0xabb3f92c7d74e08b, "std_bloom_down / vs_main / []"),
     (0xb6c7e0e2ffb9ab18, "blit / fs_main / []"),
     (0xba0dde239d9ffd81, "meshlet / fs_main / []"),
+    (0xc18bd8e38291ec41, "std_histogram_build / cs_main / []"),
     (
         0xc317c54788d7be76,
         "std_deferred_gbuffer_textured / fs_main / []",
     ),
-    (0xc431c5ffacfead84, "std_deferred_resolve / vs_main / []"),
     (0xc49af10895c2cae5, "std_skybox / fs_main / []"),
     (0xc702d339ddabd042, "std_deferred_gbuffer / fs_main / []"),
     (0xc82aa589a81169ea, "std_taa_resolve / fs_main / []"),
+    (0xc97b5be8cd9a483c, "std_bloom_up / fs_main / []"),
+    (0xcd423f0cb0fd8973, "std_ssao_blur / vs_main / []"),
     (0xda322d2dbf33dcba, "opaque_color / vs_main / []"),
+    (0xdc14287a4231fc6b, "std_display_output / vs_main / []"),
+    (0xdfc0946ea55558ac, "std_bloom_up / vs_main / []"),
     (0xe04dc0dbaf2b11fe, "meshlet / ms_main / []"),
     (0xe2584ce62daf47d9, "opaque_textured / vs_main / []"),
+    (
+        0xe85dfd33cdcd6c92,
+        "std_display_output / fs_main / [SRGB_FRAMEBUFFER]",
+    ),
     (0xeb0347465565078a, "egui / fs_main / [HDR_OUTPUT]"),
     (0xed51d82fbc2db053, "std_velocity_complete / vs_main / []"),
     (
@@ -309,15 +374,7 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     ),
     (0xf070e635f5fcf9a6, "std_mb_neighbor_max / fs_main / []"),
     (0xf2365f489112e463, "std_velocity_complete / fs_main / []"),
-    (
-        0xf30a5e0b21563ba2,
-        "std_display_output / vs_main / [HDR_OUTPUT,SRGB_FRAMEBUFFER]",
-    ),
     (0xf4aa7b8fc915c3bb, "std_mb_reconstruct / vs_main / []"),
-    (
-        0xfc5fd4807a2b6b9b,
-        "std_display_output / fs_main / [HDR_OUTPUT]",
-    ),
     (0xff00a868f4c65b33, "bindless / vs_main / []"),
 ];
 
@@ -392,6 +449,126 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         ],
     ),
     (
+        0x0bb1486260cbd24d,
+        &[
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("ResolveUniforms"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[
+                    crate::shader::baked::BakedEntry {
+                        binding: 0,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("gbuffer_albedo"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 1,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("gbuffer_normal_metallic"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 2,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("gbuffer_position_roughness"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 3,
+                        ty: crate::materials::BindingType::Sampler,
+                        vis: 3,
+                        label: Some("gbuffer_sampler"),
+                    },
+                ],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[
+                    crate::shader::baked::BakedEntry {
+                        binding: 0,
+                        ty: crate::materials::BindingType::TextureCube,
+                        vis: 3,
+                        label: Some("irradiance_map"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 1,
+                        ty: crate::materials::BindingType::TextureCube,
+                        vis: 3,
+                        label: Some("prefilter_map"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 2,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("brdf_lut"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 3,
+                        ty: crate::materials::BindingType::Sampler,
+                        vis: 3,
+                        label: Some("ibl_sampler"),
+                    },
+                ],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[
+                    crate::shader::baked::BakedEntry {
+                        binding: 0,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("ssao_texture"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 1,
+                        ty: crate::materials::BindingType::Sampler,
+                        vis: 3,
+                        label: Some("ssao_sampler"),
+                    },
+                ],
+            },
+        ],
+    ),
+    (
+        0x12b38eb97e189d53,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("BloomUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("source"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("linear_sampler"),
+                },
+            ],
+        }],
+    ),
+    (
         0x138b579f90d976a1,
         &[
             crate::shader::baked::BakedGroup {
@@ -423,6 +600,51 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 ],
             },
         ],
+    ),
+    (
+        0x2a55d231aee03cc8,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("DisplayOutputUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("bloom"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("bloom_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 5,
+                    ty: crate::materials::BindingType::StorageBufferReadOnly,
+                    vis: 3,
+                    label: Some("auto_exposure"),
+                },
+            ],
+        }],
     ),
     (
         0x2f4ec9835f68b497,
@@ -648,6 +870,51 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         ],
     ),
     (
+        0x5475f4f77dbc1fe9,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("DisplayOutputUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("bloom"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("bloom_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 5,
+                    ty: crate::materials::BindingType::StorageBufferReadOnly,
+                    vis: 3,
+                    label: Some("auto_exposure"),
+                },
+            ],
+        }],
+    ),
+    (
         0x56457870d706cc67,
         &[crate::shader::baked::BakedGroup {
             rate: None,
@@ -675,33 +942,6 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         }],
     ),
     (
-        0x5b4c54195c12936b,
-        &[crate::shader::baked::BakedGroup {
-            rate: None,
-            label: None,
-            entries: &[
-                crate::shader::baked::BakedEntry {
-                    binding: 0,
-                    ty: crate::materials::BindingType::UniformBuffer,
-                    vis: 3,
-                    label: Some("DisplayOutputUniforms"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 1,
-                    ty: crate::materials::BindingType::Texture,
-                    vis: 3,
-                    label: Some("scene_color"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 2,
-                    ty: crate::materials::BindingType::Sampler,
-                    vis: 3,
-                    label: Some("scene_sampler"),
-                },
-            ],
-        }],
-    ),
-    (
         0x694f806a81377584,
         &[crate::shader::baked::BakedGroup {
             rate: None,
@@ -724,33 +964,6 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                     ty: crate::materials::BindingType::Sampler,
                     vis: 3,
                     label: Some("quad_sampler"),
-                },
-            ],
-        }],
-    ),
-    (
-        0x6c9345fa307b4ef7,
-        &[crate::shader::baked::BakedGroup {
-            rate: None,
-            label: None,
-            entries: &[
-                crate::shader::baked::BakedEntry {
-                    binding: 0,
-                    ty: crate::materials::BindingType::UniformBuffer,
-                    vis: 3,
-                    label: Some("DisplayOutputUniforms"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 1,
-                    ty: crate::materials::BindingType::Texture,
-                    vis: 3,
-                    label: Some("scene_color"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 2,
-                    ty: crate::materials::BindingType::Sampler,
-                    vis: 3,
-                    label: Some("scene_sampler"),
                 },
             ],
         }],
@@ -787,6 +1000,66 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 ],
             },
         ],
+    ),
+    (
+        0x7804a9c282c95d78,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 4,
+                    label: Some("BuildUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 4,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 4,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::StorageBuffer,
+                    vis: 4,
+                    label: Some("histogram"),
+                },
+            ],
+        }],
+    ),
+    (
+        0x7824386c2dc5a211,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 4,
+                    label: Some("ResolveUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::StorageBufferReadOnly,
+                    vis: 4,
+                    label: Some("histogram"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::StorageBuffer,
+                    vis: 4,
+                    label: Some("exposure"),
+                },
+            ],
+        }],
     ),
     (
         0x808d9cbbb2772a00,
@@ -974,79 +1247,70 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         }],
     ),
     (
-        0x8fdc624a8f915a5f,
-        &[
-            crate::shader::baked::BakedGroup {
-                rate: None,
-                label: None,
-                entries: &[crate::shader::baked::BakedEntry {
+        0x8cd7236bfff25db9,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
                     binding: 0,
                     ty: crate::materials::BindingType::UniformBuffer,
                     vis: 3,
-                    label: Some("ResolveUniforms"),
-                }],
-            },
-            crate::shader::baked::BakedGroup {
-                rate: None,
-                label: None,
-                entries: &[
-                    crate::shader::baked::BakedEntry {
-                        binding: 0,
-                        ty: crate::materials::BindingType::Texture,
-                        vis: 3,
-                        label: Some("gbuffer_albedo"),
-                    },
-                    crate::shader::baked::BakedEntry {
-                        binding: 1,
-                        ty: crate::materials::BindingType::Texture,
-                        vis: 3,
-                        label: Some("gbuffer_normal_metallic"),
-                    },
-                    crate::shader::baked::BakedEntry {
-                        binding: 2,
-                        ty: crate::materials::BindingType::Texture,
-                        vis: 3,
-                        label: Some("gbuffer_position_roughness"),
-                    },
-                    crate::shader::baked::BakedEntry {
-                        binding: 3,
-                        ty: crate::materials::BindingType::Sampler,
-                        vis: 3,
-                        label: Some("gbuffer_sampler"),
-                    },
-                ],
-            },
-            crate::shader::baked::BakedGroup {
-                rate: None,
-                label: None,
-                entries: &[
-                    crate::shader::baked::BakedEntry {
-                        binding: 0,
-                        ty: crate::materials::BindingType::TextureCube,
-                        vis: 3,
-                        label: Some("irradiance_map"),
-                    },
-                    crate::shader::baked::BakedEntry {
-                        binding: 1,
-                        ty: crate::materials::BindingType::TextureCube,
-                        vis: 3,
-                        label: Some("prefilter_map"),
-                    },
-                    crate::shader::baked::BakedEntry {
-                        binding: 2,
-                        ty: crate::materials::BindingType::Texture,
-                        vis: 3,
-                        label: Some("brdf_lut"),
-                    },
-                    crate::shader::baked::BakedEntry {
-                        binding: 3,
-                        ty: crate::materials::BindingType::Sampler,
-                        vis: 3,
-                        label: Some("ibl_sampler"),
-                    },
-                ],
-            },
-        ],
+                    label: Some("BloomUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("source"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("linear_sampler"),
+                },
+            ],
+        }],
+    ),
+    (
+        0xae0b726e36ace4e2,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("SsaoUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("gbuffer_albedo"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("gbuffer_normal_metallic"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("gbuffer_position_roughness"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("point_sampler"),
+                },
+            ],
+        }],
     ),
     (
         0xb5f0b28536d6c2da,
@@ -1070,7 +1334,7 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         }],
     ),
     (
-        0xc2479f1212a4b53d,
+        0xbd52358208eb229e,
         &[crate::shader::baked::BakedGroup {
             rate: None,
             label: None,
@@ -1079,19 +1343,52 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                     binding: 0,
                     ty: crate::materials::BindingType::UniformBuffer,
                     vis: 3,
-                    label: Some("DisplayOutputUniforms"),
+                    label: Some("SsaoBlurUniforms"),
                 },
                 crate::shader::baked::BakedEntry {
                     binding: 1,
                     ty: crate::materials::BindingType::Texture,
                     vis: 3,
-                    label: Some("scene_color"),
+                    label: Some("ssao_raw"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("gbuffer_position_roughness"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("point_sampler"),
+                },
+            ],
+        }],
+    ),
+    (
+        0xcc7d64960c57ff89,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("BloomUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("source"),
                 },
                 crate::shader::baked::BakedEntry {
                     binding: 2,
                     ty: crate::materials::BindingType::Sampler,
                     vis: 3,
-                    label: Some("scene_sampler"),
+                    label: Some("linear_sampler"),
                 },
             ],
         }],
@@ -1119,6 +1416,96 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                     ty: crate::materials::BindingType::Sampler,
                     vis: 3,
                     label: Some("env_sampler"),
+                },
+            ],
+        }],
+    ),
+    (
+        0xd34ca06d3e49e3e9,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("DisplayOutputUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("bloom"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("bloom_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 5,
+                    ty: crate::materials::BindingType::StorageBufferReadOnly,
+                    vis: 3,
+                    label: Some("auto_exposure"),
+                },
+            ],
+        }],
+    ),
+    (
+        0xd500ba3a6f84e064,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("DisplayOutputUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("scene_color"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("scene_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 3,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("bloom"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 4,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("bloom_sampler"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 5,
+                    ty: crate::materials::BindingType::StorageBufferReadOnly,
+                    vis: 3,
+                    label: Some("auto_exposure"),
                 },
             ],
         }],
@@ -1179,33 +1566,6 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 vis: 3,
                 label: Some("DebugUniforms"),
             }],
-        }],
-    ),
-    (
-        0xe251d324fcf656ef,
-        &[crate::shader::baked::BakedGroup {
-            rate: None,
-            label: None,
-            entries: &[
-                crate::shader::baked::BakedEntry {
-                    binding: 0,
-                    ty: crate::materials::BindingType::UniformBuffer,
-                    vis: 3,
-                    label: Some("DisplayOutputUniforms"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 1,
-                    ty: crate::materials::BindingType::Texture,
-                    vis: 3,
-                    label: Some("scene_color"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 2,
-                    ty: crate::materials::BindingType::Sampler,
-                    vis: 3,
-                    label: Some("scene_sampler"),
-                },
-            ],
         }],
     ),
     (
