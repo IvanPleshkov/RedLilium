@@ -4,7 +4,13 @@
 //! and manage rigid body / joint creation and removal.
 
 use super::rapier3d::prelude::*;
-use super::world3d::{ImpulseJoint3DHandle, PhysicsWorld3D, RigidBody3DHandle};
+use super::world3d::{
+    ImpulseJoint3DHandle, PhysicsInterpolation, PhysicsWorld3D, RigidBody3DHandle,
+};
+// The engine's `Quat` is f32 while this rapier build is f64, so name the f32
+// `UnitQuaternion` explicitly — the rapier prelude glob above would otherwise
+// supply the f64 one.
+use redlilium_core::math::nalgebra::UnitQuaternion;
 
 // ---- StepPhysics3D system ----
 
@@ -62,6 +68,127 @@ impl crate::System for StepPhysics3D {
                         r.x as f32, r.y as f32, r.z as f32, r.w as f32,
                     );
                 }
+            }
+        });
+        Ok(())
+    }
+}
+
+// ---- Fixed-step pose history + render interpolation ----
+
+/// Records each body's authoritative fixed-step pose into its
+/// [`PhysicsInterpolation`] history. Runs in `FixedUpdate` **after**
+/// [`StepPhysics3D`] (which has just written the post-step pose to
+/// `Transform`), so it executes exactly once per fixed step — including the
+/// extra iterations of a catch-up frame, leaving the two most recent steps in
+/// `prev`/`cur`.
+///
+/// Bodies without the component are seeded with `prev == cur`, so a freshly
+/// spawned body renders at its spawn pose instead of lerping in from wherever
+/// the history would otherwise have started.
+pub struct RecordPhysicsPose;
+
+impl crate::System for RecordPhysicsPose {
+    type Result = ();
+    fn run<'a>(
+        &'a self,
+        ctx: &'a crate::SystemContext<'a>,
+    ) -> Result<(), crate::system::SystemError> {
+        let to_seed = ctx
+            .lock::<(
+                crate::Read<RigidBody3DHandle>,
+                crate::Read<crate::Transform>,
+                crate::WriteAll<PhysicsInterpolation>,
+            )>()
+            .execute(|(handles, transforms, mut interps)| {
+                redlilium_core::profile_scope!("ecs: record_physics_pose_3d");
+                let mut seed = Vec::new();
+                for (idx, _handle) in handles.iter() {
+                    let Some(transform) = transforms.get(idx) else {
+                        continue;
+                    };
+                    if let Some(mut interp) = interps.get_mut(idx) {
+                        interp.prev_translation = interp.cur_translation;
+                        interp.prev_rotation = interp.cur_rotation;
+                        interp.cur_translation = transform.translation;
+                        interp.cur_rotation = transform.rotation;
+                    } else {
+                        seed.push((idx, transform.translation, transform.rotation));
+                    }
+                }
+                seed
+            });
+
+        if !to_seed.is_empty() {
+            ctx.commands(move |world| {
+                for (idx, translation, rotation) in to_seed {
+                    if let Some(entity) = world.entity_at_index(idx) {
+                        let _ = world.insert(
+                            entity,
+                            PhysicsInterpolation {
+                                prev_translation: translation,
+                                prev_rotation: rotation,
+                                cur_translation: translation,
+                                cur_rotation: rotation,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Blends each body's two most recent fixed-step poses into `Transform` for
+/// rendering, by the frame's [`Time::fixed_alpha`](crate::Time::fixed_alpha).
+///
+/// Runs in `PostUpdate` **before** transform propagation, so the interpolated
+/// pose is what `GlobalTransform` — and therefore the rasterizer and the
+/// motion-vector history — sees. Overwriting `Transform` is safe: Rapier owns
+/// the authoritative poses and never reads `Transform` back for an existing
+/// body, and [`RecordPhysicsPose`] snapshots the pose inside `FixedUpdate`
+/// before this system ever runs.
+pub struct InterpolatePhysics;
+
+impl crate::System for InterpolatePhysics {
+    type Result = ();
+    fn run<'a>(
+        &'a self,
+        ctx: &'a crate::SystemContext<'a>,
+    ) -> Result<(), crate::system::SystemError> {
+        // Worlds ticked without `run_frame` carry no `Time`; there is no
+        // accumulator to blend against, so show the latest step.
+        let alpha = {
+            let world = ctx.raw_world();
+            let banked = if world.has_resource::<crate::Time>() {
+                world.resource::<crate::Time>().fixed_alpha() as f32
+            } else {
+                1.0
+            };
+            banked.clamp(0.0, 1.0)
+        };
+
+        ctx.lock::<(
+            crate::Read<PhysicsInterpolation>,
+            crate::WriteAll<crate::Transform>,
+        )>()
+        .execute(|(interps, mut transforms)| {
+            redlilium_core::profile_scope!("ecs: interpolate_physics_3d");
+            for (idx, interp) in interps.iter() {
+                let Some(mut transform) = transforms.get_mut(idx) else {
+                    continue;
+                };
+                transform.translation =
+                    interp.prev_translation.lerp(&interp.cur_translation, alpha);
+                // Normalize before slerping: the recorded quaternions come from
+                // rapier and drift is cheap to absorb here. Antipodal pairs
+                // cannot arise between consecutive steps, but fall back to the
+                // latest pose rather than panicking if they somehow do.
+                let prev = UnitQuaternion::new_normalize(interp.prev_rotation);
+                let cur = UnitQuaternion::new_normalize(interp.cur_rotation);
+                let blended = prev.try_slerp(&cur, alpha, 1e-6).unwrap_or(cur);
+                transform.rotation = *blended.quaternion();
             }
         });
         Ok(())
@@ -578,5 +705,93 @@ mod tests {
             assert_eq!(physics.bodies.len(), 1);
             assert!(physics.entity_to_body.contains_key(&e));
         }
+    }
+
+    /// The pose history seeds itself on a body's first fixed step (`prev ==
+    /// cur`, so nothing lerps in from a bogus origin) and thereafter shifts by
+    /// exactly one step per run.
+    #[test]
+    fn record_physics_pose_seeds_then_shifts() {
+        use crate::compute::{ComputePool, IoRuntime};
+        use crate::system::{run_exclusive_system_once, run_system_once};
+        use redlilium_core::math::Vec3;
+
+        let mut world = crate::World::new();
+        crate::register_std_components(&mut world);
+        let compute = ComputePool::new(IoRuntime::new());
+        let io = IoRuntime::new();
+
+        let e = world.spawn();
+        let _ = world.insert(e, super::super::components3d::RigidBody3D::dynamic());
+        let _ = world.insert(e, super::super::components3d::Collider3D::ball(0.5));
+        let _ = world.insert(
+            e,
+            crate::Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
+        );
+        run_exclusive_system_once(&mut SyncPhysicsBodies3D, &mut world).unwrap();
+
+        // First record seeds the history at the body's current pose.
+        run_system_once(&RecordPhysicsPose, &mut world, &compute, &io).unwrap();
+        {
+            let interp = world.get::<PhysicsInterpolation>(e).expect("seeded");
+            assert_eq!(
+                interp.prev_translation, interp.cur_translation,
+                "a fresh body must not interpolate from anywhere"
+            );
+            assert_eq!(interp.cur_translation.y, 1.0);
+        }
+
+        // A later step shifts cur -> prev and records the new pose.
+        let _ = world.insert(
+            e,
+            crate::Transform::from_translation(Vec3::new(0.0, 2.0, 0.0)),
+        );
+        run_system_once(&RecordPhysicsPose, &mut world, &compute, &io).unwrap();
+        let interp = world.get::<PhysicsInterpolation>(e).expect("recorded");
+        assert_eq!(interp.prev_translation.y, 1.0, "previous step retained");
+        assert_eq!(interp.cur_translation.y, 2.0, "latest step recorded");
+    }
+
+    /// A render frame landing between two fixed steps shows the blend, not the
+    /// latest step — this is what removes the staircase when the render rate
+    /// and the fixed physics rate disagree.
+    #[test]
+    fn interpolate_physics_blends_fixed_step_poses() {
+        use crate::{EcsRunner, PostUpdate, Schedules, Transform};
+        use redlilium_core::math::{Quat, Vec3};
+
+        let mut world = crate::World::new();
+        crate::register_std_components(&mut world);
+
+        let e = world.spawn();
+        world.insert(e, Transform::default()).unwrap();
+        world
+            .insert(
+                e,
+                PhysicsInterpolation {
+                    prev_translation: Vec3::new(0.0, 0.0, 0.0),
+                    prev_rotation: Quat::identity(),
+                    cur_translation: Vec3::new(4.0, 0.0, 0.0),
+                    cur_rotation: Quat::identity(),
+                },
+            )
+            .unwrap();
+
+        let mut schedules = Schedules::new();
+        schedules.get_mut::<PostUpdate>().add(InterpolatePhysics);
+        // 1/50 s step, 1/100 s frame: no step retires, half a step is banked.
+        schedules.set_fixed_timestep(1.0 / 50.0);
+        schedules.run_frame(&mut world, &EcsRunner::single_thread(), 1.0 / 100.0);
+
+        assert!(
+            (world.resource::<crate::Time>().fixed_alpha() - 0.5).abs() < 1e-9,
+            "half a fixed step banked"
+        );
+        let transform = world.get::<Transform>(e).expect("transform");
+        assert!(
+            (transform.translation.x - 2.0).abs() < 1e-5,
+            "rendered pose must be the midpoint, got {}",
+            transform.translation.x
+        );
     }
 }

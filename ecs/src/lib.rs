@@ -256,6 +256,7 @@ pub fn register_std_components(world: &mut World) {
         world.register_inspector::<physics::components3d::ImpulseJoint3D>();
         world.register_component::<physics::physics3d::RigidBody3DHandle>();
         world.register_component::<physics::physics3d::ImpulseJoint3DHandle>();
+        world.register_component::<physics::physics3d::PhysicsInterpolation>();
     }
     #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
     {

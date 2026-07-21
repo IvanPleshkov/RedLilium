@@ -19,7 +19,9 @@ use redlilium_core::input::KeyCode;
 use redlilium_core::math::{Quat, Vec3, nalgebra};
 use redlilium_ecs::physics::components3d::{Collider3D, RigidBody3D};
 use redlilium_ecs::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
-use redlilium_ecs::physics::systems3d::{StepPhysics3D, SyncPhysicsBodies3D};
+use redlilium_ecs::physics::systems3d::{
+    InterpolatePhysics, RecordPhysicsPose, StepPhysics3D, SyncPhysicsBodies3D,
+};
 use redlilium_ecs::{
     Camera, CameraAutoExposure, CameraBloom, Component, DirectionalLight, Entity, ExclusiveSystem,
     GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, Name,
@@ -392,20 +394,36 @@ impl Plugin for CarGamePlugin {
         // (equal sim steps shown at unequal real intervals). The drive system
         // sits between body sync and the step; StepPhysics3D reads the fixed
         // timestep from `Time::fixed_delta`.
+        // Physics ticks deliberately below the render rate; render-side
+        // interpolation (below) hides the mismatch, so this is a pure
+        // simulation-fidelity vs CPU dial, not a smoothness one.
+        app.schedules_mut().set_fixed_timestep(1.0 / 45.0);
+
         let fixed = app.schedule_mut::<redlilium_ecs::FixedUpdate>();
         fixed.add_exclusive(SyncPhysicsBodies3D);
         fixed.add(DriveCar);
         fixed.add(StepPhysics3D);
+        fixed.add(RecordPhysicsPose);
         fixed
             .add_edge::<SyncPhysicsBodies3D, DriveCar>()
             .expect("no cycle");
         fixed
             .add_edge::<DriveCar, StepPhysics3D>()
             .expect("no cycle");
+        // Snapshot the pose the step just wrote, once per fixed step.
+        fixed
+            .add_edge::<StepPhysics3D, RecordPhysicsPose>()
+            .expect("no cycle");
 
-        // Camera follows the post-step pose, before transforms propagate.
+        // Interpolate the two most recent fixed steps into Transform, then let
+        // the camera follow that (so it tracks the on-screen car, not the raw
+        // step), then propagate — the interpolated pose is what renders and
+        // what the motion-vector history snapshots.
         let post = app.schedule_mut::<PostUpdate>();
+        post.add(InterpolatePhysics);
         post.add(UpdateFollowCamera);
+        post.add_edge::<InterpolatePhysics, UpdateFollowCamera>()
+            .expect("no cycle");
         post.add_edge::<UpdateFollowCamera, UpdateGlobalTransforms>()
             .expect("no cycle");
     }
