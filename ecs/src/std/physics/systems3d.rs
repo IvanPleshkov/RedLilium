@@ -21,6 +21,18 @@ impl crate::System for StepPhysics3D {
         &'a self,
         ctx: &'a crate::SystemContext<'a>,
     ) -> Result<(), crate::system::SystemError> {
+        // Integrator dt: physics is scheduled in `FixedUpdate`, so advance
+        // Rapier by the fixed timestep (`Time::fixed_delta`) instead of its
+        // hardcoded default `dt` — otherwise changing the fixed rate would
+        // silently desync simulated time from real time. Worlds ticked without
+        // `run_frame` (e.g. the physics demo) carry no `Time`; leave their
+        // integrator dt untouched there.
+        let fixed_dt = {
+            let world = ctx.raw_world();
+            world
+                .has_resource::<crate::Time>()
+                .then(|| world.resource::<crate::Time>().fixed_delta())
+        };
         ctx.lock::<(
             crate::ResMut<PhysicsWorld3D>,
             crate::Read<RigidBody3DHandle>,
@@ -29,7 +41,10 @@ impl crate::System for StepPhysics3D {
         .execute(|(mut physics, handles, mut transforms)| {
             redlilium_core::profile_scope!("ecs: step_physics_3d");
 
-            // Step simulation
+            // Step simulation at the fixed timestep (see above).
+            if let Some(dt) = fixed_dt {
+                physics.integration_parameters.dt = dt;
+            }
             physics.step();
 
             // Sync positions back to transforms

@@ -169,7 +169,8 @@ impl System for DriveCar {
 
 /// Places the [`FollowCamera`] behind its [`CarController`] target with
 /// exponential smoothing. Runs in `PostUpdate` before transform propagation,
-/// reading the chassis pose [`StepPhysics3D`] wrote during `Update`.
+/// reading the chassis pose [`StepPhysics3D`] wrote during `FixedUpdate`
+/// (which runs earlier in the same frame, so the pose is this frame's latest).
 pub struct UpdateFollowCamera;
 
 impl System for UpdateFollowCamera {
@@ -382,16 +383,23 @@ impl Plugin for CarGamePlugin {
         pre.add_edge::<redlilium_ecs::ApplySceneTransitions, SpawnCarAtMarkers>()
             .expect("no cycle");
 
-        // Physics pipeline: the drive system sits between body sync and the
-        // step.
-        let update = app.schedule_mut::<Update>();
-        update.add_exclusive(SyncPhysicsBodies3D);
-        update.add(DriveCar);
-        update.add(StepPhysics3D);
-        update
+        // Physics pipeline runs at a FIXED timestep (the FixedUpdate
+        // accumulator), so simulation speed is decoupled from frame rate: one
+        // 1/60 step per accumulated 1/60 of real time — 0 steps on a fast
+        // frame, N to catch up a slow one — instead of exactly one step per
+        // rendered frame. The old per-frame stepping ran the world in
+        // frame-rate-dependent slow-motion and juddered under full-screen load
+        // (equal sim steps shown at unequal real intervals). The drive system
+        // sits between body sync and the step; StepPhysics3D reads the fixed
+        // timestep from `Time::fixed_delta`.
+        let fixed = app.schedule_mut::<redlilium_ecs::FixedUpdate>();
+        fixed.add_exclusive(SyncPhysicsBodies3D);
+        fixed.add(DriveCar);
+        fixed.add(StepPhysics3D);
+        fixed
             .add_edge::<SyncPhysicsBodies3D, DriveCar>()
             .expect("no cycle");
-        update
+        fixed
             .add_edge::<DriveCar, StepPhysics3D>()
             .expect("no cycle");
 
@@ -1059,14 +1067,17 @@ mod tests {
 
         let mut schedules = Schedules::new();
         {
-            let update = schedules.get_mut::<Update>();
-            update.add_exclusive(SyncPhysicsBodies3D);
-            update.add(DriveCar);
-            update.add(StepPhysics3D);
-            update
+            // Mirror the production wiring: physics in FixedUpdate. The tests
+            // drive one 1/60 `run_frame` per loop, so the accumulator runs
+            // exactly one fixed step per call — same trajectory as before.
+            let fixed = schedules.get_mut::<redlilium_ecs::FixedUpdate>();
+            fixed.add_exclusive(SyncPhysicsBodies3D);
+            fixed.add(DriveCar);
+            fixed.add(StepPhysics3D);
+            fixed
                 .add_edge::<SyncPhysicsBodies3D, DriveCar>()
                 .expect("no cycle");
-            update
+            fixed
                 .add_edge::<DriveCar, StepPhysics3D>()
                 .expect("no cycle");
         }
