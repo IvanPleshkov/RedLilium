@@ -890,7 +890,10 @@ impl CameraResources {
                 resolve_material.binding_layouts()[3].clone(),
                 BindingGroupDescriptor::new()
                     .with_texture(0, ao_texture)
-                    .with_sampler(1, shared.gbuffer_sampler.clone()),
+                    // Linear + clamp (ibl_sampler): the AO target is half-res,
+                    // so the resolve bilinearly upsamples it to full res. The
+                    // 1×1 white fallback samples identically.
+                    .with_sampler(1, shared.ibl_sampler.clone()),
             )
             .ok()?;
         let resolve = Arc::new(
@@ -1420,16 +1423,24 @@ impl CameraRenderPipeline for DeferredPipeline {
         // regardless, so unused targets are harmless (memory is the only cost).
         let ao_enabled = world.get::<super::CameraAmbientOcclusion>(camera).is_some();
         if ao_enabled {
+            // Half-res (#150 perf): SSAO is low-frequency and the bilateral
+            // denoise + bilinear upsample in the resolve hide the lower
+            // sampling rate, so both SSAO passes run at half the G-buffer
+            // extent — ~4× fewer invocations, the dominant cost lever. The
+            // per-frame texel the shaders sample by is derived from these same
+            // dims (`div_ceil` keeps odd extents in step).
+            let ao_w = width.div_ceil(2).max(1);
+            let ao_h = height.div_ceil(2).max(1);
             let ao_stale = targets
                 .get(SSAO_AO)
-                .map(|t| t.size().width != width || t.size().height != height)
+                .map(|t| t.size().width != ao_w || t.size().height != ao_h)
                 .unwrap_or(true);
             if ao_stale {
                 let usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING;
                 for name in [SSAO_RAW, SSAO_AO] {
                     let texture = device
                         .create_texture(
-                            &TextureDescriptor::new_2d(width, height, SSAO_FORMAT, usage)
+                            &TextureDescriptor::new_2d(ao_w, ao_h, SSAO_FORMAT, usage)
                                 .with_label(name),
                         )
                         .expect("create SSAO texture");
@@ -1682,11 +1693,16 @@ impl CameraRenderPipeline for DeferredPipeline {
                     .get::<crate::std::components::Camera>(view.entity)
                     .zip(world.get::<super::CameraAmbientOcclusion>(view.entity))
                     .map(|(cam, ao)| {
+                        // Texel of the half-res SSAO target (built at
+                        // width.div_ceil(2) × height.div_ceil(2)): it sets the
+                        // march step size, the sub-texel guard, the IGN pixel
+                        // grid, and the blur tap stride — all in SSAO-target
+                        // space, so it must match the half-res extent, not the
+                        // full-res scene.
                         let size = scene_color.size();
-                        let texel = [
-                            1.0 / size.width.max(1) as f32,
-                            1.0 / size.height.max(1) as f32,
-                        ];
+                        let ao_w = size.width.div_ceil(2).max(1);
+                        let ao_h = size.height.div_ceil(2).max(1);
+                        let texel = [1.0 / ao_w as f32, 1.0 / ao_h as f32];
                         let frame_rot = if taa_read_index.is_some() {
                             world.resource::<super::TemporalState>().frame() as f32 * GOLDEN_ANGLE
                         } else {
