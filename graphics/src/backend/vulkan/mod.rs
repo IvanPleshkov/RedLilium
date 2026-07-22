@@ -229,6 +229,12 @@ pub struct VulkanBackend {
     surface_loader: ash::khr::surface::Instance,
     /// Swapchain extension.
     swapchain_loader: ash::khr::swapchain::Device,
+    /// Present-wait extension entry points, present only when the device
+    /// supports present pacing (`VK_KHR_present_id` + `VK_KHR_present_wait`)
+    /// and the extensions were enabled at device creation. The swapchain uses
+    /// it to bound how many presents the CPU can queue ahead of the display
+    /// (see `swapchain::present_vulkan_frame`).
+    present_wait_loader: Option<ash::khr::present_wait::Device>,
     /// Per-frame-slot command pools for the render-graph submit. Each slot's
     /// pool is reset wholesale (`vkResetCommandPool`) once its fence signals,
     /// which frees all of that frame's command buffers at once (cheaper than
@@ -889,6 +895,19 @@ impl VulkanBackend {
         // Load swapchain extension
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
+        // Present-wait entry points, only when the extensions were actually
+        // enabled on the device (calling them otherwise is UB).
+        let present_wait_loader = (surface_support && selected.optional.present_wait)
+            .then(|| ash::khr::present_wait::Device::new(&instance, &device));
+        log::info!(
+            "Swapchain present pacing (VK_KHR_present_wait): {}",
+            if present_wait_loader.is_some() {
+                "available"
+            } else {
+                "unavailable"
+            }
+        );
+
         // Create layout tracker for automatic barrier placement. Mesh-shading
         // augmentation (#114) mirrors the buffer tracker: shader-stage barrier
         // scopes additionally cover the task/mesh stages when VK_EXT_mesh_shader
@@ -968,6 +987,7 @@ impl VulkanBackend {
             validation_enabled,
             surface_loader,
             swapchain_loader,
+            present_wait_loader,
             frame_command_pools,
             current_slot: AtomicUsize::new(0),
             frame_index: AtomicU64::new(0),
@@ -1216,6 +1236,12 @@ impl VulkanBackend {
     /// Get the swapchain loader.
     pub fn swapchain_loader(&self) -> &ash::khr::swapchain::Device {
         &self.swapchain_loader
+    }
+
+    /// Present-wait extension entry points, when the device supports present
+    /// pacing (`VK_KHR_present_id` + `VK_KHR_present_wait`).
+    pub fn present_wait_loader(&self) -> Option<&ash::khr::present_wait::Device> {
+        self.present_wait_loader.as_ref()
     }
 
     /// Get the command pool.
