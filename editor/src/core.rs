@@ -127,6 +127,11 @@ pub fn scan_local_mounts(engine: &EngineContext, local_mounts: &[(&'static str, 
     }
 }
 
+/// Dynamic-uniform scratch each editing-world frame may consume, bytes (the
+/// ring reserves this much per in-flight frame — see [`FrameRing`]). Sized like
+/// the runtime's: pushes are 256-byte aligned, so this is ~16k per frame.
+const SCENE_FRAME_RING_BYTES: u64 = 4 << 20;
+
 /// Create a new editor world with a simple demo scene.
 ///
 /// Persistent state (GPU managers, asset DB/processor) comes from the
@@ -223,8 +228,12 @@ pub fn create_editor_world_base(
     // Scene forward-pass dynamic-uniform ring (an ECS resource). Give the
     // scene view its buffer so per-primitive materials bind it; the buffer is
     // needed before any entity is created below.
-    let frame_ring = FrameRing::new(scene_view.device(), 1 << 20, "scene_frame_ring")
-        .expect("Failed to create scene frame ring");
+    let frame_ring = FrameRing::new(
+        scene_view.device(),
+        SCENE_FRAME_RING_BYTES,
+        "scene_frame_ring",
+    )
+    .expect("Failed to create scene frame ring");
     scene_view.set_frame_ring_buffer(frame_ring.buffer().clone());
     world.insert_resource(frame_ring);
     // The CameraRender dispatcher records its scene-pass handle here so the

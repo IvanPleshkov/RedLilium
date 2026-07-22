@@ -311,6 +311,12 @@ impl System for CameraRender {
             state.frame()
         });
 
+        // Hand this frame its own region of the uniform ring, once per frame and
+        // before any pass records a push. Every `FrameRing::push` in the engine
+        // runs underneath this dispatcher (both pipelines' `record` and
+        // `VisibleScene::gather`), so this is the one place that has to know.
+        world.resource_mut::<FrameRing>().begin_frame();
+
         // Every entity with a Camera AND a CameraTarget renders (ADR-029):
         // its RenderPath's pipeline records into its own target. Offscreen
         // cameras are emitted first, the primary (screen) camera last — so
