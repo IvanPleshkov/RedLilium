@@ -140,6 +140,17 @@ impl ScheduleId {
 // Time resource
 // ---------------------------------------------------------------------------
 
+/// The wall-clock CPU delta between frame starts, in seconds, *before* the
+/// host's frame pacing produced the delta that drives [`Time`].
+///
+/// Inserted each frame by hosts that pace their frame delta (the runtime,
+/// #149). Under a blocking present (vsync) the two can differ wildly frame to
+/// frame — the CPU wakes at scheduler-jittered instants and bursts after the
+/// present queue drains — so this is a diagnostic for frame-timing HUDs and
+/// logs. Motion and simulation must use [`Time`]. Absent when the host does
+/// not pace (or predates pacing); consumers must tolerate that.
+pub struct RawFrameDelta(pub f64);
+
 /// Time resource providing frame timing information to systems.
 ///
 /// Inserted into the [`World`] automatically by [`Schedules::run_frame`].

@@ -12,6 +12,7 @@
 //! system through [`GameUi`], with a Quit button driving [`AppControl`].
 #![recursion_limit = "256"]
 
+use std::collections::VecDeque;
 use std::f32::consts::FRAC_PI_4;
 
 use redlilium_assets::Guid;
@@ -25,8 +26,9 @@ use redlilium_ecs::physics::systems3d::{
 use redlilium_ecs::{
     Camera, CameraAutoExposure, CameraBloom, Component, DirectionalLight, Entity, ExclusiveSystem,
     GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, Name,
-    PostUpdate, Primitive, Read, Res, ResMut, SceneManager, System, SystemContext, SystemError,
-    Time, Transform, Update, UpdateGlobalTransforms, Visibility, WindowInput, World, WriteAll,
+    PostUpdate, Primitive, RawFrameDelta, Read, Res, ResMut, SceneManager, System, SystemContext,
+    SystemError, Time, Transform, Update, UpdateGlobalTransforms, Visibility, WindowInput, World,
+    WriteAll,
 };
 use redlilium_runtime::{App, GameUi, Plugin};
 // The Quit button is native-only (a browser tab has no "exit").
@@ -258,7 +260,16 @@ impl System for UpdateFollowCamera {
 /// States by [`SceneManager::current`]: the level scene → gameplay HUD, Esc
 /// returns to the menu; anything else → main menu with Play (switches to the
 /// level) and Quit.
-pub struct GameFlowUi;
+#[derive(Default)]
+pub struct GameFlowUi {
+    /// Sliding window of raw CPU frame deltas (seconds) behind the HUD's
+    /// min/max — long enough to catch the present-queue refill bursts that
+    /// follow a hitch (see redlilium-app's `pacing`).
+    raw_deltas: VecDeque<f64>,
+}
+
+/// Frames of raw-delta history behind the HUD min/max — ~2 s at 60 fps.
+const RAW_DELTA_WINDOW: usize = 120;
 
 /// The game camera entity, stashed at spawn so the in-game debug HUD can toggle
 /// per-camera post effects (bloom, #151) on it without a query→entity lookup.
@@ -280,6 +291,24 @@ impl ExclusiveSystem for GameFlowUi {
 
         if in_game {
             let delta = world.resource::<Time>().delta();
+            // The unpaced CPU delta the host published, if it does (the
+            // runtime, #149) — paced vs raw side by side is what tells a real
+            // missed-vsync cadence from a pacing artifact.
+            let raw = world
+                .has_resource::<RawFrameDelta>()
+                .then(|| world.resource::<RawFrameDelta>().0);
+            let raw_stats = raw.map(|raw| {
+                if self.raw_deltas.len() == RAW_DELTA_WINDOW {
+                    self.raw_deltas.pop_front();
+                }
+                self.raw_deltas.push_back(raw);
+                let (mut min, mut max) = (raw, raw);
+                for &d in &self.raw_deltas {
+                    min = min.min(d);
+                    max = max.max(d);
+                }
+                (raw, min, max)
+            });
             // PhysicsWorld3D appears once SyncPhysicsBodies3D first runs;
             // there is no ordering edge to it, so tolerate the first frame.
             let speed = if world.has_resource::<PhysicsWorld3D>() {
@@ -307,6 +336,14 @@ impl ExclusiveSystem for GameFlowUi {
                 .resizable(false)
                 .show(&egui_ctx, |ui| {
                     ui.label(format!("frame: {:.2} ms", delta * 1000.0));
+                    if let Some((raw, min, max)) = raw_stats {
+                        ui.label(format!(
+                            "raw: {:.2} ms  [{:.1}..{:.1}]",
+                            raw * 1000.0,
+                            min * 1000.0,
+                            max * 1000.0
+                        ));
+                    }
                     ui.label(format!("speed: {speed:.1} m/s"));
                     if let Some(on) = bloom_on.as_mut() {
                         ui.checkbox(on, "Bloom");
@@ -396,7 +433,8 @@ impl Plugin for CarGamePlugin {
         log::info!("CarGamePlugin::build");
         // Exclusive: the HUD's bloom toggle (#151) inserts/removes a component,
         // which needs &mut World.
-        app.schedule_mut::<Update>().add_exclusive(GameFlowUi);
+        app.schedule_mut::<Update>()
+            .add_exclusive(GameFlowUi::default());
 
         // Marker-driven car spawn (#105), right after scene swaps land so the
         // car exists the same frame the level appears. `build` runs only in a

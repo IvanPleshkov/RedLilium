@@ -163,6 +163,9 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
 
         let (world, schedules) = state.app.parts_mut();
         world.insert_resource(redlilium_ecs::DisplayHeadroom(self.display_headroom));
+        // The unpaced CPU delta, for frame-timing HUDs — `run_frame` gets the
+        // paced one that motion must use (see redlilium-app's `pacing`).
+        world.insert_resource(redlilium_ecs::RawFrameDelta(ctx.raw_delta_time() as f64));
         schedules.run_frame(world, &state.runner, ctx.delta_time() as f64);
 
         // Game-requested exit (#100). On wasm a browser tab has no process to

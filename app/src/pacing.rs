@@ -26,6 +26,18 @@
 //! away from the wall clock. When deltas are *not* clustered on refresh
 //! multiples — a variable-refresh display, a compositor that does not block,
 //! a genuine hitch — nothing is snapped and the raw delta passes through.
+//!
+//! One more distortion needs the present mode to untangle
+//! ([`FramePacer::set_vsync`]): the swapchain keeps a queue of
+//! `frames_in_flight` images, so right after a long frame the queue has room
+//! and acquire returns *instantly* for a frame or two — CPU deltas of a few
+//! milliseconds on a 60 Hz display (`33, 4.7, 4.7, 29, 16.7, …`). Those
+//! sub-period deltas are the queue refilling, not short displays: under a
+//! blocking present every one of those frames is still shown for at least a
+//! whole interval. Passing them through freezes the simulation for a frame
+//! while the display advances a full interval — a visible stutter around
+//! every hitch. With vsync declared, sub-period deltas are attributed one
+//! whole interval and the difference is banked in the residue.
 
 use std::collections::VecDeque;
 
@@ -62,6 +74,10 @@ pub struct FramePacer {
     /// Carried residue (`Σraw − Σpaced`), bled back a bounded amount per frame
     /// so snapping cannot drift the simulation clock off the wall clock.
     residue: f32,
+    /// Whether the present blocks on the display (FIFO). Enables the
+    /// queue-refill correction: no frame can be shown for less than one
+    /// interval, so sub-period deltas snap up instead of passing through.
+    vsync: bool,
 }
 
 impl Default for FramePacer {
@@ -76,6 +92,7 @@ impl FramePacer {
             history: VecDeque::with_capacity(HISTORY),
             hint: None,
             residue: 0.0,
+            vsync: false,
         }
     }
 
@@ -83,6 +100,22 @@ impl FramePacer {
     /// Implausible values are ignored, which also covers "no monitor".
     pub fn set_display_period(&mut self, period: Option<f32>) {
         self.hint = period.filter(|p| (MIN_PERIOD..=MAX_PERIOD).contains(p));
+    }
+
+    /// Declare whether the present blocks on the display (FIFO/vsync).
+    ///
+    /// Under a blocking present no frame is displayed for less than one whole
+    /// interval, so a sub-period CPU delta can only be the present queue
+    /// refilling after a long frame — [`pace`](Self::pace) then attributes it
+    /// one interval instead of passing it through. Safe with adaptive sync:
+    /// VRR stretches intervals beyond the period, never below it.
+    pub fn set_vsync(&mut self, vsync: bool) {
+        self.vsync = vsync;
+    }
+
+    /// The current display-period estimate, if any — for diagnostics.
+    pub fn display_period(&self) -> Option<f32> {
+        self.period()
     }
 
     /// Best estimate of the display period: the reported one, else the median
@@ -117,9 +150,16 @@ impl FramePacer {
         let multiple = (raw / period).round().max(1.0);
         let snapped = multiple * period;
         if (raw - snapped).abs() > snapped * SNAP_TOLERANCE {
-            // Not a quantized cadence: no honest multiple to attribute this
-            // frame to, so leave the measurement alone.
-            return raw;
+            // A sub-period delta under a blocking present is the queue
+            // refilling after a long frame (see module docs): the frame is
+            // still shown for one whole interval, so attribute that interval
+            // (`raw < period` implies `multiple == 1`) and bank the
+            // difference. Anything else is not a quantized cadence — no
+            // honest multiple to attribute the frame to, so leave the
+            // measurement alone.
+            if !(self.vsync && raw < period) {
+                return raw;
+            }
         }
 
         self.residue = (self.residue + raw - snapped).clamp(-MAX_RESIDUE, MAX_RESIDUE);
@@ -186,6 +226,65 @@ mod tests {
         let mut pacer = FramePacer::new();
         // No hint and no history yet — nothing to snap against.
         assert_eq!(pacer.pace(0.0181), 0.0181);
+    }
+
+    #[test]
+    fn attributes_queue_refill_bursts_a_whole_interval_under_vsync() {
+        let period = 1.0 / 60.0f32;
+        let mut pacer = FramePacer::new();
+        pacer.set_display_period(Some(period));
+        pacer.set_vsync(true);
+
+        // Steady, then a hitch drains the present queue and two frames refill
+        // it near-instantly — the cadence FIFO produces around any hitch.
+        for _ in 0..30 {
+            pacer.pace(period);
+        }
+        pacer.pace(2.0 * period);
+        for _ in 0..2 {
+            let paced = pacer.pace(0.3 * period);
+            assert!(
+                paced >= period - MAX_BLEED - 1e-6,
+                "refill frame paced to {paced}, below one display interval"
+            );
+            assert!(paced <= period + MAX_BLEED + 1e-6);
+        }
+    }
+
+    #[test]
+    fn passes_queue_refill_deltas_through_without_vsync() {
+        let mut pacer = FramePacer::new();
+        pacer.set_display_period(Some(1.0 / 60.0));
+        // No blocking present declared: a sub-period delta may be a genuine
+        // short display (immediate mode), so it must not be inflated.
+        let raw = 0.0047;
+        assert_eq!(pacer.pace(raw), raw);
+    }
+
+    #[test]
+    fn repays_the_refill_attribution_so_the_clock_tracks_wall_time() {
+        let period = 1.0 / 60.0f32;
+        let mut pacer = FramePacer::new();
+        pacer.set_display_period(Some(period));
+        pacer.set_vsync(true);
+
+        let (mut raw_total, mut paced_total) = (0.0f32, 0.0f32);
+        let mut feed = |pacer: &mut FramePacer, raw: f32| {
+            raw_total += raw;
+            paced_total += pacer.pace(raw);
+        };
+        feed(&mut pacer, 2.0 * period);
+        feed(&mut pacer, 0.3 * period);
+        feed(&mut pacer, 0.3 * period);
+        // The refill over-attribution is banked in the residue and bled back
+        // a bounded amount per frame; a second of steady frames repays it.
+        for _ in 0..60 {
+            feed(&mut pacer, period);
+        }
+        assert!(
+            (paced_total - raw_total).abs() < 1e-3,
+            "paced {paced_total}s drifted from raw {raw_total}s"
+        );
     }
 
     #[test]
