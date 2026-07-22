@@ -93,9 +93,9 @@ impl ViewportTool for ConnectRoadsTool {
                 // First click on a node: anchor there.
                 (None, Some(node), _) => self.anchor = Some(node),
                 // Click a second node: connect, chain from it. A socket
-                // target is met from its front (+Z) side — except a parcel
-                // gate approached from inside the parcel, which accepts the
-                // internal road from behind.
+                // target is met from its front (+Z) side — except a gate,
+                // which is two-sided and accepts a road from whichever
+                // side it comes from.
                 (Some(anchor), Some(node), _) => {
                     if node != anchor {
                         let from_front = socket_meets_front(ctx.world, node, anchor);
@@ -278,15 +278,15 @@ fn road_touches(world: &World, road: Entity, node: Option<Entity>) -> bool {
 
 /// Which side a road drawn from `from` meets socket `node` on. Junction
 /// connectors and edge-anchored nodes only ever accept their front (+Z) —
-/// the back side is junction fill / the parent road. A **parcel gate is
-/// two-sided**: a network road (anchor on the gate's front side) arrives
-/// from the front, an internal road (anchor behind — inside the parcel)
+/// the back side is junction fill / the parent road. A **gate is
+/// two-sided**: it sits on a stroke, which has no interior — a road
+/// arriving from the gate's front meets the front, a road from behind
 /// connects from behind. Non-sockets always take the default −Z arrival.
 fn socket_meets_front(world: &World, node: Entity, from: Entity) -> bool {
     if !is_socket(world, node) {
         return false;
     }
-    if world.get::<crate::parcel::ParcelGate>(node).is_some()
+    if world.get::<crate::stroke::Gate>(node).is_some()
         && let (Some((gate_m, _)), Some((from_m, _))) =
             (node_shape(world, node), node_shape(world, from))
     {
@@ -301,13 +301,11 @@ fn socket_meets_front(world: &World, node: Entity, from: Entity) -> bool {
 }
 
 /// Whether `node` is a socket — a junction connector, an edge-anchored
-/// node, or a parcel gate. Sockets keep +Z toward the road network, so a
+/// node, or a stroke gate. Sockets keep +Z toward the road network, so a
 /// road arriving AT one must meet it from the front
 /// (`RoadSegment::b_from_front`).
 fn is_socket(world: &World, node: Entity) -> bool {
-    if world.get::<EdgeAnchor>(node).is_some()
-        || world.get::<crate::parcel::ParcelGate>(node).is_some()
-    {
+    if world.get::<EdgeAnchor>(node).is_some() || world.get::<crate::stroke::Gate>(node).is_some() {
         return true;
     }
     if let Ok(junctions) = world.read_all::<crate::Junction>()
@@ -394,23 +392,23 @@ pub(crate) fn selection_pick(
             consider(dist, ROAD_HANDLE_PICK_RADIUS, t, road);
         }
     }
-    if let Ok(parcels) = world.read_all::<crate::parcel::Parcel>() {
-        for (index, parcel) in parcels.iter() {
+    if let Ok(strokes) = world.read_all::<crate::stroke::Stroke>() {
+        for (index, stroke) in strokes.iter() {
             let Some(entity) = world.entity_at_index(index) else {
                 continue;
             };
-            let Some(lp) = crate::parcel::parcel_loop(world, parcel) else {
+            let Some(path) = crate::stroke::stroke_path(world, stroke) else {
                 continue;
             };
-            // The parcel picks by its (tessellated) boundary polyline; the
-            // vertex handle cubes pick the vertex entities themselves (they
-            // win by being strictly closer to the ray than the segments
+            // The stroke picks by its (tessellated) open path; the vertex
+            // handle cubes pick the vertex entities themselves (they win
+            // by being strictly closer to the ray than the segments
             // through them).
-            for i in 0..lp.len() {
-                let (dist, _, t) = ray_segment_closest(ray, lp[i], lp[(i + 1) % lp.len()]);
+            for i in 0..path.len() - 1 {
+                let (dist, _, t) = ray_segment_closest(ray, path[i], path[i + 1]);
                 consider(dist, PICK_RADIUS, t, entity);
             }
-            if let Some(corners) = crate::parcel::parcel_corners(world, parcel) {
+            if let Some(corners) = crate::stroke::stroke_corners(world, stroke) {
                 for (vertex, p, _, _) in corners {
                     let (dist, _, t) = ray_segment_closest(ray, p, p);
                     consider(dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
@@ -622,9 +620,7 @@ fn reorientable(world: &World, node: Entity, exclude: Entity) -> Option<Entity> 
     if roads != 2 {
         return None;
     }
-    if world.get::<EdgeAnchor>(node).is_some()
-        || world.get::<crate::parcel::ParcelGate>(node).is_some()
-    {
+    if world.get::<EdgeAnchor>(node).is_some() || world.get::<crate::stroke::Gate>(node).is_some() {
         return None;
     }
     if let Ok(junctions) = world.read_all::<crate::Junction>()
@@ -801,7 +797,7 @@ mod tests {
         world.register_inspector_default::<RoadNode>();
         world.register_inspector_default::<crate::Junction>();
         world.register_inspector_default::<EdgeAnchor>();
-        world.register_inspector_default::<crate::parcel::ParcelGate>();
+        world.register_inspector_default::<crate::stroke::Gate>();
 
         let spawn = |world: &mut World, x: f32, yaw: f32| {
             let e = world.spawn();
@@ -815,14 +811,14 @@ mod tests {
             world.insert(e, RoadNode::default()).unwrap();
             e
         };
-        // Gate at the origin facing +X (its parcel is to the west).
+        // Gate at the origin facing +X (its stroke runs north-south).
         let gate = spawn(&mut world, 0.0, std::f32::consts::FRAC_PI_2);
-        world.insert(gate, crate::parcel::ParcelGate).unwrap();
+        world.insert(gate, crate::stroke::Gate).unwrap();
         let outside = spawn(&mut world, 5.0, 0.0);
         let inside = spawn(&mut world, -5.0, 0.0);
 
-        // Network road from outside → meets the gate's front; internal
-        // road from inside the parcel → meets it from behind.
+        // A road from the gate's front side meets the front; a road from
+        // behind the line connects from behind.
         assert!(socket_meets_front(&world, gate, outside));
         assert!(!socket_meets_front(&world, gate, inside));
         // Other sockets stay front-only regardless of approach side.
@@ -832,17 +828,17 @@ mod tests {
     }
 
     #[test]
-    fn parcel_gate_is_a_socket() {
+    fn gate_is_a_socket() {
         let mut world = World::new();
         redlilium_ecs::register_std_components(&mut world);
         world.register_inspector_default::<RoadNode>();
         world.register_inspector_default::<crate::Junction>();
         world.register_inspector_default::<EdgeAnchor>();
-        world.register_inspector_default::<crate::parcel::ParcelGate>();
+        world.register_inspector_default::<crate::stroke::Gate>();
 
         let gate = world.spawn();
         world.insert(gate, RoadNode::default()).unwrap();
-        world.insert(gate, crate::parcel::ParcelGate).unwrap();
+        world.insert(gate, crate::stroke::Gate).unwrap();
         assert!(is_socket(&world, gate));
         // A plain node is not.
         let plain = world.spawn();

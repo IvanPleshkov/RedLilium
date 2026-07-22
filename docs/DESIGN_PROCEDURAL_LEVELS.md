@@ -105,63 +105,66 @@ the entities mean.
   junction fills the −Z side. Roads should attach to a connector as their
   `a` end (departing along +Z).
 - **Terrain control point** — entity with `Transform` +
-  `TerrainControlPoint`. Terrain fills the regions *between* roads **and
-  parcels** (faces of the planar graph formed by road edges and lot
-  perimeters, projected to ground plane); control points bend the
-  interpolated surface where plain filling is too flat.
-  **Terrain is the final fill** (decided 2026-07-19): it conforms to roads
-  and architecture — road edges and parcel boundaries (curves *with heights*)
-  are boundary conditions of the fill, never constraints on them. The fill
-  is not necessarily continuous at a parcel perimeter: a parcel may be
-  **cut or filled into the surrounding ground with a sharp transition**
-  (a flat parking pad in a slope — excavated or embanked); the transition
-  geometry (scarp, retaining) is generated from the height delta along the
-  seam, it is never authored as meshes. In particular, nothing in the
-  authoring layer assumes a ground plane: parcels and buildings live in
+  `TerrainControlPoint`. Terrain fills the regions *between* roads (faces
+  of the planar graph formed by road edges, projected to ground plane);
+  control points bend the interpolated surface where plain filling is too
+  flat.
+  **Terrain is the final fill** (decided 2026-07-19, refined 2026-07-22):
+  it conforms to roads and architecture — road edges and strokes (open
+  curves *with heights*) are boundary conditions of the fill, never
+  constraints on them. The fill flows **continuously everywhere it is not
+  told otherwise**; a stroke may later carry data that makes the fill
+  discontinuous *across the line* (a scarp: excavated or embanked, the
+  transition geometry — slope, retaining — generated from the height
+  delta, never authored as meshes). Closed regions with their own interior
+  fill (the flat parking-pad case) are a **future level assembled from
+  stroke pieces**, not a primitive. In particular, nothing in the
+  authoring layer assumes a ground plane: strokes and buildings live in
   full 3D, and edge-anchored elements inherit height from the edge they
   sit on.
-- **Parcel** — the container primitive of the architecture chapter
-  (reworked 2026-07-19): a piece of the world bounded by a **closed
-  polyline**, owning everything inside. `Parcel { boundary: Vec<Entity> }`
-  lists child `ParcelVertex` entities in **explicit perimeter order**
-  (boundaries may be concave — never re-derived by angle, unlike junction
-  loops); vertex local translations carry heights, parcels are **not flat
-  in the general case** — flatness is a legitimate special case (a parking
-  pad cut/filled into a slope). Boundary segments follow the **pen model**:
-  each vertex carries two vertex-local Bézier handles (`handle_out` /
-  `handle_in`); both adjacent handles zero → a straight segment, mirrored
-  collinear handles → a **C1 joint**, arbitrary handles → curves meeting
-  at a corner (both requested cases, one mechanism). Handles being
-  vertex-local means rotating a vertex with the gizmo steers its curve.
-  **Gates** (`ParcelGate`): the parcel owns **any number of connection
-  sockets** on its boundary — child `RoadNode`s, +Z outward, standard
-  socket rule. A gate is two-sided: a network road arrives at it from the
-  front (`b_from_front`), and the parcel's **internal roads** — ordinary
-  `RoadNode`/`RoadSegment` children; the road math reads `GlobalTransform`
-  and ignores hierarchy — connect to the same node from behind.
-  **The parcel owns its whole interior** (decided 2026-07-19): the yard,
-  internal roads, buildings are its content; terrain never enters the
-  perimeter, the terrain seam is the parcel boundary (possibly a sharp
-  cut/fill transition), so a building is always buffered from terrain by
-  its own yard.
-  **Parcel-as-prefab is the point**: content lives in the parcel's local
-  space as its subtree, so "parcel with a villa" or "parcel with a whole
-  factory" is one reusable prefab. Concretely today: *Duplicate parcel*
-  clones the subtree through the generic `extract_prefab`/`instantiate`
-  machinery with every internal reference (boundary lists, hierarchy,
-  internal-road endpoints) remapped; the copy drops its edge anchor and
-  starts free. Prefab *assets* (a villa recipe on disk) ride the existing
+- **Stroke** — the boundary primitive of the architecture chapter
+  (reworked 2026-07-22, replacing the closed "parcel"): an **open
+  polyline drawn point-wise onto the landscape** — a fence line, a scarp,
+  a curb, a plot edge. `Stroke { points: Vec<Entity> }` lists child
+  `StrokeVertex` entities in **explicit path order** (never re-derived);
+  vertex local translations carry heights — a stroke rides the world in
+  full 3D. Segments follow the **pen model**: each vertex carries two
+  vertex-local Bézier handles (`handle_out` / `handle_in`); both adjacent
+  handles zero → a straight segment, mirrored collinear handles → a **C1
+  joint**, arbitrary handles → curves meeting at a corner (both requested
+  cases, one mechanism). Handles being vertex-local means rotating a
+  vertex with the gizmo steers its curve.
+  **A stroke is bare geometry.** What it *means* is deliberately not
+  encoded yet: stroke geometry will be handed to the generator alongside
+  road geometry through a **single semantic mechanism designed later**,
+  once architecture semantics can be specified. Because strokes are open
+  lines, plots never need stitching: a border shared by two plots is
+  *one* stroke. **Closure is the next level up** — closed contours (with
+  a different interior fill) will be assembled from stroke pieces; the
+  stroke itself is never closed.
+  **Gates** (`Gate`): connection sockets droppable onto a stroke — child
+  `RoadNode`s on the line, +Z toward the side the drop click came from
+  (an open line has no interior; the author picks the facing). A gate is
+  **two-sided**: a road is met from whichever side it comes from —
+  network roads from the front (`b_from_front`), roads from behind
+  connect from behind (other socket kinds stay front-only).
+  **Grouping is plain hierarchy — there is no container component.** A
+  root entity holding strokes, buildings and roads as its subtree IS the
+  prefab ("villa" = fences + buildings + a driveway under one root).
+  Concretely today: *Duplicate subtree* clones any selected entity's
+  subtree through the generic `extract_prefab`/`instantiate` machinery
+  with every internal reference (point lists, hierarchy, road endpoints)
+  remapped; the copy drops its edge anchor and starts free. Prefab
+  *assets* (a villa recipe on disk) ride the existing
   prefab-serialization machinery in a later chapter.
-  A parcel may carry an optional single `EdgeAnchor` gluing it to a road
-  edge with **inverted derivation**: the rigid prefab dictates its
-  frontage length (the local distance between its first two boundary
-  vertices), the edge interval's *width* derives from it, and only the
-  interval's center is authored — it slides along the road under the
-  gizmo. The anchored transform faces the road (+Z into it, interior
-  outward). Two anchors would over-constrain a rigid prefab and are
-  rejected. Gates are met **from the side the road comes from**: network
-  roads from the front, internal roads from behind (other socket kinds
-  stay front-only).
+  A stroke may carry an optional single `EdgeAnchor` gluing it to a road
+  edge with **inverted derivation**: the rigid stroke dictates its
+  frontage length (the local distance between its first two vertices),
+  the edge interval's *width* derives from it, and only the interval's
+  center is authored — it slides along the road under the gizmo. The
+  anchored transform faces the road (+Z into it, the tail extending
+  outward). Two anchors would over-constrain a rigid stroke and are
+  rejected.
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a
   driveway/building exit crossing the sidewalk to meet the road. Not a
@@ -190,19 +193,21 @@ the entities mean.
   result. A validator flags *unsanctioned* crossings — two roads
   intersecting in projection with neither a shared node nor an edge anchor —
   as authoring errors; it never tries to auto-resolve them.
-- **Building** — parcel *content*: a **child entity of a parcel** with its
-  own transform and its own footprint (`half_width × half_depth` local
-  rectangle); one parcel holds **any number** of buildings (a villa, or a
-  factory full of structures). The component carries flat box-massing
-  recipe parameters (floors, floor height, footprint extents, seed) — the
-  P4 stub of the eventual **assembly graph asset** (a reusable recipe: one
-  "землянка" recipe, ten placements); the fields are already the asset's
-  fields, promotion is mechanical once AssetRef inspector editing lands.
-  Connections to the road network belong to the *parcel* (its gates), not
-  to buildings. Terrain never reaches a building: the parcel owns its
-  interior, so the terrain seam is the parcel boundary — there is no
-  footprint cut-out. Interior/exterior volumes, occluders and gameplay
-  metadata still get their own design round (phase 3, §7).
+- **Building** — free-standing architecture content: an **ordinary
+  entity** with its own transform and its own footprint
+  (`half_width × half_depth` local rectangle); group any number under a
+  root entity via plain hierarchy (a villa, or a factory full of
+  structures — the group subtree is the prefab). The component carries
+  flat box-massing recipe parameters (floors, floor height, footprint
+  extents, seed) — the P4 stub of the eventual **assembly graph asset**
+  (a reusable recipe: one "землянка" recipe, ten placements); the fields
+  are already the asset's fields, promotion is mechanical once AssetRef
+  inspector editing lands. Connections to the road network are gates on
+  strokes or edge anchors — never building fields. How terrain meets a
+  building footprint is the generator's decision later; there is no
+  footprint cut-out in the authoring layer. Interior/exterior volumes,
+  occluders and gameplay metadata still get their own design round
+  (phase 3, §7).
 
 Graph edits go through the standard `EditAction`/`ActionQueue` path like any
 other entity/component edit — the plugin's editor tools produce actions, never
@@ -335,9 +340,9 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
 2. **Phase 2 — terrain + tools.** Region extraction between roads (planar
    graph faces), terrain fill + control points, intersection surfaces,
    viewport tools (§6.2), debug-draw (§6.4).
-3. **Phase 3 — buildings.** Assembly-graph asset, parcel-perimeter terrain
-   seams (cut/fill transitions), interior/exterior + occluder metadata.
-   Gets its own design doc/round.
+3. **Phase 3 — buildings.** Assembly-graph asset, stroke-driven terrain
+   seams (cut/fill along scarp strokes), interior/exterior + occluder
+   metadata. Gets its own design doc/round.
 4. **Later** (explicitly deferred): tyroxine as the real generator, navmesh,
    LOD baking (LOD1 and below), incremental invalidation, streaming budgets.
 
@@ -354,13 +359,15 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
   cover everything described so far.
 - Chunk cell identity for terrain regions (roads/intersections have natural
   ids; regions appear/disappear as the graph changes).
-- **Parcel reference surface** — the interior surface over a closed,
-  possibly non-planar boundary polyline (§3: parcels are not flat in the
-  general case). Stub: fan/planar fill from the boundary; the real
-  interpolation (and interaction with internal roads' surfaces) is the
-  generator's concern. Also open: how perimeter heights parameterize the
-  terrain boundary condition, and how the cut/fill transition (scarp vs
-  retaining wall) is selected.
+- **Stroke semantics & terrain coupling** — how a stroke's meaning
+  (fence, scarp with a height delta, curb, plot edge) is declared and
+  handed to tyroxine alongside road geometry: one mechanism for all
+  architecture semantics, designed once it can be specified (§3: strokes
+  are bare geometry today). Also open: how stroke heights parameterize
+  the terrain boundary condition, how a discontinuity across a scarp
+  stroke (slope vs retaining wall) is selected, and how **closed contours
+  assembled from stroke pieces** (the next level up) get their own
+  interior fill.
 - ~~Road attachment side~~ — **resolved** (2026-07-18): `RoadSegment` grew
   `b_from_front` — the road meets `b` on its +Z side instead of the default
   −Z. The connect tool sets it automatically when the clicked target is a

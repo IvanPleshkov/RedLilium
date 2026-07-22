@@ -25,6 +25,13 @@
                     ]),
                 ),
                 (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Sun")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -44,13 +51,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Sun")),
                     ]),
                 ),
             ],
@@ -320,6 +320,19 @@
                     ]),
                 ),
                 (
+                    type_name: "EdgeAnchor",
+                    schema_version: 1,
+                    data: Map([
+                        ("parent_road", Entity(
+                            index: 6,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(true)),
+                        ("u_min", F32(0.35)),
+                        ("u_max", F32(0.65)),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -339,19 +352,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "EdgeAnchor",
-                    schema_version: 1,
-                    data: Map([
-                        ("parent_road", Entity(
-                            index: 6,
-                            spawn_tick: 0,
-                        )),
-                        ("right_edge", Bool(true)),
-                        ("u_min", F32(0.35)),
-                        ("u_max", F32(0.65)),
                     ]),
                 ),
             ],
@@ -863,59 +863,11 @@
                                 spawn_tick: 0,
                             ),
                             Entity(
-                                index: 27,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 28,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 29,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 30,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 31,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
                                 index: 32,
                                 spawn_tick: 0,
                             ),
                             Entity(
                                 index: 33,
-                                spawn_tick: 0,
-                            ),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parcel",
-                    schema_version: 1,
-                    data: Map([
-                        ("boundary", List([
-                            Entity(
-                                index: 26,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 27,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 28,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 29,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 30,
                                 spawn_tick: 0,
                             ),
                         ])),
@@ -951,18 +903,56 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "ParcelVertex",
+                    type_name: "Children",
                     schema_version: 1,
                     data: Map([
-                        ("handle_out", List([
+                        ("0", List([
+                            Entity(
+                                index: 27,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 28,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 29,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 30,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 31,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 34,
+                                spawn_tick: 0,
+                            ),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
                             F32(0.0),
                             F32(0.0),
                             F32(0.0),
                         ])),
-                        ("handle_in", List([
+                        ("rotation", List([
                             F32(0.0),
                             F32(0.0),
                             F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
                         ])),
                     ]),
                 ),
@@ -976,6 +966,41 @@
                         )),
                     ]),
                 ),
+                (
+                    type_name: "Stroke",
+                    schema_version: 1,
+                    data: Map([
+                        ("points", List([
+                            Entity(
+                                index: 27,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 28,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 29,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 30,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 31,
+                                spawn_tick: 0,
+                            ),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 27,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -998,15 +1023,18 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 27,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "ParcelVertex",
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
                     schema_version: 1,
                     data: Map([
                         ("handle_out", List([
@@ -1021,16 +1049,13 @@
                         ])),
                     ]),
                 ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 25,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 28,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -1053,39 +1078,39 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 28,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "ParcelVertex",
-                    schema_version: 1,
-                    data: Map([
-                        ("handle_out", List([
-                            F32(0.5),
-                            F32(0.0),
-                            F32(-1.8),
-                        ])),
-                        ("handle_in", List([
-                            F32(-0.5),
-                            F32(0.0),
-                            F32(1.8),
-                        ])),
-                    ]),
-                ),
                 (
                     type_name: "Parent",
                     schema_version: 1,
                     data: Map([
                         ("0", Entity(
-                            index: 25,
+                            index: 26,
                             spawn_tick: 0,
                         )),
                     ]),
                 ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 29,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -1108,39 +1133,39 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 29,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "ParcelVertex",
-                    schema_version: 1,
-                    data: Map([
-                        ("handle_out", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("handle_in", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                    ]),
-                ),
                 (
                     type_name: "Parent",
                     schema_version: 1,
                     data: Map([
                         ("0", Entity(
-                            index: 25,
+                            index: 26,
                             spawn_tick: 0,
                         )),
                     ]),
                 ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.5),
+                            F32(0.0),
+                            F32(-1.8),
+                        ])),
+                        ("handle_in", List([
+                            F32(-0.5),
+                            F32(0.0),
+                            F32(1.8),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 30,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -1163,15 +1188,18 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 30,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "ParcelVertex",
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
                     schema_version: 1,
                     data: Map([
                         ("handle_out", List([
@@ -1180,22 +1208,19 @@
                             F32(0.0),
                         ])),
                         ("handle_in", List([
-                            F32(2.0),
                             F32(0.0),
-                            F32(-2.0),
+                            F32(0.0),
+                            F32(0.0),
                         ])),
                     ]),
                 ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 25,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
+            ],
+        ),
+        (
+            entity_index: 31,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -1218,23 +1243,39 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 31,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "Parent",
                     schema_version: 1,
                     data: Map([
                         ("0", Entity(
-                            index: 25,
+                            index: 26,
                             spawn_tick: 0,
                         )),
                     ]),
                 ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(2.0),
+                            F32(0.0),
+                            F32(-2.0),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 32,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Building",
                     schema_version: 1,
@@ -1268,13 +1309,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 32,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "Parent",
                     schema_version: 1,
@@ -1285,6 +1319,13 @@
                         )),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 33,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Building",
                     schema_version: 1,
@@ -1318,25 +1359,6 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 33,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
-                (
-                    type_name: "ParcelGate",
-                    schema_version: 1,
-                    data: Map([]),
-                ),
-                (
-                    type_name: "RoadNode",
-                    schema_version: 1,
-                    data: Map([
-                        ("half_width", F32(1.5)),
-                    ]),
-                ),
                 (
                     type_name: "Parent",
                     schema_version: 1,
@@ -1345,6 +1367,25 @@
                             index: 25,
                             spawn_tick: 0,
                         )),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 34,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Gate",
+                    schema_version: 1,
+                    data: Map([]),
+                ),
+                (
+                    type_name: "RoadNode",
+                    schema_version: 1,
+                    data: Map([
+                        ("half_width", F32(1.5)),
                     ]),
                 ),
                 (
@@ -1369,10 +1410,20 @@
                         ])),
                     ]),
                 ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
             ],
         ),
         (
-            entity_index: 34,
+            entity_index: 35,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
@@ -1381,6 +1432,19 @@
                     schema_version: 1,
                     data: Map([
                         ("half_width", F32(0.9815369)),
+                    ]),
+                ),
+                (
+                    type_name: "EdgeAnchor",
+                    schema_version: 1,
+                    data: Map([
+                        ("parent_road", Entity(
+                            index: 6,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(false)),
+                        ("u_min", F32(0.55)),
+                        ("u_max", F32(0.7)),
                     ]),
                 ),
                 (
@@ -1405,23 +1469,10 @@
                         ])),
                     ]),
                 ),
-                (
-                    type_name: "EdgeAnchor",
-                    schema_version: 1,
-                    data: Map([
-                        ("parent_road", Entity(
-                            index: 6,
-                            spawn_tick: 0,
-                        )),
-                        ("right_edge", Bool(false)),
-                        ("u_min", F32(0.55)),
-                        ("u_max", F32(0.7)),
-                    ]),
-                ),
             ],
         ),
         (
-            entity_index: 35,
+            entity_index: 36,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
@@ -1430,11 +1481,11 @@
                     schema_version: 1,
                     data: Map([
                         ("a", Entity(
-                            index: 33,
+                            index: 34,
                             spawn_tick: 0,
                         )),
                         ("b", Entity(
-                            index: 34,
+                            index: 35,
                             spawn_tick: 0,
                         )),
                         ("tangent_a", F32(0.0)),
@@ -1445,7 +1496,7 @@
             ],
         ),
         (
-            entity_index: 36,
+            entity_index: 37,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
@@ -1455,10 +1506,6 @@
                     data: Map([
                         ("0", List([
                             Entity(
-                                index: 37,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
                                 index: 38,
                                 spawn_tick: 0,
                             ),
@@ -1471,35 +1518,7 @@
                                 spawn_tick: 0,
                             ),
                             Entity(
-                                index: 41,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 47,
-                                spawn_tick: 0,
-                            ),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parcel",
-                    schema_version: 1,
-                    data: Map([
-                        ("boundary", List([
-                            Entity(
-                                index: 37,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 38,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 39,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 40,
+                                index: 46,
                                 spawn_tick: 0,
                             ),
                         ])),
@@ -1527,58 +1546,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 37,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "ParcelVertex",
+                    type_name: "Stroke",
                     schema_version: 1,
                     data: Map([
-                        ("handle_out", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("handle_in", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 36,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Transform",
-                    schema_version: 1,
-                    data: Map([
-                        ("translation", List([
-                            F32(-5.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("rotation", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                            F32(1.0),
-                        ])),
-                        ("scale", List([
-                            F32(1.0),
-                            F32(1.0),
-                            F32(1.0),
+                        ("points", List([
+                            Entity(
+                                index: 38,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 39,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 40,
+                                spawn_tick: 0,
+                            ),
                         ])),
                     ]),
                 ),
@@ -1590,37 +1574,11 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "ParcelVertex",
-                    schema_version: 1,
-                    data: Map([
-                        ("handle_out", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("handle_in", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 36,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
                         ("translation", List([
-                            F32(5.0),
+                            F32(-5.0),
                             F32(0.0),
                             F32(0.0),
                         ])),
@@ -1634,6 +1592,32 @@
                             F32(1.0),
                             F32(1.0),
                             F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 37,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
                         ])),
                     ]),
                 ),
@@ -1645,39 +1629,13 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "ParcelVertex",
-                    schema_version: 1,
-                    data: Map([
-                        ("handle_out", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("handle_in", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 36,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
                         ("translation", List([
                             F32(5.0),
                             F32(0.0),
-                            F32(-9.0),
+                            F32(0.0),
                         ])),
                         ("rotation", List([
                             F32(0.0),
@@ -1689,6 +1647,32 @@
                             F32(1.0),
                             F32(1.0),
                             F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 37,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
                         ])),
                     ]),
                 ),
@@ -1700,38 +1684,12 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "ParcelVertex",
-                    schema_version: 1,
-                    data: Map([
-                        ("handle_out", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("handle_in", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 36,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
                         ("translation", List([
-                            F32(-5.0),
-                            F32(0.0),
+                            F32(5.0),
+                            F32(2.0),
                             F32(-9.0),
                         ])),
                         ("rotation", List([
@@ -1747,6 +1705,32 @@
                         ])),
                     ]),
                 ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 37,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                    ]),
+                ),
             ],
         ),
         (
@@ -1754,16 +1738,6 @@
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 36,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
                 (
                     type_name: "Building",
                     schema_version: 1,
@@ -1780,7 +1754,7 @@
                     schema_version: 1,
                     data: Map([
                         ("translation", List([
-                            F32(0.0),
+                            F32(48.0),
                             F32(0.0),
                             F32(-5.0),
                         ])),
@@ -1821,35 +1795,20 @@
                                 index: 45,
                                 spawn_tick: 0,
                             ),
-                            Entity(
-                                index: 46,
-                                spawn_tick: 0,
-                            ),
                         ])),
                     ]),
                 ),
                 (
-                    type_name: "Parcel",
+                    type_name: "EdgeAnchor",
                     schema_version: 1,
                     data: Map([
-                        ("boundary", List([
-                            Entity(
-                                index: 43,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 44,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 45,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 46,
-                                spawn_tick: 0,
-                            ),
-                        ])),
+                        ("parent_road", Entity(
+                            index: 19,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(true)),
+                        ("u_min", F32(0.16669545)),
+                        ("u_max", F32(0.8333045)),
                     ]),
                 ),
                 (
@@ -1875,16 +1834,23 @@
                     ]),
                 ),
                 (
-                    type_name: "EdgeAnchor",
+                    type_name: "Stroke",
                     schema_version: 1,
                     data: Map([
-                        ("parent_road", Entity(
-                            index: 19,
-                            spawn_tick: 0,
-                        )),
-                        ("right_edge", Bool(true)),
-                        ("u_min", F32(0.16669545)),
-                        ("u_max", F32(0.8333045)),
+                        ("points", List([
+                            Entity(
+                                index: 43,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 44,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 45,
+                                spawn_tick: 0,
+                            ),
+                        ])),
                     ]),
                 ),
             ],
@@ -1894,32 +1860,6 @@
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
-                (
-                    type_name: "ParcelVertex",
-                    schema_version: 1,
-                    data: Map([
-                        ("handle_out", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("handle_in", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 42,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -1939,6 +1879,32 @@
                             F32(1.0),
                             F32(1.0),
                             F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 42,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
                         ])),
                     ]),
                 ),
@@ -1950,32 +1916,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "ParcelVertex",
-                    schema_version: 1,
-                    data: Map([
-                        ("handle_out", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("handle_in", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 42,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1994,6 +1934,32 @@
                             F32(1.0),
                             F32(1.0),
                             F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 42,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
                         ])),
                     ]),
                 ),
@@ -2005,32 +1971,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "ParcelVertex",
-                    schema_version: 1,
-                    data: Map([
-                        ("handle_out", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                        ("handle_in", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 42,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -2052,15 +1992,18 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 46,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "ParcelVertex",
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 42,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
                     schema_version: 1,
                     data: Map([
                         ("handle_out", List([
@@ -2075,47 +2018,15 @@
                         ])),
                     ]),
                 ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 42,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Transform",
-                    schema_version: 1,
-                    data: Map([
-                        ("translation", List([
-                            F32(-4.0),
-                            F32(0.0),
-                            F32(-8.0),
-                        ])),
-                        ("rotation", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                            F32(1.0),
-                        ])),
-                        ("scale", List([
-                            F32(1.0),
-                            F32(1.0),
-                            F32(1.0),
-                        ])),
-                    ]),
-                ),
             ],
         ),
         (
-            entity_index: 47,
+            entity_index: 46,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
                 (
-                    type_name: "ParcelGate",
+                    type_name: "Gate",
                     schema_version: 1,
                     data: Map([]),
                 ),
@@ -2127,16 +2038,6 @@
                     ]),
                 ),
                 (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 36,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -2158,10 +2059,20 @@
                         ])),
                     ]),
                 ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 37,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
             ],
         ),
         (
-            entity_index: 48,
+            entity_index: 47,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
@@ -2170,6 +2081,19 @@
                     schema_version: 1,
                     data: Map([
                         ("half_width", F32(1.199997)),
+                    ]),
+                ),
+                (
+                    type_name: "EdgeAnchor",
+                    schema_version: 1,
+                    data: Map([
+                        ("parent_road", Entity(
+                            index: 20,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(true)),
+                        ("u_min", F32(0.4)),
+                        ("u_max", F32(0.6)),
                     ]),
                 ),
                 (
@@ -2194,23 +2118,10 @@
                         ])),
                     ]),
                 ),
-                (
-                    type_name: "EdgeAnchor",
-                    schema_version: 1,
-                    data: Map([
-                        ("parent_road", Entity(
-                            index: 20,
-                            spawn_tick: 0,
-                        )),
-                        ("right_edge", Bool(true)),
-                        ("u_min", F32(0.4)),
-                        ("u_max", F32(0.6)),
-                    ]),
-                ),
             ],
         ),
         (
-            entity_index: 49,
+            entity_index: 48,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
@@ -2219,11 +2130,11 @@
                     schema_version: 1,
                     data: Map([
                         ("a", Entity(
-                            index: 47,
+                            index: 46,
                             spawn_tick: 0,
                         )),
                         ("b", Entity(
-                            index: 48,
+                            index: 47,
                             spawn_tick: 0,
                         )),
                         ("tangent_a", F32(0.0)),
@@ -2237,36 +2148,36 @@
     resources: [],
     metadata: (
         engine_fingerprint: "",
-        timestamp: 1784482398,
+        timestamp: 1784727687,
         component_schemas: {
+            "TemporalJitter": "9df8a573d172914a",
+            "RoadSegment": "0b419cbd0c745715",
+            "RenderPath": "a423c0d36d1e6289",
+            "EditorOnly": "c680d604bee70f02",
+            "FreeFlyCamera": "5f11e33f3f164d87",
+            "Collider3D": "a39247f1249750e7",
+            "Building": "ac8f99c310d8fbc8",
+            "Name": "e8b72b8ee639d17d",
+            "SpotLight": "00945c87ce2de8db",
+            "CarSpawn": "c680d604bee70f02",
+            "Transform": "8438ab3d4ed5ea92",
+            "Junction": "e7bd6fa35d204f69",
+            "RoadNode": "baff4354f0b378f3",
+            "Parent": "a91799e57333f547",
+            "CameraExposure": "ceddee969d47eaa0",
             "FollowCamera": "21d1db18d14cff54",
             "DirectionalLight": "12b906e5389ce958",
-            "Camera": "ad5fbce407082262",
-            "CameraOutput": "ac6c44bbf8aba2c0",
-            "Building": "ac8f99c310d8fbc8",
-            "ParcelVertex": "0a01a76eb6db13ef",
-            "CameraExposure": "ceddee969d47eaa0",
-            "Name": "e8b72b8ee639d17d",
-            "PointLight": "c2de590ad3761220",
-            "TemporalJitter": "9df8a573d172914a",
-            "FreeFlyCamera": "5f11e33f3f164d87",
             "CarController": "fc41e6ec35f9fc4f",
-            "RoadSegment": "0b419cbd0c745715",
-            "Parcel": "c94c05f36089bc17",
-            "RoadNode": "baff4354f0b378f3",
-            "SpotLight": "00945c87ce2de8db",
-            "EditorOnly": "c680d604bee70f02",
             "Visibility": "c1bac1b299fc1b84",
-            "Parent": "a91799e57333f547",
-            "ParcelGate": "c680d604bee70f02",
-            "Junction": "e7bd6fa35d204f69",
-            "CarSpawn": "c680d604bee70f02",
-            "Collider3D": "a39247f1249750e7",
-            "RenderPath": "a423c0d36d1e6289",
-            "Transform": "8438ab3d4ed5ea92",
-            "Children": "2bb9642f7f8700bb",
             "RigidBody3D": "4c303fe7f34110a5",
+            "PointLight": "c2de590ad3761220",
             "EdgeAnchor": "8bd5bd105a1910c6",
+            "Stroke": "f062440ca3385d7c",
+            "StrokeVertex": "0a01a76eb6db13ef",
+            "Camera": "ad5fbce407082262",
+            "Children": "2bb9642f7f8700bb",
+            "Gate": "c680d604bee70f02",
+            "CameraOutput": "ac6c44bbf8aba2c0",
         },
     ),
 )

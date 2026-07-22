@@ -15,8 +15,8 @@ const NODE_COLOR: [f32; 4] = [1.0, 0.75, 0.1, 1.0];
 const EDGE_COLOR: [f32; 4] = [0.15, 0.85, 1.0, 1.0];
 /// Interior wireframe (dim teal).
 const GRID_COLOR: [f32; 4] = [0.05, 0.4, 0.5, 1.0];
-/// Parcel boundaries (green).
-const PARCEL_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
+/// Stroke paths (green).
+const STROKE_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
 /// Building box massing (violet).
 const BUILDING_COLOR: [f32; 4] = [0.8, 0.5, 0.95, 1.0];
 
@@ -71,22 +71,22 @@ impl System for DrawLevelGraph {
                 }
             }
 
-            if let Ok(parcels) = world.read_all::<crate::parcel::Parcel>() {
-                for (_, parcel) in parcels.iter() {
-                    let Some(lp) = crate::parcel::parcel_loop(world, parcel) else {
+            if let Ok(strokes) = world.read_all::<crate::stroke::Stroke>() {
+                for (_, stroke) in strokes.iter() {
+                    let Some(path) = crate::stroke::stroke_path(world, stroke) else {
                         continue;
                     };
-                    for i in 0..lp.len() {
-                        draw.draw_line(pt(&lp[i]), pt(&lp[(i + 1) % lp.len()]), PARCEL_COLOR);
+                    for pair in path.windows(2) {
+                        draw.draw_line(pt(&pair[0]), pt(&pair[1]), STROKE_COLOR);
                     }
-                    // Vertex handles: clickable proxies for the boundary
+                    // Vertex handles: clickable proxies for the path
                     // vertex entities (drag to reshape), plus antennae for
                     // nonzero curve handles (the pen model made visible).
-                    let Some(corners) = crate::parcel::parcel_corners(world, parcel) else {
+                    let Some(corners) = crate::stroke::stroke_corners(world, stroke) else {
                         continue;
                     };
                     for (_, p, h_out, h_in) in corners {
-                        draw_handle_cube(&mut draw, p, HANDLE_HALF, PARCEL_COLOR);
+                        draw_handle_cube(&mut draw, p, HANDLE_HALF, STROKE_COLOR);
                         for h in [h_out, h_in] {
                             if (h - p).norm() > 1e-3 {
                                 draw.draw_line(pt(&p), pt(&h), GRID_COLOR);

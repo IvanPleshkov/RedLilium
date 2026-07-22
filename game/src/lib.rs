@@ -738,16 +738,16 @@ pub fn spawn_levels_playground(world: &mut World) {
         )
         .unwrap();
 
-    // Parcels (architecture chapter): prefab-shaped containers bounded by
-    // a closed polyline, owning gates (connection sockets on the boundary)
-    // and content (buildings — any number). Terrain never enters a parcel;
-    // its perimeter is the terrain's boundary condition.
+    // Strokes (architecture chapter): open pen-model polylines on the
+    // landscape — fences, scarps, curbs; bare geometry, semantics come
+    // later through the generator. Grouping is plain hierarchy: one root
+    // entity holding strokes, buildings and a driveway is the prefab.
     {
         use redlilium_core::abstract_editor::EditAction;
         use redlilium_core::math::quat_from_rotation_y;
         use redlilium_ecs::Entity;
         use redlilium_levels::{
-            Building, EdgeAnchor, Parcel, ParcelGate, ParcelVertex, PlaceBuildingAction,
+            Building, EdgeAnchor, Gate, PlaceBuildingAction, Stroke, StrokeVertex,
         };
 
         let child = |world: &mut World, parent: Entity, local: Transform| -> Entity {
@@ -760,35 +760,45 @@ pub fn spawn_levels_playground(world: &mut World) {
             redlilium_ecs::set_parent(world, e, parent);
             e
         };
-        let parcel_at = |world: &mut World, t: Transform, verts: &[[f32; 3]]| -> Entity {
-            let parcel = world.spawn();
-            world.insert(parcel, t).unwrap();
+        let stroke_at = |world: &mut World,
+                         parent: Option<Entity>,
+                         t: Transform,
+                         verts: &[[f32; 3]]|
+         -> Entity {
+            let stroke = world.spawn();
+            world.insert(stroke, t).unwrap();
+            let parent_m = parent
+                .map(|p| world.get::<GlobalTransform>(p).unwrap().0)
+                .unwrap_or_else(|| Transform::default().to_matrix());
             world
-                .insert(parcel, GlobalTransform(t.to_matrix()))
+                .insert(stroke, GlobalTransform(parent_m * t.to_matrix()))
                 .unwrap();
-            let boundary: Vec<Entity> = verts
+            if let Some(p) = parent {
+                redlilium_ecs::set_parent(world, stroke, p);
+            }
+            let points: Vec<Entity> = verts
                 .iter()
                 .map(|&[x, y, z]| {
                     let v = child(
                         world,
-                        parcel,
+                        stroke,
                         Transform::new(
                             Vec3::new(x, y, z),
                             quat_from_rotation_y(0.0),
                             Vec3::new(1.0, 1.0, 1.0),
                         ),
                     );
-                    world.insert(v, ParcelVertex::default()).unwrap();
+                    world.insert(v, StrokeVertex::default()).unwrap();
                     v
                 })
                 .collect();
-            world.insert(parcel, Parcel { boundary }).unwrap();
-            parcel
+            world.insert(stroke, Stroke { points }).unwrap();
+            stroke
         };
-        let gate_at = |world: &mut World, parcel: Entity, x: f32, z: f32, yaw: f32| -> Entity {
+        let gate_at = |world: &mut World, stroke: Entity, x: f32, z: f32, yaw: f32| -> Entity {
             let gate = child(
                 world,
-                parcel,
+                stroke,
                 Transform::new(
                     Vec3::new(x, 0.0, z),
                     quat_from_rotation_y(yaw),
@@ -796,32 +806,40 @@ pub fn spawn_levels_playground(world: &mut World) {
                 ),
             );
             world.insert(gate, RoadNode { half_width: 1.5 }).unwrap();
-            world.insert(gate, ParcelGate).unwrap();
+            world.insert(gate, Gate).unwrap();
             gate
         };
         let building_at =
-            |world: &mut World, parcel: Entity, x: f32, z: f32, building: Building| {
+            |world: &mut World, parent: Option<Entity>, x: f32, z: f32, building: Building| {
                 let local = Transform::new(
                     Vec3::new(x, 0.0, z),
                     quat_from_rotation_y(0.0),
                     Vec3::new(1.0, 1.0, 1.0),
                 );
-                PlaceBuildingAction::new(parcel, local, building)
+                PlaceBuildingAction::new(parent, local, building)
                     .apply(world)
                     .unwrap();
             };
 
-        // Parcel A, west of the first road: an irregular pentagon (one
-        // vertex raised — parcels are not flat), two buildings, and a gate
-        // on its east side; the gate's driveway lands on the road's left
-        // edge through an edge-anchored node.
-        let a = parcel_at(
+        // Group A ("villa"), west of the first road: a plain root entity
+        // whose subtree is the prefab — a fence stroke (open, one vertex
+        // raised, curved segments), two buildings, and a gate in the
+        // fence; the gate's driveway lands on the road's left edge
+        // through an edge-anchored node.
+        let villa = world.spawn();
+        let villa_t = Transform::new(
+            Vec3::new(-14.0, 0.0, 2.0),
+            quat_from_rotation_y(0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(villa, villa_t).unwrap();
+        world
+            .insert(villa, GlobalTransform(villa_t.to_matrix()))
+            .unwrap();
+        let fence = stroke_at(
             world,
-            Transform::new(
-                Vec3::new(-14.0, 0.0, 2.0),
-                quat_from_rotation_y(0.0),
-                Vec3::new(1.0, 1.0, 1.0),
-            ),
+            Some(villa),
+            Transform::default(),
             &[
                 [-6.0, 0.0, 0.0],
                 [6.0, 0.0, 0.0],
@@ -830,14 +848,14 @@ pub fn spawn_levels_playground(world: &mut World) {
                 [-7.0, 0.0, -5.0],
             ],
         );
-        // Curved boundary showcase: the NE corner rounds with mirrored
-        // (C1) handles; the SW vertex curves one-sidedly — a corner joint.
+        // Curved segments showcase: the NE bend rounds with mirrored (C1)
+        // handles; the last vertex curves one-sidedly — a corner joint.
         {
-            let boundary = world.get::<Parcel>(a).unwrap().boundary.clone();
+            let points = world.get::<Stroke>(fence).unwrap().points.clone();
             world
                 .insert(
-                    boundary[2],
-                    ParcelVertex {
+                    points[2],
+                    StrokeVertex {
                         handle_in: Vec3::new(-0.5, 0.0, 1.8),
                         handle_out: Vec3::new(0.5, 0.0, -1.8),
                     },
@@ -845,18 +863,18 @@ pub fn spawn_levels_playground(world: &mut World) {
                 .unwrap();
             world
                 .insert(
-                    boundary[4],
-                    ParcelVertex {
+                    points[4],
+                    StrokeVertex {
                         handle_in: Vec3::new(2.0, 0.0, -2.0),
                         handle_out: Vec3::zeros(),
                     },
                 )
                 .unwrap();
         }
-        building_at(world, a, -2.0, -4.5, Building::default());
+        building_at(world, Some(villa), -2.0, -4.5, Building::default());
         building_at(
             world,
-            a,
+            Some(villa),
             4.0,
             -6.0,
             Building {
@@ -866,7 +884,7 @@ pub fn spawn_levels_playground(world: &mut World) {
                 ..Building::default()
             },
         );
-        let gate_a = gate_at(world, a, 7.0, -3.0, std::f32::consts::FRAC_PI_2);
+        let gate_a = gate_at(world, fence, 7.0, -3.0, std::f32::consts::FRAC_PI_2);
         let landing_a = node(world, 0.0, 0.0, 0.0);
         world
             .insert(
@@ -892,37 +910,35 @@ pub fn spawn_levels_playground(world: &mut World) {
             )
             .unwrap();
 
-        // Parcel B, south of the cross's east road: a plain rectangle with
-        // one building and a front gate driving into the road.
-        let b = parcel_at(
+        // Stroke B, south of the cross's east road: a free-standing line
+        // (a future scarp/fence — bare geometry today) with a gate whose
+        // driveway lands on the road, and a free-standing building behind
+        // it — nothing owns anything, terrain flows around all of it.
+        let b = stroke_at(
             world,
+            None,
             Transform::new(
                 Vec3::new(48.0, 0.0, 0.0),
                 quat_from_rotation_y(0.0),
                 Vec3::new(1.0, 1.0, 1.0),
             ),
-            &[
-                [-5.0, 0.0, 0.0],
-                [5.0, 0.0, 0.0],
-                [5.0, 0.0, -9.0],
-                [-5.0, 0.0, -9.0],
-            ],
+            &[[-5.0, 0.0, 0.0], [5.0, 0.0, 0.0], [5.0, 2.0, -9.0]],
         );
         building_at(
             world,
-            b,
-            0.0,
+            None,
+            48.0,
             -5.0,
             Building {
                 floors: 3,
                 ..Building::default()
             },
         );
-        // Parcel C: glued to the east side of the cross's north road — the
-        // inverted derivation showcase: the parcel's 8 m frontage dictates
+        // Stroke C: glued to the east side of the cross's north road — the
+        // inverted derivation showcase: the stroke's 8 m frontage dictates
         // the edge interval, only the center (u = 0.5) is authored; slide
         // it along the road with the gizmo.
-        redlilium_levels::AddParcelAction::on_edge(EdgeAnchor {
+        redlilium_levels::AddStrokeAction::on_edge(EdgeAnchor {
             parent_road: north_road,
             right_edge: true,
             u_min: 0.5,

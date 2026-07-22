@@ -1,32 +1,34 @@
-//! Parcels: prefab-shaped containers of the architecture chapter.
+//! Strokes: open pen-model polylines on the landscape — the boundary
+//! primitive of the architecture chapter.
 //!
-//! A parcel is a piece of the world bounded by a **closed polyline** and
-//! owning everything inside: buildings, internal roads, props — all child
-//! entities in the parcel's local space, which is exactly what makes the
-//! subtree a natural **prefab** ("parcel with a villa", "parcel with a
-//! whole factory"). Terrain never enters the boundary; the perimeter (a
-//! curve with heights) is the terrain's boundary condition, possibly with
-//! a sharp cut/fill transition.
+//! A stroke is **bare geometry**: an ordered open polyline with optional
+//! curved segments, drawn point-wise onto the world — a fence line, a
+//! scarp, a curb, a plot edge. What a stroke *means* is deliberately not
+//! encoded here; stroke geometry will be handed to the generator alongside
+//! road geometry through a single semantic mechanism designed later.
+//! Because strokes are open lines rather than closed contours, plots never
+//! need stitching: a border shared by two plots is *one* stroke, and
+//! terrain flows continuously everywhere it isn't told otherwise. Closed
+//! contours (with their own interior fill) are a future level assembled
+//! from stroke pieces — a stroke itself is never closed.
 //!
-//! - **Boundary**: ordered child [`ParcelVertex`] entities referenced by
-//!   [`Parcel::boundary`]. Order is explicit — boundaries may be concave,
-//!   so no re-derivation by angle (unlike junction loops). Each segment is
-//!   a cubic Bézier steered by the **pen model**: every vertex carries two
-//!   local handle vectors (`handle_out` toward the next vertex,
-//!   `handle_in` toward the previous). Both adjacent handles zero → a
-//!   straight segment; mirrored collinear handles → a **C1** joint;
-//!   arbitrary handles → curves meeting at a corner. Handles live in the
-//!   vertex's local space, so rotating a vertex with the gizmo steers its
-//!   curve.
-//! - **Gates** ([`ParcelGate`]): parcel-owned connection sockets on the
-//!   boundary — child `RoadNode`s, +Z facing outward. Two-sided: a network
-//!   road arrives at a gate from the front (`b_from_front`), the parcel's
-//!   internal roads connect to the same node from behind. A parcel may own
-//!   any number of gates.
-//! - **Content**: buildings are child entities with their own footprint
-//!   (see [`crate::building`]); internal roads are ordinary
-//!   `RoadNode`/`RoadSegment` children — the road math reads
-//!   `GlobalTransform` and does not care about hierarchy.
+//! - **Path**: ordered child [`StrokeVertex`] entities referenced by
+//!   [`Stroke::points`]. Each segment is a cubic Bézier steered by the
+//!   **pen model**: every vertex carries two local handle vectors
+//!   (`handle_out` toward the next vertex, `handle_in` toward the
+//!   previous). Both adjacent handles zero → a straight segment; mirrored
+//!   collinear handles → a **C1** joint; arbitrary handles → curves
+//!   meeting at a corner. Handles live in the vertex's local space, so
+//!   rotating a vertex with the gizmo steers its curve. Vertex local
+//!   translations carry heights — a stroke rides the world in full 3D.
+//! - **Gates** ([`Gate`]): connection sockets droppable onto a stroke —
+//!   child `RoadNode`s, +Z toward the side the drop click came from.
+//!   Two-sided per the socket rule: a road is met from whichever side it
+//!   comes from.
+//! - **Grouping is plain hierarchy**: there is no container component. A
+//!   root entity holding strokes, buildings and roads as its subtree IS
+//!   the prefab ("villa" = fences + buildings + a driveway under one
+//!   root) — see [`DuplicateSubtreeAction`].
 
 use redlilium_core::abstract_editor::{EditAction, EditActionError, EditActionResult};
 use redlilium_core::math::{Vec3, quat_from_rotation_y};
@@ -34,17 +36,16 @@ use redlilium_ecs::{
     Component, Entity, GlobalTransform, Transform, World, remove_parent, set_parent,
 };
 
-/// A parcel: the container entity. `boundary` lists the [`ParcelVertex`]
-/// children in perimeter order (explicit — concave boundaries are legal).
-/// Dead or non-vertex references are skipped at evaluation; fewer than 3
-/// live vertices means no boundary.
+/// An open polyline: `points` lists the [`StrokeVertex`] children in path
+/// order (explicit — never re-derived). Dead or non-vertex references are
+/// skipped at evaluation; fewer than 2 live vertices means no path.
 #[derive(Debug, Clone, Default, Component)]
-pub struct Parcel {
-    pub boundary: Vec<Entity>,
+pub struct Stroke {
+    pub points: Vec<Entity>,
 }
 
-/// A boundary vertex (a child of the parcel; its local translation is the
-/// vertex position, heights included — parcels are not flat in general).
+/// A path vertex (a child of the stroke; its local translation is the
+/// vertex position, heights included).
 ///
 /// The handles make the adjacent segments curve (pen model): the segment
 /// leaving this vertex uses `handle_out` as its first Bézier control
@@ -53,38 +54,39 @@ pub struct Parcel {
 /// rotating the vertex rotates its curve. C1 is authored by mirroring
 /// (`handle_out = -handle_in`); anything else is a corner.
 #[derive(Debug, Clone, Default, Component)]
-pub struct ParcelVertex {
+pub struct StrokeVertex {
     /// Bézier control offset of the departing segment, vertex-local.
     pub handle_out: Vec3,
     /// Bézier control offset of the arriving segment, vertex-local.
     pub handle_in: Vec3,
 }
 
-/// Marker on a parcel-owned connection socket: a child `RoadNode` sitting
-/// on the boundary, +Z outward. Network roads meet it from the front,
-/// internal roads from behind — the standard socket rule.
+/// Marker on a connection socket dropped onto a stroke: a child `RoadNode`
+/// on the line, +Z toward the side it was dropped from. Two-sided — roads
+/// are met from whichever side they come from (the standard socket rule
+/// generalized; see `tool::socket_meets_front`).
 #[derive(Debug, Clone, Default, Component)]
-pub struct ParcelGate;
+pub struct Gate;
 
-/// Tessellation of one curved boundary segment.
+/// Tessellation of one curved segment.
 const CURVE_STEPS: usize = 12;
 
 /// Handles below this length (meters) count as absent — the approach on
 /// that side is straight.
 const HANDLE_EPS: f32 = 1e-3;
 
-/// The live boundary corners in world space: `(vertex entity, position,
-/// world handle_out, world handle_in)`, perimeter order. `None` with fewer
-/// than 3 live vertices.
-pub(crate) fn parcel_corners(
+/// The live path vertices in world space: `(vertex entity, position,
+/// world handle_out, world handle_in)`, path order. `None` with fewer
+/// than 2 live vertices.
+pub(crate) fn stroke_corners(
     world: &World,
-    parcel: &Parcel,
+    stroke: &Stroke,
 ) -> Option<Vec<(Entity, Vec3, Vec3, Vec3)>> {
-    let corners: Vec<(Entity, Vec3, Vec3, Vec3)> = parcel
-        .boundary
+    let corners: Vec<(Entity, Vec3, Vec3, Vec3)> = stroke
+        .points
         .iter()
         .filter_map(|&v| {
-            let vertex = world.get::<ParcelVertex>(v)?;
+            let vertex = world.get::<StrokeVertex>(v)?;
             let gt = world.get::<GlobalTransform>(v)?;
             let point = |local: Vec3| {
                 let p = gt.0 * redlilium_core::math::Vec4::new(local.x, local.y, local.z, 1.0);
@@ -98,20 +100,20 @@ pub(crate) fn parcel_corners(
             ))
         })
         .collect();
-    (corners.len() >= 3).then_some(corners)
+    (corners.len() >= 2).then_some(corners)
 }
 
-/// The parcel's boundary in world space, tessellated: straight segments
+/// The stroke's path in world space, tessellated: straight segments
 /// contribute their start vertex, curved segments a cubic-Bézier fan of
-/// [`CURVE_STEPS`] samples. Closed — the last point connects back to the
-/// first. `None` with fewer than 3 live vertices.
-pub fn parcel_loop(world: &World, parcel: &Parcel) -> Option<Vec<Vec3>> {
-    let corners = parcel_corners(world, parcel)?;
+/// [`CURVE_STEPS`] samples. **Open** — the last vertex ends the path, it
+/// never connects back. `None` with fewer than 2 live vertices.
+pub fn stroke_path(world: &World, stroke: &Stroke) -> Option<Vec<Vec3>> {
+    let corners = stroke_corners(world, stroke)?;
     let n = corners.len();
     let mut points = Vec::with_capacity(n * 2);
-    for i in 0..n {
+    for i in 0..n - 1 {
         let (_, p0, h_out, _) = corners[i];
-        let (_, p3, _, h_in) = corners[(i + 1) % n];
+        let (_, p3, _, h_in) = corners[i + 1];
         points.push(p0);
         let straight = (h_out - p0).norm() < HANDLE_EPS && (h_in - p3).norm() < HANDLE_EPS;
         if straight {
@@ -130,20 +132,21 @@ pub fn parcel_loop(world: &World, parcel: &Parcel) -> Option<Vec<Vec3>> {
             );
         }
     }
+    points.push(corners[n - 1].1);
     Some(points)
 }
 
-/// Default boundary for a freshly stamped parcel: an 8×8 rectangle in
-/// local space, front edge along +X at z = 0, interior extending to −Z.
-const DEFAULT_BOUNDARY: [[f32; 2]; 4] = [[-4.0, 0.0], [4.0, 0.0], [4.0, -8.0], [-4.0, -8.0]];
+/// Default path for a freshly stamped stroke: an L in local space — 8 m
+/// along +X (the frontage when edge-anchored), then 8 m back along −Z.
+const DEFAULT_STROKE: [[f32; 2]; 3] = [[-4.0, 0.0], [4.0, 0.0], [4.0, -8.0]];
 
-/// The parcel's frontage length: the **local** distance between its first
-/// two boundary vertices — the edge that glues to a road when the parcel
-/// is edge-anchored. The rigid prefab dictates this length; the road-edge
-/// interval width derives from it (see `anchor::derive_parcel_anchor`).
-pub(crate) fn parcel_frontage(world: &World, parcel: &Parcel) -> Option<f32> {
-    let mut locals = parcel.boundary.iter().filter_map(|&v| {
-        world.get::<ParcelVertex>(v)?;
+/// The stroke's frontage length: the **local** distance between its first
+/// two vertices — the span that glues to a road when the stroke is
+/// edge-anchored. The rigid stroke dictates this length; the road-edge
+/// interval width derives from it (see `anchor::derive_stroke_anchor`).
+pub(crate) fn stroke_frontage(world: &World, stroke: &Stroke) -> Option<f32> {
+    let mut locals = stroke.points.iter().filter_map(|&v| {
+        world.get::<StrokeVertex>(v)?;
         world.get::<Transform>(v).map(|t| t.translation)
     });
     let a = locals.next()?;
@@ -152,30 +155,34 @@ pub(crate) fn parcel_frontage(world: &World, parcel: &Parcel) -> Option<f32> {
     (d > 1e-3).then_some(d)
 }
 
-/// Cursor reach for dropping a gate onto a parcel boundary, world units.
+/// Cursor reach for dropping a gate onto a stroke, world units.
 const GATE_DROP_RADIUS: f32 = 2.0;
 
-/// Where an "Add gate" click lands on a parcel's boundary: the parcel-local
-/// transform for a gate at the closest boundary point — positioned on the
-/// (tessellated) loop, +Z along the outward normal (away from the loop
-/// centroid). `None` when the cursor is too far from the boundary or the
-/// parcel has no usable transform.
+/// Where an "Add gate" click lands on a stroke: the stroke-local transform
+/// for a gate at the closest path point — positioned on the (tessellated)
+/// line, +Z toward the side the cursor is on (an open line has no interior
+/// to point away from — the author picks the facing by which side they
+/// click from; clicks dead-on default to the left-hand normal). `None`
+/// when the cursor is too far from the path or the stroke has no usable
+/// transform.
 pub(crate) fn gate_spot(
     world: &World,
-    parcel_entity: Entity,
+    stroke_entity: Entity,
     ray: &redlilium_ecs::ui::ViewportRay,
 ) -> Option<Transform> {
-    let parcel = world.get::<Parcel>(parcel_entity)?;
-    let lp = parcel_loop(world, parcel)?;
-    let mut best: Option<(f32, Vec3, Vec3)> = None;
-    for i in 0..lp.len() {
-        let (a, b) = (lp[i], lp[(i + 1) % lp.len()]);
-        let (dist, s, _) = crate::tool::ray_segment_closest(ray, a, b);
-        if best.is_none_or(|(d, _, _)| dist < d) {
-            best = Some((dist, a + (b - a) * s, b - a));
+    let stroke = world.get::<Stroke>(stroke_entity)?;
+    let path = stroke_path(world, stroke)?;
+    let mut best: Option<(f32, Vec3, Vec3, Vec3)> = None;
+    for i in 0..path.len() - 1 {
+        let (a, b) = (path[i], path[i + 1]);
+        let (dist, s, t) = crate::tool::ray_segment_closest(ray, a, b);
+        if best.is_none_or(|(d, _, _, _)| dist < d) {
+            let on_segment = a + (b - a) * s;
+            let on_ray = ray.origin + ray.dir * t;
+            best = Some((dist, on_segment, b - a, on_ray - on_segment));
         }
     }
-    let (dist, point, along) = best?;
+    let (dist, point, along, side) = best?;
     if dist > GATE_DROP_RADIUS {
         return None;
     }
@@ -184,16 +191,12 @@ pub(crate) fn gate_spot(
         return None;
     }
     let along = along.normalize();
-    let centroid = lp.iter().fold(Vec3::zeros(), |a, p| a + p) / lp.len() as f32;
     let n = Vec3::new(-along.z, 0.0, along.x);
-    let outward = if (point - centroid).dot(&n) >= 0.0 {
-        n
-    } else {
-        -n
-    };
+    let side = Vec3::new(side.x, 0.0, side.z);
+    let outward = if side.dot(&n) < 0.0 { -n } else { n };
 
-    // World gate pose → parcel-local (gates are children).
-    let parent = world.get::<GlobalTransform>(parcel_entity)?.0;
+    // World gate pose → stroke-local (gates are children).
+    let parent = world.get::<GlobalTransform>(stroke_entity)?.0;
     let inv = parent.try_inverse()?;
     let local_point = {
         let p = inv * redlilium_core::math::Vec4::new(point.x, point.y, point.z, 1.0);
@@ -215,23 +218,22 @@ pub(crate) fn gate_spot(
 }
 
 // ---------------------------------------------------------------------------
-// Edit action
+// Edit actions
 // ---------------------------------------------------------------------------
 
-/// Undoable "stamp a parcel": the container entity plus a default
-/// rectangular boundary of vertex children — drag the vertices into shape
-/// afterwards. Free-standing at a point, or glued to a road edge (the
-/// anchored variant derives its placement from the edge and dictates the
-/// interval width through its frontage; slide it along the road with the
-/// gizmo afterwards).
+/// Undoable "stamp a stroke": the root entity plus a default L of vertex
+/// children — drag the vertices into shape afterwards. Free-standing at a
+/// point, or glued to a road edge (the anchored variant derives its
+/// placement from the edge and dictates the interval width through its
+/// frontage; slide it along the road with the gizmo afterwards).
 #[derive(Debug)]
-pub struct AddParcelAction {
+pub struct AddStrokeAction {
     transform: Transform,
     anchor: Option<crate::anchor::EdgeAnchor>,
     created: Vec<Entity>,
 }
 
-impl AddParcelAction {
+impl AddStrokeAction {
     pub fn at_point(point: Vec3) -> Self {
         Self {
             transform: Transform::new(point, quat_from_rotation_y(0.0), Vec3::new(1.0, 1.0, 1.0)),
@@ -241,7 +243,7 @@ impl AddParcelAction {
     }
 
     /// Glue to a road edge; only the interval's center matters — the width
-    /// derives from the parcel's frontage at apply time.
+    /// derives from the stroke's frontage at apply time.
     pub fn on_edge(anchor: crate::anchor::EdgeAnchor) -> Self {
         Self {
             transform: Transform::default(),
@@ -251,7 +253,7 @@ impl AddParcelAction {
     }
 }
 
-impl EditAction<World> for AddParcelAction {
+impl EditAction<World> for AddStrokeAction {
     fn apply(&mut self, world: &mut World) -> EditActionResult {
         let undo_partial = |world: &mut World, created: &mut Vec<Entity>| {
             for e in created.drain(..).rev() {
@@ -259,18 +261,18 @@ impl EditAction<World> for AddParcelAction {
                 world.despawn(e);
             }
         };
-        let parcel = world.spawn();
-        self.created.push(parcel);
+        let stroke = world.spawn();
+        self.created.push(stroke);
         let inserted = world
-            .insert(parcel, self.transform)
-            .and_then(|_| world.insert(parcel, GlobalTransform(self.transform.to_matrix())));
+            .insert(stroke, self.transform)
+            .and_then(|_| world.insert(stroke, GlobalTransform(self.transform.to_matrix())));
         if let Err(e) = inserted {
             undo_partial(world, &mut self.created);
             return Err(EditActionError::Custom(e.to_string()));
         }
 
-        let mut boundary = Vec::with_capacity(DEFAULT_BOUNDARY.len());
-        for [x, z] in DEFAULT_BOUNDARY {
+        let mut points = Vec::with_capacity(DEFAULT_STROKE.len());
+        for [x, z] in DEFAULT_STROKE {
             let local = Transform::new(
                 Vec3::new(x, 0.0, z),
                 quat_from_rotation_y(0.0),
@@ -286,29 +288,29 @@ impl EditAction<World> for AddParcelAction {
                         GlobalTransform(self.transform.to_matrix() * local.to_matrix()),
                     )
                 })
-                .and_then(|_| world.insert(vertex, ParcelVertex::default()));
+                .and_then(|_| world.insert(vertex, StrokeVertex::default()));
             if let Err(e) = inserted {
                 undo_partial(world, &mut self.created);
                 return Err(EditActionError::Custom(e.to_string()));
             }
-            set_parent(world, vertex, parcel);
-            boundary.push(vertex);
+            set_parent(world, vertex, stroke);
+            points.push(vertex);
         }
-        if let Err(e) = world.insert(parcel, Parcel { boundary }) {
+        if let Err(e) = world.insert(stroke, Stroke { points }) {
             undo_partial(world, &mut self.created);
             return Err(EditActionError::Custom(e.to_string()));
         }
 
         // Anchored variant: derive the on-edge placement now that the
-        // boundary (and with it the frontage) exists, and store the derived
+        // path (and with it the frontage) exists, and store the derived
         // interval so the graph ships settled.
         if let Some(anchor) = &self.anchor {
             let Some((t, (u_min, u_max))) =
-                crate::anchor::derive_parcel_anchor(world, parcel, anchor)
+                crate::anchor::derive_stroke_anchor(world, stroke, anchor)
             else {
                 undo_partial(world, &mut self.created);
                 return Err(EditActionError::TargetNotFound(
-                    "parcel anchor road missing or degenerate".into(),
+                    "stroke anchor road missing or degenerate".into(),
                 ));
             };
             let settled = crate::anchor::EdgeAnchor {
@@ -317,16 +319,16 @@ impl EditAction<World> for AddParcelAction {
                 ..anchor.clone()
             };
             let inserted = world
-                .insert(parcel, t)
-                .and_then(|_| world.insert(parcel, GlobalTransform(t.to_matrix())))
-                .and_then(|_| world.insert(parcel, settled));
+                .insert(stroke, t)
+                .and_then(|_| world.insert(stroke, GlobalTransform(t.to_matrix())))
+                .and_then(|_| world.insert(stroke, settled));
             if let Err(e) = inserted {
                 undo_partial(world, &mut self.created);
                 return Err(EditActionError::Custom(e.to_string()));
             }
             // Children were placed against the pre-derive transform —
             // refresh their world matrices under the new one.
-            let vertices: Vec<Entity> = world.get::<Parcel>(parcel).unwrap().boundary.clone();
+            let vertices: Vec<Entity> = world.get::<Stroke>(stroke).unwrap().points.clone();
             for v in vertices {
                 if let Some(local) = world.get::<Transform>(v).copied() {
                     let _ = world.insert(v, GlobalTransform(t.to_matrix() * local.to_matrix()));
@@ -337,7 +339,7 @@ impl EditAction<World> for AddParcelAction {
     }
 
     fn undo(&mut self, world: &mut World) -> EditActionResult {
-        // Children first (reverse creation order), then the parcel itself.
+        // Children first (reverse creation order), then the stroke itself.
         for e in self.created.drain(..).rev() {
             remove_parent(world, e);
             world.despawn(e);
@@ -346,24 +348,24 @@ impl EditAction<World> for AddParcelAction {
     }
 
     fn description(&self) -> &str {
-        "Add parcel"
+        "Add stroke"
     }
 }
 
-/// Undoable "add a gate to a parcel": spawns a child `RoadNode` +
-/// [`ParcelGate`] at a parcel-local transform (typically produced by
-/// [`gate_spot`] — on the boundary, +Z outward).
+/// Undoable "add a gate to a stroke": spawns a child `RoadNode` + [`Gate`]
+/// at a stroke-local transform (typically produced by [`gate_spot`] — on
+/// the line, +Z toward the click side).
 #[derive(Debug)]
 pub struct AddGateAction {
-    parcel: Entity,
+    stroke: Entity,
     local: Transform,
     created: Option<Entity>,
 }
 
 impl AddGateAction {
-    pub fn new(parcel: Entity, local: Transform) -> Self {
+    pub fn new(stroke: Entity, local: Transform) -> Self {
         Self {
-            parcel,
+            stroke,
             local,
             created: None,
         }
@@ -372,26 +374,26 @@ impl AddGateAction {
 
 impl EditAction<World> for AddGateAction {
     fn apply(&mut self, world: &mut World) -> EditActionResult {
-        if world.get::<Parcel>(self.parcel).is_none() {
+        if world.get::<Stroke>(self.stroke).is_none() {
             return Err(EditActionError::TargetNotFound(
-                "gate target is not a parcel".into(),
+                "gate target is not a stroke".into(),
             ));
         }
         let parent_m = world
-            .get::<GlobalTransform>(self.parcel)
+            .get::<GlobalTransform>(self.stroke)
             .map(|gt| gt.0)
-            .ok_or_else(|| EditActionError::TargetNotFound("parcel has no transform".into()))?;
+            .ok_or_else(|| EditActionError::TargetNotFound("stroke has no transform".into()))?;
         let gate = world.spawn();
         let inserted = world
             .insert(gate, self.local)
             .and_then(|_| world.insert(gate, GlobalTransform(parent_m * self.local.to_matrix())))
             .and_then(|_| world.insert(gate, crate::RoadNode { half_width: 1.5 }))
-            .and_then(|_| world.insert(gate, ParcelGate));
+            .and_then(|_| world.insert(gate, Gate));
         if let Err(e) = inserted {
             world.despawn(gate);
             return Err(EditActionError::Custom(e.to_string()));
         }
-        set_parent(world, gate, self.parcel);
+        set_parent(world, gate, self.stroke);
         self.created = Some(gate);
         Ok(())
     }
@@ -409,19 +411,21 @@ impl EditAction<World> for AddGateAction {
     }
 }
 
-/// Undoable "duplicate a parcel at a point": extracts the parcel's subtree
-/// as a [`Prefab`](redlilium_ecs::Prefab) — boundary vertices, gates,
-/// buildings, internal roads, everything — and instantiates the copy with
-/// its root at `point`. This is the parcel-as-prefab payoff: "one villa
-/// recipe, ten placements" without an asset file yet.
+/// Undoable "duplicate a subtree at a point": extracts the selected root's
+/// subtree as a [`Prefab`](redlilium_ecs::Prefab) — strokes with their
+/// vertices, gates, buildings, roads, everything — and instantiates the
+/// copy with its root at `point`. This is the prefab payoff: group content
+/// under one root entity ("villa" = fences + buildings + a driveway) and
+/// stamp it anywhere, "one recipe, ten placements" without an asset file
+/// yet.
 #[derive(Debug)]
-pub struct DuplicateParcelAction {
+pub struct DuplicateSubtreeAction {
     source: Entity,
     point: Vec3,
     created: Vec<Entity>,
 }
 
-impl DuplicateParcelAction {
+impl DuplicateSubtreeAction {
     pub fn new(source: Entity, point: Vec3) -> Self {
         Self {
             source,
@@ -431,17 +435,17 @@ impl DuplicateParcelAction {
     }
 }
 
-impl EditAction<World> for DuplicateParcelAction {
+impl EditAction<World> for DuplicateSubtreeAction {
     fn apply(&mut self, world: &mut World) -> EditActionResult {
-        if world.get::<Parcel>(self.source).is_none() {
+        if !world.is_alive(self.source) {
             return Err(EditActionError::TargetNotFound(
-                "duplicate source is not a parcel".into(),
+                "duplicate source despawned".into(),
             ));
         }
         let prefab = world.extract_prefab(self.source);
         if prefab.is_empty() {
             return Err(EditActionError::TargetNotFound(
-                "parcel subtree extraction came back empty".into(),
+                "subtree extraction came back empty".into(),
             ));
         }
         self.created = prefab.instantiate(world);
@@ -482,7 +486,7 @@ impl EditAction<World> for DuplicateParcelAction {
     }
 
     fn description(&self) -> &str {
-        "Duplicate parcel"
+        "Duplicate subtree"
     }
 }
 
@@ -493,45 +497,48 @@ mod tests {
     fn world() -> World {
         let mut world = World::new();
         redlilium_ecs::register_std_components(&mut world);
-        world.register_inspector_default::<Parcel>();
-        world.register_inspector_default::<ParcelVertex>();
-        world.register_inspector_default::<ParcelGate>();
+        world.register_inspector_default::<Stroke>();
+        world.register_inspector_default::<StrokeVertex>();
+        world.register_inspector_default::<Gate>();
         world
     }
 
-    #[test]
-    fn add_parcel_stamps_a_loop_and_undo_reverts() {
-        let mut world = world();
-        let mut action = AddParcelAction::at_point(Vec3::new(10.0, 2.0, 5.0));
-        action.apply(&mut world).unwrap();
-
-        let parcels: Vec<(Entity, Parcel)> = world
-            .read_all::<Parcel>()
+    fn spawned_stroke(world: &World) -> (Entity, Stroke) {
+        world
+            .read_all::<Stroke>()
             .unwrap()
             .iter()
-            .filter_map(|(index, p)| Some((world.entity_at_index(index)?, p.clone())))
-            .collect();
-        assert_eq!(parcels.len(), 1);
-        let (parcel, component) = &parcels[0];
-        assert_eq!(component.boundary.len(), 4);
+            .filter_map(|(index, s)| Some((world.entity_at_index(index)?, s.clone())))
+            .next()
+            .unwrap()
+    }
 
-        let lp = parcel_loop(&world, component).expect("loop");
-        assert_eq!(lp.len(), 4);
-        // Front-left default vertex lands at parcel origin + (−4, 0, 0);
-        // the whole loop inherits the parcel's height (full 3D, no ground
-        // plane).
-        assert!((lp[0] - Vec3::new(6.0, 2.0, 5.0)).norm() < 1e-4);
-        for v in &component.boundary {
+    #[test]
+    fn add_stroke_stamps_an_open_path_and_undo_reverts() {
+        let mut world = world();
+        let mut action = AddStrokeAction::at_point(Vec3::new(10.0, 2.0, 5.0));
+        action.apply(&mut world).unwrap();
+
+        let (stroke, component) = spawned_stroke(&world);
+        assert_eq!(component.points.len(), 3);
+
+        let path = stroke_path(&world, &component).expect("path");
+        // Open: one point per vertex, no closing segment.
+        assert_eq!(path.len(), 3);
+        // The whole path inherits the stroke's height (full 3D, no ground
+        // plane); the L default starts at local (−4, 0, 0).
+        assert!((path[0] - Vec3::new(6.0, 2.0, 5.0)).norm() < 1e-4);
+        assert!((path[2] - Vec3::new(14.0, 2.0, -3.0)).norm() < 1e-4);
+        for v in &component.points {
             assert_eq!(
                 world.get::<redlilium_ecs::Parent>(*v).unwrap().0,
-                *parcel,
-                "vertices are children of the parcel"
+                stroke,
+                "vertices are children of the stroke"
             );
         }
 
-        // Dragging a vertex reshapes the loop (order stays authored, no
-        // re-sorting — concave shapes must survive).
-        let v2 = component.boundary[2];
+        // Dragging a vertex reshapes the path (order stays authored).
+        let v2 = component.points[2];
         let t = Transform::new(
             Vec3::new(1.0, 0.0, -2.0),
             quat_from_rotation_y(0.0),
@@ -541,17 +548,17 @@ mod tests {
         world
             .insert(
                 v2,
-                GlobalTransform(world.get::<GlobalTransform>(*parcel).unwrap().0 * t.to_matrix()),
+                GlobalTransform(world.get::<GlobalTransform>(stroke).unwrap().0 * t.to_matrix()),
             )
             .unwrap();
-        let reshaped = parcel_loop(&world, component).expect("loop");
+        let reshaped = stroke_path(&world, &component).expect("path");
         assert!((reshaped[2] - Vec3::new(11.0, 2.0, 3.0)).norm() < 1e-4);
 
         action.undo(&mut world).unwrap();
-        assert!(world.read_all::<Parcel>().unwrap().iter().next().is_none());
+        assert!(world.read_all::<Stroke>().unwrap().iter().next().is_none());
         assert!(
             world
-                .read_all::<ParcelVertex>()
+                .read_all::<StrokeVertex>()
                 .unwrap()
                 .iter()
                 .next()
@@ -562,27 +569,21 @@ mod tests {
     #[test]
     fn handles_curve_segments_straight_by_default() {
         let mut world = world();
-        let mut action = AddParcelAction::at_point(Vec3::zeros());
+        let mut action = AddStrokeAction::at_point(Vec3::zeros());
         action.apply(&mut world).unwrap();
-        let component: Parcel = world
-            .read_all::<Parcel>()
-            .unwrap()
-            .iter()
-            .map(|(_, p)| p.clone())
-            .next()
-            .unwrap();
+        let (_, component) = spawned_stroke(&world);
 
         // All handles zero → pure polyline: exactly one point per vertex.
-        assert_eq!(parcel_loop(&world, &component).unwrap().len(), 4);
+        assert_eq!(stroke_path(&world, &component).unwrap().len(), 3);
 
-        // Give the front edge (v0 → v1, from (−4,0,0) to (4,0,0)) a bulge:
-        // mirrored-style handles pushing toward +Z.
-        let v0 = component.boundary[0];
-        let v1 = component.boundary[1];
+        // Give the first segment (v0 → v1, from (−4,0,0) to (4,0,0)) a
+        // bulge: mirrored-style handles pushing toward +Z.
+        let v0 = component.points[0];
+        let v1 = component.points[1];
         world
             .insert(
                 v0,
-                ParcelVertex {
+                StrokeVertex {
                     handle_out: Vec3::new(2.0, 0.0, 2.0),
                     handle_in: Vec3::zeros(),
                 },
@@ -591,19 +592,19 @@ mod tests {
         world
             .insert(
                 v1,
-                ParcelVertex {
+                StrokeVertex {
                     handle_in: Vec3::new(-2.0, 0.0, 2.0),
                     handle_out: Vec3::zeros(),
                 },
             )
             .unwrap();
 
-        let lp = parcel_loop(&world, &component).unwrap();
+        let path = stroke_path(&world, &component).unwrap();
         // One curved segment → CURVE_STEPS−1 extra samples.
-        assert_eq!(lp.len(), 4 + (CURVE_STEPS - 1));
+        assert_eq!(path.len(), 3 + (CURVE_STEPS - 1));
         // The curve bulges toward +Z at its middle (cubic midpoint z =
-        // 3/4 · 2 = 1.5), while the straight segments stay put.
-        let mid = lp[CURVE_STEPS / 2];
+        // 3/4 · 2 = 1.5), while the straight segment stays put.
+        let mid = path[CURVE_STEPS / 2];
         assert!((mid.z - 1.5).abs() < 1e-3, "bulged to z=1.5, got {}", mid.z);
         assert!(mid.x.abs() < 1e-3);
     }
@@ -611,43 +612,32 @@ mod tests {
     #[test]
     fn mirrored_handles_make_a_c1_joint_and_rotation_steers_the_curve() {
         let mut world = world();
-        let mut action = AddParcelAction::at_point(Vec3::zeros());
+        let mut action = AddStrokeAction::at_point(Vec3::zeros());
         action.apply(&mut world).unwrap();
-        let component: Parcel = world
-            .read_all::<Parcel>()
-            .unwrap()
-            .iter()
-            .map(|(_, p)| p.clone())
-            .next()
-            .unwrap();
+        let (_, component) = spawned_stroke(&world);
 
         // Curve both segments around v1 with mirrored handles: C1 — the
         // arriving and departing tangents at v1 are collinear.
-        let v0 = component.boundary[0];
-        let v1 = component.boundary[1];
-        let v2 = component.boundary[2];
+        let v1 = component.points[1];
         let h = Vec3::new(0.0, 0.0, -2.5);
         world
             .insert(
                 v1,
-                ParcelVertex {
+                StrokeVertex {
                     handle_in: -h,
                     handle_out: h,
                 },
             )
             .unwrap();
-        // Far ends stay straight (zero handles on v0.out / v2.in sides are
-        // already the default).
-        let _ = (v0, v2);
 
-        let lp = parcel_loop(&world, &component).unwrap();
+        let path = stroke_path(&world, &component).unwrap();
         // Both segments around v1 curved → two fans; v1 itself is a sample.
         let idx_v1 = CURVE_STEPS; // v0 + (CURVE_STEPS−1) samples, then v1
-        assert!((lp[idx_v1] - Vec3::new(4.0, 0.0, 0.0)).norm() < 1e-4);
+        assert!((path[idx_v1] - Vec3::new(4.0, 0.0, 0.0)).norm() < 1e-4);
         // Tangent continuity at the vertex, measured analytically: the
         // arriving Bézier tangent is p − handle_in, the departing one is
         // handle_out − p — mirrored handles make them identical.
-        let corners = parcel_corners(&world, &component).unwrap();
+        let corners = stroke_corners(&world, &component).unwrap();
         let (_, p, h_out, h_in) = corners[1];
         let arrive = (p - h_in).normalize();
         let depart = (h_out - p).normalize();
@@ -665,7 +655,7 @@ mod tests {
         );
         world.insert(v1, yaw).unwrap();
         world.insert(v1, GlobalTransform(yaw.to_matrix())).unwrap();
-        let corners = parcel_corners(&world, &component).unwrap();
+        let corners = stroke_corners(&world, &component).unwrap();
         let (_, p, h_out, _) = corners[1];
         let dir = (h_out - p).normalize();
         // Local (0,0,−2.5) under yaw +90° → world −X.
@@ -706,20 +696,10 @@ mod tests {
         (world, road)
     }
 
-    fn spawned_parcel(world: &World) -> (Entity, Parcel) {
-        world
-            .read_all::<Parcel>()
-            .unwrap()
-            .iter()
-            .filter_map(|(index, p)| Some((world.entity_at_index(index)?, p.clone())))
-            .next()
-            .unwrap()
-    }
-
     #[test]
-    fn anchored_parcel_dictates_the_interval_and_follows_frontage_edits() {
+    fn anchored_stroke_dictates_the_interval_and_follows_frontage_edits() {
         let (mut world, road) = world_with_road();
-        AddParcelAction::on_edge(crate::anchor::EdgeAnchor {
+        AddStrokeAction::on_edge(crate::anchor::EdgeAnchor {
             parent_road: road,
             right_edge: true,
             u_min: 0.5,
@@ -727,28 +707,28 @@ mod tests {
         })
         .apply(&mut world)
         .unwrap();
-        let (parcel, component) = spawned_parcel(&world);
+        let (stroke, component) = spawned_stroke(&world);
 
         // The default frontage is 8 m; on a 20 m straight edge that is a
         // derived u half-width of 0.2 around the authored center 0.5.
         let anchor = world
-            .get::<crate::anchor::EdgeAnchor>(parcel)
+            .get::<crate::anchor::EdgeAnchor>(stroke)
             .unwrap()
             .clone();
         assert!((anchor.u_min - 0.3).abs() < 1e-3, "got {}", anchor.u_min);
         assert!((anchor.u_max - 0.7).abs() < 1e-3, "got {}", anchor.u_max);
         // Sits on the right edge (x = +3), frontage FACING the road: +Z
-        // points into it (−X), interior extends outward (+X).
-        let t = *world.get::<Transform>(parcel).unwrap();
+        // points into it (−X), the tail extends outward (+X).
+        let t = *world.get::<Transform>(stroke).unwrap();
         assert!((t.translation - Vec3::new(3.0, 0.0, 10.0)).norm() < 1e-3);
         let heading = crate::bezier::heading(&t.to_matrix());
         assert!((heading - Vec3::new(-1.0, 0.0, 0.0)).norm() < 1e-3);
         // Ships settled.
         assert!(crate::anchor::anchor_updates(&world, &mut Default::default(), false).is_empty());
 
-        // The parcel dictates: widen the frontage (move the second vertex
+        // The stroke dictates: widen the frontage (move the second vertex
         // out) and the edge interval follows, center preserved.
-        let v1 = component.boundary[1];
+        let v1 = component.points[1];
         let wider = Transform::new(
             Vec3::new(6.0, 0.0, 0.0),
             quat_from_rotation_y(0.0),
@@ -757,7 +737,7 @@ mod tests {
         world.insert(v1, wider).unwrap();
         crate::settle_edge_anchors(&mut world);
         let anchor = world
-            .get::<crate::anchor::EdgeAnchor>(parcel)
+            .get::<crate::anchor::EdgeAnchor>(stroke)
             .unwrap()
             .clone();
         // Frontage 10 m → half-width 0.25.
@@ -766,9 +746,9 @@ mod tests {
     }
 
     #[test]
-    fn anchored_parcel_slides_keeping_its_derived_width() {
+    fn anchored_stroke_slides_keeping_its_derived_width() {
         let (mut world, road) = world_with_road();
-        AddParcelAction::on_edge(crate::anchor::EdgeAnchor {
+        AddStrokeAction::on_edge(crate::anchor::EdgeAnchor {
             parent_road: road,
             right_edge: true,
             u_min: 0.5,
@@ -776,9 +756,9 @@ mod tests {
         })
         .apply(&mut world)
         .unwrap();
-        let (parcel, _) = spawned_parcel(&world);
+        let (stroke, _) = spawned_stroke(&world);
 
-        // Prime the settled cache, then drag the parcel up the road.
+        // Prime the settled cache, then drag the stroke up the road.
         let mut cache = std::collections::HashMap::new();
         let settle = |world: &mut World, cache: &mut std::collections::HashMap<_, _>| {
             for _ in 0..8 {
@@ -802,21 +782,21 @@ mod tests {
             }
         };
         settle(&mut world, &mut cache);
-        let home = *world.get::<Transform>(parcel).unwrap();
+        let home = *world.get::<Transform>(stroke).unwrap();
 
         let dragged = Transform::new(
             home.translation + Vec3::new(1.0, 0.0, 4.0),
             home.rotation,
             home.scale,
         );
-        world.insert(parcel, dragged).unwrap();
+        world.insert(stroke, dragged).unwrap();
         world
-            .insert(parcel, GlobalTransform(dragged.to_matrix()))
+            .insert(stroke, GlobalTransform(dragged.to_matrix()))
             .unwrap();
         settle(&mut world, &mut cache);
 
         let anchor = world
-            .get::<crate::anchor::EdgeAnchor>(parcel)
+            .get::<crate::anchor::EdgeAnchor>(stroke)
             .unwrap()
             .clone();
         let center = (anchor.u_min + anchor.u_max) * 0.5;
@@ -826,42 +806,51 @@ mod tests {
             "width stays frontage-derived"
         );
         // Snapped back onto the edge.
-        let t = *world.get::<Transform>(parcel).unwrap();
+        let t = *world.get::<Transform>(stroke).unwrap();
         assert!((t.translation.x - 3.0).abs() < 1e-3);
     }
 
     #[test]
-    fn gate_spot_and_add_gate_roundtrip() {
+    fn gate_spot_faces_the_click_side_and_add_gate_roundtrips() {
         let mut world = world();
-        AddParcelAction::at_point(Vec3::new(10.0, 0.0, 5.0))
+        AddStrokeAction::at_point(Vec3::new(10.0, 0.0, 5.0))
             .apply(&mut world)
             .unwrap();
-        let (parcel, _) = spawned_parcel(&world);
+        let (stroke, _) = spawned_stroke(&world);
         world.register_inspector_default::<crate::RoadNode>();
 
-        // Ray straight down at the middle of the front edge (world
-        // (10, 0, 5); front edge spans x 6..14 at z = 5).
+        // Ray straight down just NORTH of the first segment's middle (the
+        // segment spans x 6..14 at z = 5; the cursor is at z = 5.5): the
+        // gate lands on the line, +Z toward the click side (+Z north).
         let ray = redlilium_ecs::ui::ViewportRay {
-            origin: Vec3::new(10.0, 10.0, 5.0),
+            origin: Vec3::new(10.0, 10.0, 5.5),
             dir: Vec3::new(0.0, -1.0, 0.0),
         };
-        let local = gate_spot(&world, parcel, &ray).expect("spot on the boundary");
-        assert!(local.translation.norm() < 1e-3, "front-edge midpoint");
-        // Outward of the front edge is +Z (interior extends to −Z).
+        let local = gate_spot(&world, stroke, &ray).expect("spot on the path");
+        assert!(local.translation.norm() < 1e-3, "segment midpoint");
         let out = crate::bezier::heading(&local.to_matrix());
         assert!((out - Vec3::new(0.0, 0.0, 1.0)).norm() < 1e-3);
 
-        let mut action = AddGateAction::new(parcel, local);
+        // The mirror click from the south flips the facing.
+        let ray_south = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(10.0, 10.0, 4.5),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        let flipped = gate_spot(&world, stroke, &ray_south).expect("spot");
+        let out = crate::bezier::heading(&flipped.to_matrix());
+        assert!((out - Vec3::new(0.0, 0.0, -1.0)).norm() < 1e-3);
+
+        let mut action = AddGateAction::new(stroke, local);
         action.apply(&mut world).unwrap();
         let gate = world
-            .read_all::<ParcelGate>()
+            .read_all::<Gate>()
             .unwrap()
             .iter()
             .filter_map(|(index, _)| world.entity_at_index(index))
             .next()
             .expect("gate spawned");
         assert!(world.get::<crate::RoadNode>(gate).is_some());
-        assert_eq!(world.get::<redlilium_ecs::Parent>(gate).unwrap().0, parcel);
+        assert_eq!(world.get::<redlilium_ecs::Parent>(gate).unwrap().0, stroke);
         let gt = world.get::<GlobalTransform>(gate).unwrap().0;
         let pos = Vec3::new(gt[(0, 3)], gt[(1, 3)], gt[(2, 3)]);
         assert!((pos - Vec3::new(10.0, 0.0, 5.0)).norm() < 1e-3);
@@ -871,34 +860,35 @@ mod tests {
     }
 
     #[test]
-    fn parcel_prefab_duplicates_with_all_content_remapped() {
+    fn subtree_duplicates_with_all_content_remapped() {
         let mut world = world();
         world.register_inspector_default::<crate::RoadNode>();
         world.register_inspector_default::<crate::RoadSegment>();
         world.register_inspector_default::<crate::building::Building>();
 
-        // Parcel with a gate, a building, and an internal road from an
-        // inner node to the gate (meeting it from behind).
-        AddParcelAction::at_point(Vec3::new(0.0, 0.0, 0.0))
+        // A group in the making: the stroke root carries a gate, a
+        // building and an internal road from an inner node to the gate —
+        // any entity's subtree is a prefab, no container component needed.
+        AddStrokeAction::at_point(Vec3::new(0.0, 0.0, 0.0))
             .apply(&mut world)
             .unwrap();
-        let (parcel, _) = spawned_parcel(&world);
+        let (root, _) = spawned_stroke(&world);
         let gate_local = Transform::new(
             Vec3::zeros(),
             quat_from_rotation_y(0.0),
             Vec3::new(1.0, 1.0, 1.0),
         );
-        let mut add_gate = AddGateAction::new(parcel, gate_local);
+        let mut add_gate = AddGateAction::new(root, gate_local);
         add_gate.apply(&mut world).unwrap();
         let gate = world
-            .read_all::<ParcelGate>()
+            .read_all::<Gate>()
             .unwrap()
             .iter()
             .filter_map(|(index, _)| world.entity_at_index(index))
             .next()
             .unwrap();
         crate::building::PlaceBuildingAction::new(
-            parcel,
+            Some(root),
             Transform::new(
                 Vec3::new(0.0, 0.0, -5.0),
                 quat_from_rotation_y(0.0),
@@ -919,7 +909,7 @@ mod tests {
             .insert(inner, GlobalTransform(inner_t.to_matrix()))
             .unwrap();
         world.insert(inner, crate::RoadNode::default()).unwrap();
-        set_parent(&mut world, inner, parcel);
+        set_parent(&mut world, inner, root);
         let internal_road = world.spawn();
         world
             .insert(
@@ -931,45 +921,45 @@ mod tests {
                 },
             )
             .unwrap();
-        set_parent(&mut world, internal_road, parcel);
+        set_parent(&mut world, internal_road, root);
 
         // Duplicate the whole thing 30 m to the east.
-        let mut dup = DuplicateParcelAction::new(parcel, Vec3::new(30.0, 0.0, 0.0));
+        let mut dup = DuplicateSubtreeAction::new(root, Vec3::new(30.0, 0.0, 0.0));
         dup.apply(&mut world).unwrap();
 
-        let parcels: Vec<(Entity, Parcel)> = world
-            .read_all::<Parcel>()
+        let strokes: Vec<(Entity, Stroke)> = world
+            .read_all::<Stroke>()
             .unwrap()
             .iter()
-            .filter_map(|(index, p)| Some((world.entity_at_index(index)?, p.clone())))
+            .filter_map(|(index, s)| Some((world.entity_at_index(index)?, s.clone())))
             .collect();
-        assert_eq!(parcels.len(), 2);
-        let (copy, copy_parcel) = parcels
+        assert_eq!(strokes.len(), 2);
+        let (copy, copy_stroke) = strokes
             .iter()
-            .find(|(e, _)| *e != parcel)
+            .find(|(e, _)| *e != root)
             .expect("the duplicate");
 
-        // Boundary references remapped: the copy points at its own fresh
+        // Point references remapped: the copy points at its own fresh
         // vertices, none shared with the source.
-        let source_boundary: std::collections::HashSet<Entity> = parcels
+        let source_points: std::collections::HashSet<Entity> = strokes
             .iter()
-            .find(|(e, _)| *e == parcel)
+            .find(|(e, _)| *e == root)
             .unwrap()
             .1
-            .boundary
+            .points
             .iter()
             .copied()
             .collect();
-        assert_eq!(copy_parcel.boundary.len(), 4);
-        for v in &copy_parcel.boundary {
-            assert!(!source_boundary.contains(v), "vertex remapped, not shared");
+        assert_eq!(copy_stroke.points.len(), 3);
+        for v in &copy_stroke.points {
+            assert!(!source_points.contains(v), "vertex remapped, not shared");
             assert_eq!(world.get::<redlilium_ecs::Parent>(*v).unwrap().0, *copy);
         }
-        // The copied loop is the source loop shifted by (+30, 0, 0).
-        let src_loop = parcel_loop(&world, &parcels[0].1).unwrap();
-        let copy_loop = parcel_loop(&world, copy_parcel).unwrap();
-        assert_eq!(src_loop.len(), copy_loop.len());
-        for (a, b) in src_loop.iter().zip(&copy_loop) {
+        // The copied path is the source path shifted by (+30, 0, 0).
+        let src_path = stroke_path(&world, &strokes[0].1).unwrap();
+        let copy_path = stroke_path(&world, copy_stroke).unwrap();
+        assert_eq!(src_path.len(), copy_path.len());
+        for (a, b) in src_path.iter().zip(&copy_path) {
             assert!((*a + Vec3::new(30.0, 0.0, 0.0) - *b).norm() < 1e-3);
         }
         // The copied internal road references the COPY's inner node and
@@ -1003,8 +993,8 @@ mod tests {
 
         // Undo removes the whole copied subtree; the source is intact.
         dup.undo(&mut world).unwrap();
-        assert_eq!(world.read_all::<Parcel>().unwrap().iter().count(), 1);
-        assert!(world.is_alive(parcel) && world.is_alive(gate) && world.is_alive(inner));
+        assert_eq!(world.read_all::<Stroke>().unwrap().iter().count(), 1);
+        assert!(world.is_alive(root) && world.is_alive(gate) && world.is_alive(inner));
         assert_eq!(
             world
                 .read_all::<crate::RoadSegment>()
@@ -1016,20 +1006,14 @@ mod tests {
     }
 
     #[test]
-    fn loop_needs_three_live_vertices() {
+    fn path_needs_two_live_vertices() {
         let mut world = world();
-        let mut action = AddParcelAction::at_point(Vec3::zeros());
+        let mut action = AddStrokeAction::at_point(Vec3::zeros());
         action.apply(&mut world).unwrap();
-        let component: Parcel = world
-            .read_all::<Parcel>()
-            .unwrap()
-            .iter()
-            .map(|(_, p)| p.clone())
-            .next()
-            .unwrap();
-        world.despawn(component.boundary[0]);
-        assert_eq!(parcel_loop(&world, &component).unwrap().len(), 3);
-        world.despawn(component.boundary[1]);
-        assert!(parcel_loop(&world, &component).is_none());
+        let (_, component) = spawned_stroke(&world);
+        world.despawn(component.points[0]);
+        assert_eq!(stroke_path(&world, &component).unwrap().len(), 2);
+        world.despawn(component.points[1]);
+        assert!(stroke_path(&world, &component).is_none());
     }
 }

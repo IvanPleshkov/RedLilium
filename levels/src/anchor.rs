@@ -135,20 +135,20 @@ fn project_onto_edge(
     (c - half, c + half)
 }
 
-/// Derive an anchored **parcel**'s placement — the inverted derivation:
-/// the rigid parcel dictates its frontage length, and the edge interval's
+/// Derive an anchored **stroke**'s placement — the inverted derivation:
+/// the rigid stroke dictates its frontage length, and the edge interval's
 /// *width* derives from it (mapped through the local edge-length density);
 /// only the interval's center is authored (it slides). The transform faces
 /// the opposite way from an anchored node: **+Z points into the parent
-/// road** the parcel fronts, the interior extends outward behind.
+/// road** the stroke fronts, the tail extends outward behind.
 /// Returns `(transform, derived interval)`.
-pub(crate) fn derive_parcel_anchor(
+pub(crate) fn derive_stroke_anchor(
     world: &World,
     entity: Entity,
     anchor: &EdgeAnchor,
 ) -> Option<(Transform, (f32, f32))> {
-    let parcel = world.get::<crate::parcel::Parcel>(entity)?;
-    let frontage = crate::parcel::parcel_frontage(world, parcel)?;
+    let stroke = world.get::<crate::stroke::Stroke>(entity)?;
+    let frontage = crate::stroke::stroke_frontage(world, stroke)?;
     let patch = road_patch(world, anchor.parent_road)?;
     let v_edge = if anchor.right_edge { 1.0 } else { 0.0 };
 
@@ -173,7 +173,7 @@ pub(crate) fn derive_parcel_anchor(
     };
     let (node_t, _) = derive_anchor_state(world, &scaffold)?;
     // Flip 180°: a node's +Z points away from the road (its network is the
-    // driveway growing outward); the parcel's frontage FACES the road.
+    // driveway growing outward); the stroke's frontage FACES the road.
     let transform = Transform::new(
         node_t.translation,
         node_t.rotation * quat_from_rotation_y(std::f32::consts::PI),
@@ -205,13 +205,13 @@ pub(crate) fn anchor_updates(
         let Some(entity) = world.entity_at_index(index) else {
             continue;
         };
-        // Two carrier kinds: a parcel derives its transform AND the edge
-        // interval (inverted derivation — see `derive_parcel_anchor`); a
+        // Two carrier kinds: a stroke derives its transform AND the edge
+        // interval (inverted derivation — see `derive_stroke_anchor`); a
         // node/bare entity derives its transform (+ half_width when a
         // RoadNode is present) from the authored interval.
-        let is_parcel = world.get::<crate::parcel::Parcel>(entity).is_some();
-        let derived = if is_parcel {
-            derive_parcel_anchor(world, entity, anchor)
+        let is_stroke = world.get::<crate::stroke::Stroke>(entity).is_some();
+        let derived = if is_stroke {
+            derive_stroke_anchor(world, entity, anchor)
                 .map(|(t, interval)| (t, 0.0, Some(interval)))
         } else {
             derive_anchor_state(world, anchor).map(|(t, hw)| (t, hw, None))
@@ -265,8 +265,8 @@ pub(crate) fn anchor_updates(
                     u_max: new_max,
                     ..anchor.clone()
                 };
-                if is_parcel {
-                    let (slid_t, interval) = derive_parcel_anchor(world, entity, &slid)?;
+                if is_stroke {
+                    let (slid_t, interval) = derive_stroke_anchor(world, entity, &slid)?;
                     Some((entity, slid_t, 0.0, Some(interval)))
                 } else {
                     let (slid_t, slid_hw) = derive_anchor_state(world, &slid)?;
