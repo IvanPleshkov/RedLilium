@@ -476,6 +476,27 @@ fn entity_picker(
     picked
 }
 
+/// Jump button next to an entity-reference field: selects the referenced
+/// entity (through the editor's `SelectAction`), so a reference seen in
+/// the inspector is one click away from the gizmo. No-op without an
+/// action queue or with a dead/dangling target.
+fn entity_jump_button(
+    current: Option<crate::Entity>,
+    ui: &mut egui::Ui,
+    ctx: &FieldInspectCtx<'_>,
+) {
+    let Some(target) = current.filter(|&e| ctx.world.is_alive(e)) else {
+        return;
+    };
+    if ui
+        .small_button("→")
+        .on_hover_text("Select the referenced entity")
+        .clicked()
+    {
+        crate::ui::request_select(ctx.world, vec![target]);
+    }
+}
+
 impl ComponentField for crate::Entity {
     fn inspect_field(
         &self,
@@ -486,7 +507,9 @@ impl ComponentField for crate::Entity {
         let current = (*self != crate::Entity::DANGLING).then_some(*self);
         ui.horizontal(|ui| {
             ui.label(name);
-            entity_picker(current, "dangling", false, name, ui, ctx)
+            let picked = entity_picker(current, "dangling", false, name, ui, ctx);
+            entity_jump_button(current, ui, ctx);
+            picked
         })
         .inner
         .map(|picked| picked.unwrap_or(crate::Entity::DANGLING))
@@ -530,6 +553,7 @@ impl ComponentField for Vec<crate::Entity> {
                         v[i] = picked.unwrap_or(crate::Entity::DANGLING);
                         edited = Some(v);
                     }
+                    entity_jump_button(current, ui, ctx);
                     if ui.small_button("✕").clicked() {
                         let mut v = self.clone();
                         v.remove(i);
@@ -571,7 +595,9 @@ impl ComponentField for Option<crate::Entity> {
     ) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
-            entity_picker(*self, "None", true, name, ui, ctx)
+            let picked = entity_picker(*self, "None", true, name, ui, ctx);
+            entity_jump_button(*self, ui, ctx);
+            picked
         })
         .inner
     }

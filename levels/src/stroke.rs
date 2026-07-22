@@ -265,14 +265,15 @@ impl EditAction<World> for AddStrokeAction {
         self.created.push(stroke);
         let inserted = world
             .insert(stroke, self.transform)
-            .and_then(|_| world.insert(stroke, GlobalTransform(self.transform.to_matrix())));
+            .and_then(|_| world.insert(stroke, GlobalTransform(self.transform.to_matrix())))
+            .and_then(|_| world.insert(stroke, redlilium_ecs::Name("Stroke".to_owned())));
         if let Err(e) = inserted {
             undo_partial(world, &mut self.created);
             return Err(EditActionError::Custom(e.to_string()));
         }
 
         let mut points = Vec::with_capacity(DEFAULT_STROKE.len());
-        for [x, z] in DEFAULT_STROKE {
+        for (n, [x, z]) in DEFAULT_STROKE.into_iter().enumerate() {
             let local = Transform::new(
                 Vec3::new(x, 0.0, z),
                 quat_from_rotation_y(0.0),
@@ -288,7 +289,10 @@ impl EditAction<World> for AddStrokeAction {
                         GlobalTransform(self.transform.to_matrix() * local.to_matrix()),
                     )
                 })
-                .and_then(|_| world.insert(vertex, StrokeVertex::default()));
+                .and_then(|_| world.insert(vertex, StrokeVertex::default()))
+                .and_then(|_| {
+                    world.insert(vertex, redlilium_ecs::Name(format!("Point {}", n + 1)))
+                });
             if let Err(e) = inserted {
                 undo_partial(world, &mut self.created);
                 return Err(EditActionError::Custom(e.to_string()));
@@ -388,7 +392,8 @@ impl EditAction<World> for AddGateAction {
             .insert(gate, self.local)
             .and_then(|_| world.insert(gate, GlobalTransform(parent_m * self.local.to_matrix())))
             .and_then(|_| world.insert(gate, crate::RoadNode { half_width: 1.5 }))
-            .and_then(|_| world.insert(gate, Gate));
+            .and_then(|_| world.insert(gate, Gate))
+            .and_then(|_| world.insert(gate, redlilium_ecs::Name("Gate".to_owned())));
         if let Err(e) = inserted {
             world.despawn(gate);
             return Err(EditActionError::Custom(e.to_string()));

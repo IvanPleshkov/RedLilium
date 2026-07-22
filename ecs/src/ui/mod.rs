@@ -343,3 +343,17 @@ fn submit_selection(world: &World, state: &mut InspectorState, entities: Vec<Ent
         state.pending_selection = Some(entities);
     }
 }
+
+/// Request a selection change from UI code that only holds `&World` (e.g.
+/// the jump buttons next to entity-reference fields in the component
+/// inspector). Pushes a [`SelectAction`] through the [`ActionQueue`];
+/// returns `false` (and does nothing) when no queue resource exists.
+pub(crate) fn request_select(world: &World, entities: Vec<Entity>) -> bool {
+    if world.has_resource::<ActionQueue<World>>() {
+        let queue = world.resource::<ActionQueue<World>>();
+        queue.push(Box::new(SelectAction::set(entities)));
+        true
+    } else {
+        false
+    }
+}

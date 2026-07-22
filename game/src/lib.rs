@@ -761,6 +761,7 @@ pub fn spawn_levels_playground(world: &mut World) {
             e
         };
         let stroke_at = |world: &mut World,
+                         name: &str,
                          parent: Option<Entity>,
                          t: Transform,
                          verts: &[[f32; 3]]|
@@ -773,12 +774,16 @@ pub fn spawn_levels_playground(world: &mut World) {
             world
                 .insert(stroke, GlobalTransform(parent_m * t.to_matrix()))
                 .unwrap();
+            world
+                .insert(stroke, redlilium_ecs::Name(name.to_owned()))
+                .unwrap();
             if let Some(p) = parent {
                 redlilium_ecs::set_parent(world, stroke, p);
             }
             let points: Vec<Entity> = verts
                 .iter()
-                .map(|&[x, y, z]| {
+                .enumerate()
+                .map(|(n, &[x, y, z])| {
                     let v = child(
                         world,
                         stroke,
@@ -789,6 +794,9 @@ pub fn spawn_levels_playground(world: &mut World) {
                         ),
                     );
                     world.insert(v, StrokeVertex::default()).unwrap();
+                    world
+                        .insert(v, redlilium_ecs::Name(format!("Point {}", n + 1)))
+                        .unwrap();
                     v
                 })
                 .collect();
@@ -807,6 +815,9 @@ pub fn spawn_levels_playground(world: &mut World) {
             );
             world.insert(gate, RoadNode { half_width: 1.5 }).unwrap();
             world.insert(gate, Gate).unwrap();
+            world
+                .insert(gate, redlilium_ecs::Name("Gate".to_owned()))
+                .unwrap();
             gate
         };
         let building_at =
@@ -836,8 +847,12 @@ pub fn spawn_levels_playground(world: &mut World) {
         world
             .insert(villa, GlobalTransform(villa_t.to_matrix()))
             .unwrap();
+        world
+            .insert(villa, redlilium_ecs::Name("Villa".to_owned()))
+            .unwrap();
         let fence = stroke_at(
             world,
+            "Fence",
             Some(villa),
             Transform::default(),
             &[
@@ -916,6 +931,7 @@ pub fn spawn_levels_playground(world: &mut World) {
         // it — nothing owns anything, terrain flows around all of it.
         let b = stroke_at(
             world,
+            "Scarp line",
             None,
             Transform::new(
                 Vec3::new(48.0, 0.0, 0.0),

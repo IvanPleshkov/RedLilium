@@ -102,7 +102,8 @@ impl EditAction<World> for PlaceBuildingAction {
         let inserted = world
             .insert(entity, self.transform)
             .and_then(|_| world.insert(entity, GlobalTransform(world_m)))
-            .and_then(|_| world.insert(entity, self.building.clone()));
+            .and_then(|_| world.insert(entity, self.building.clone()))
+            .and_then(|_| world.insert(entity, redlilium_ecs::Name("Building".to_owned())));
         if let Err(e) = inserted {
             world.despawn(entity);
             return Err(EditActionError::Custom(e.to_string()));
