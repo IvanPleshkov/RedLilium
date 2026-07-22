@@ -48,9 +48,18 @@ impl World {
         // fail-fast on a source conflict. This is the single choke point every
         // component registration path funnels through.
         self.record_type_source(TypeId::of::<T>(), std::any::type_name::<T>());
-        self.components
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| crate::sync::RwLock::new(ComponentStorage::new::<T>()));
+        let type_id = TypeId::of::<T>();
+        if !self.components.contains_key(&type_id) {
+            // First registration of this type: stamp it with a monotonic
+            // sequence so despawn can fire cross-type `on_remove` hooks in a
+            // deterministic order rather than `HashMap` iteration order (#43).
+            let seq = self.next_registration_seq;
+            self.next_registration_seq += 1;
+            let mut storage = ComponentStorage::new::<T>();
+            storage.registration_seq = seq;
+            self.components
+                .insert(type_id, crate::sync::RwLock::new(storage));
+        }
     }
 
     /// Registers a component type with inspector support.

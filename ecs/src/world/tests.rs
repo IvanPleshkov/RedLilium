@@ -842,6 +842,38 @@ fn on_remove_fires_during_despawn_batch() {
 }
 
 #[test]
+fn despawn_batch_fires_hooks_in_registration_order() {
+    // #43: per entity, `despawn_batch` fires cross-type `on_remove` hooks in
+    // registration order, not `HashMap` iteration order. Entities keep their
+    // input order.
+    let mut world = World::new();
+    world.register_component::<Velocity>(); // seq 0
+    world.register_component::<Position>(); // seq 1
+    world.insert_resource::<Vec<&'static str>>(Vec::new());
+
+    world.on_remove::<Velocity>(|world, _| {
+        world.resource_mut::<Vec<&'static str>>().push("velocity");
+    });
+    world.on_remove::<Position>(|world, _| {
+        world.resource_mut::<Vec<&'static str>>().push("position");
+    });
+
+    let entities = world.spawn_batch(2);
+    for e in &entities {
+        // Insert Position before Velocity to prove firing tracks registration.
+        world.insert(*e, Position { x: 0.0, y: 0.0 }).unwrap();
+        world.insert(*e, Velocity { x: 0.0, y: 0.0 }).unwrap();
+    }
+    world.despawn_batch(&entities);
+
+    // Each entity fires velocity (seq 0) then position (seq 1), in input order.
+    assert_eq!(
+        *world.resource::<Vec<&'static str>>(),
+        vec!["velocity", "position", "velocity", "position"],
+    );
+}
+
+#[test]
 fn on_remove_entity_still_alive_during_despawn() {
     let mut world = World::new();
     world.register_component::<Health>();
@@ -1185,6 +1217,80 @@ fn despawn_cascading_removal_fires_hooks_once() {
     // Health's on_remove fired exactly once (inside the cascade), not a
     // second time from despawn's own snapshot.
     assert_eq!(*world.resource::<u32>(), 1);
+}
+
+#[test]
+fn despawn_fires_hooks_in_registration_order() {
+    // #43: the cross-type `on_remove` firing order must be deterministic
+    // (component registration order), not `HashMap` iteration order. Insert
+    // order deliberately differs from registration order to prove the firing
+    // order tracks registration, not insertion or hashing.
+    let mut world = World::new();
+    world.register_component::<Velocity>(); // seq 0
+    world.register_component::<Position>(); // seq 1
+    world.register_component::<Health>(); // seq 2
+    world.insert_resource::<Vec<&'static str>>(Vec::new());
+
+    world.on_remove::<Velocity>(|world, _| {
+        world.resource_mut::<Vec<&'static str>>().push("velocity");
+    });
+    world.on_remove::<Position>(|world, _| {
+        world.resource_mut::<Vec<&'static str>>().push("position");
+    });
+    world.on_remove::<Health>(|world, _| {
+        world.resource_mut::<Vec<&'static str>>().push("health");
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Health(1)).unwrap();
+    world.insert(entity, Velocity { x: 0.0, y: 0.0 }).unwrap();
+    world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+    world.despawn(entity);
+
+    assert_eq!(
+        *world.resource::<Vec<&'static str>>(),
+        vec!["velocity", "position", "health"],
+    );
+}
+
+#[test]
+fn despawn_hook_sibling_visibility_follows_registration_order() {
+    // #43: with deterministic registration-order firing plus immediate
+    // removal after each type's hooks, an `on_remove` hook sees sibling
+    // hooked components registered *after* it still present, and those
+    // registered *before* it already removed.
+    let mut world = World::new();
+    world.register_component::<Velocity>(); // seq 0, fires first
+    world.register_component::<Health>(); // seq 1, fires second
+    world.insert_resource::<Vec<(&'static str, bool)>>(Vec::new());
+
+    // Velocity (earlier) checks whether Health (later) is still present.
+    world.on_remove::<Velocity>(|world, entity| {
+        let saw = world.get::<Health>(entity).is_some();
+        world
+            .resource_mut::<Vec<(&'static str, bool)>>()
+            .push(("velocity_saw_health", saw));
+    });
+    // Health (later) checks whether Velocity (earlier) is still present.
+    world.on_remove::<Health>(|world, entity| {
+        let saw = world.get::<Velocity>(entity).is_some();
+        world
+            .resource_mut::<Vec<(&'static str, bool)>>()
+            .push(("health_saw_velocity", saw));
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Velocity { x: 0.0, y: 0.0 }).unwrap();
+    world.insert(entity, Health(1)).unwrap();
+    world.despawn(entity);
+
+    assert_eq!(
+        *world.resource::<Vec<(&'static str, bool)>>(),
+        vec![
+            ("velocity_saw_health", true),
+            ("health_saw_velocity", false),
+        ],
+    );
 }
 
 #[test]

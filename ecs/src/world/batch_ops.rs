@@ -94,8 +94,10 @@ impl World {
     ///
     /// `on_remove` hooks fire first (every batch entity still alive) and
     /// exactly once per component; hook-less components stay readable for
-    /// the whole hook phase (see #43 for ordering caveats between hooked
-    /// components). Then all entities are deallocated and their remaining
+    /// the whole hook phase. Per entity, hooked components fire in
+    /// **registration order** (deterministic, not `HashMap` order); see
+    /// [`despawn`](World::despawn) for the resulting sibling-visibility rule
+    /// (#43). Then all entities are deallocated and their remaining
     /// components removed.
     ///
     /// Skips entities that are already dead (a stale handle never touches
@@ -111,12 +113,20 @@ impl World {
                 continue;
             }
             let index = entity.index();
+            // Collect this entity's hooked components, then order them by
+            // registration_seq so the cross-type firing order is deterministic
+            // (registration order) rather than `HashMap` iteration order (#43).
+            // Entities keep their input order; only the per-entity component
+            // order is normalized.
+            let mut per_entity: SmallVec<[(u64, TypeId); 4]> = Default::default();
             for (type_id, lock) in self.components.iter_mut() {
                 let storage = lock.get_mut();
                 if !storage.on_remove.is_empty() && storage.contains_untyped(index) {
-                    hooked.push((entity, *type_id));
+                    per_entity.push((storage.registration_seq, *type_id));
                 }
             }
+            per_entity.sort_unstable_by_key(|(seq, _)| *seq);
+            hooked.extend(per_entity.into_iter().map(|(_, type_id)| (entity, type_id)));
         }
 
         // Phase 2: per (entity, hooked component) — fire its hooks
