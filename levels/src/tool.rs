@@ -359,11 +359,18 @@ pub(crate) fn selection_pick(
     query: &redlilium_ecs::ui::ViewportPickQuery,
 ) -> Option<redlilium_ecs::ui::ViewportPickHit> {
     let ray = &query.ray;
-    // (perpendicular distance, t along ray, entity).
-    let mut best: Option<(f32, f32, Entity)> = None;
-    let mut consider = |dist: f32, limit: f32, t: f32, entity: Entity| {
-        if dist <= limit && best.is_none_or(|(d, _, _)| dist < d) {
-            best = Some((dist, t, entity));
+    // Two pick tiers: point handles (tier 1 — stroke vertex cubes, road
+    // midpoint cubes) beat extended geometry (tier 0 — cross-sections,
+    // stroke paths, footprint rings) whenever they are within their own
+    // radius. Without the tiers a handle sitting ON a line could never
+    // win: the line through it is always at least as close to the ray.
+    // (priority, perpendicular distance, t along ray, entity).
+    let mut best: Option<(u8, f32, f32, Entity)> = None;
+    let mut consider = |priority: u8, dist: f32, limit: f32, t: f32, entity: Entity| {
+        if dist <= limit
+            && best.is_none_or(|(p, d, _, _)| priority > p || (priority == p && dist < d))
+        {
+            best = Some((priority, dist, t, entity));
         }
     };
     if let Ok(nodes) = world.read_all::<RoadNode>() {
@@ -376,7 +383,7 @@ pub(crate) fn selection_pick(
             };
             let section = bezier::cross_section(&gt.0, node.half_width);
             let (dist, _, t) = ray_segment_closest(ray, section[0], section[3]);
-            consider(dist, PICK_RADIUS, t, entity);
+            consider(0, dist, PICK_RADIUS, t, entity);
         }
     }
     if let Ok(segments) = world.read_all::<RoadSegment>() {
@@ -389,7 +396,7 @@ pub(crate) fn selection_pick(
             };
             let mid = bezier::eval(&patch, 0.5, 0.5);
             let (dist, _, t) = ray_segment_closest(ray, mid, mid);
-            consider(dist, ROAD_HANDLE_PICK_RADIUS, t, road);
+            consider(1, dist, ROAD_HANDLE_PICK_RADIUS, t, road);
         }
     }
     if let Ok(strokes) = world.read_all::<crate::stroke::Stroke>() {
@@ -401,17 +408,16 @@ pub(crate) fn selection_pick(
                 continue;
             };
             // The stroke picks by its (tessellated) open path; the vertex
-            // handle cubes pick the vertex entities themselves (they win
-            // by being strictly closer to the ray than the segments
-            // through them).
+            // handle cubes pick the vertex entities themselves and, as
+            // point handles, take the higher tier.
             for i in 0..path.len() - 1 {
                 let (dist, _, t) = ray_segment_closest(ray, path[i], path[i + 1]);
-                consider(dist, PICK_RADIUS, t, entity);
+                consider(0, dist, PICK_RADIUS, t, entity);
             }
             if let Some(corners) = crate::stroke::stroke_corners(world, stroke) {
                 for (vertex, p, _, _) in corners {
                     let (dist, _, t) = ray_segment_closest(ray, p, p);
-                    consider(dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
+                    consider(1, dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
                 }
             }
         }
@@ -433,11 +439,11 @@ pub(crate) fn selection_pick(
             for i in 0..4 {
                 let (dist, _, t) =
                     ray_segment_closest(ray, corner(ring[i]), corner(ring[(i + 1) % 4]));
-                consider(dist, PICK_RADIUS, t, entity);
+                consider(0, dist, PICK_RADIUS, t, entity);
             }
         }
     }
-    let (_, t, entity) = best?;
+    let (_, _, t, entity) = best?;
     if let Some(point) = query.scene_point {
         let t_scene = (point - ray.origin).dot(&ray.dir) / ray.dir.dot(&ray.dir).max(1e-8);
         if t_scene < t {
@@ -788,6 +794,45 @@ mod tests {
         // A scene mesh BEHIND the control (t = 15): the control wins.
         let hit = selection_pick(&world, &query(Some(Vec3::new(0.0, -5.0, 0.0)))).expect("wins");
         assert_eq!(hit.entity, node);
+    }
+
+    #[test]
+    fn vertex_handles_win_over_their_stroke_line() {
+        let mut world = World::new();
+        redlilium_ecs::register_std_components(&mut world);
+        world.register_inspector_default::<RoadNode>();
+        world.register_inspector_default::<RoadSegment>();
+        world.register_inspector_default::<crate::stroke::Stroke>();
+        world.register_inspector_default::<crate::stroke::StrokeVertex>();
+
+        use redlilium_core::abstract_editor::EditAction;
+        crate::stroke::AddStrokeAction::at_point(Vec3::zeros())
+            .apply(&mut world)
+            .unwrap();
+        let (stroke, component) = world
+            .read_all::<crate::stroke::Stroke>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, s)| Some((world.entity_at_index(index)?, s.clone())))
+            .next()
+            .unwrap();
+
+        let query = |x: f32, z: f32| redlilium_ecs::ui::ViewportPickQuery {
+            ray: ViewportRay {
+                origin: Vec3::new(x, 10.0, z),
+                dir: Vec3::new(0.0, -1.0, 0.0),
+            },
+            scene_entity: None,
+            scene_point: None,
+        };
+        // Click ON a vertex: the path segment through it is exactly as
+        // close as the handle cube — the handle must still win (a line
+        // pick here would make vertices unselectable).
+        let hit = selection_pick(&world, &query(-4.0, 0.0)).expect("hit");
+        assert_eq!(hit.entity, component.points[0], "vertex, not the stroke");
+        // Click mid-segment, away from any handle: the stroke itself.
+        let hit = selection_pick(&world, &query(0.0, 0.0)).expect("hit");
+        assert_eq!(hit.entity, stroke);
     }
 
     #[test]
