@@ -328,19 +328,27 @@ fn gate_transform(
     let target = 2.0 * half_width.max(0.05);
     let center = gate.t.clamp(0.0, 1.0);
     let eval = |t: f32| eval_lip(corners, profile, gate.flip, i, t);
-    // Half-parameter reach: bisect until the chord between the two curve
-    // points matches the cross-section length (chord length grows
-    // monotonically with the reach on any sane curve). A segment too
-    // short to span the width uses all of what it has.
-    let chord_of = |c: f32, dt: f32| eval((c + dt).min(1.0)).0 - eval((c - dt).max(0.0)).0;
-    let dt_max = 0.5f32;
-    let mut dt = if chord_of(0.5, dt_max).norm() <= target {
-        dt_max
-    } else {
-        let (mut lo, mut hi) = (0.0f32, dt_max);
+    // Arc-balanced chord: each end reaches out from the **anchor point**
+    // `lip(center)` by half the cross-section, bisected on straight-line
+    // distance from the anchor (monotone in the reach on any sane curve).
+    // This keeps the chord midpoint glued to the on-lip anchor even where
+    // the parameterization compresses (degenerate handles shrink the arc
+    // per parameter near a vertex). A parameter-symmetric `center ± dt`
+    // let the midpoint drift behind the anchor there — and a dragged gate
+    // then chased its own lag: every slide projected the midpoint back
+    // onto the lip, and the drag gain decayed toward zero (the "floating
+    // gizmo"). A side that hits its segment end hands the remainder to
+    // the other side; a segment too short to span the width uses all of
+    // what it has.
+    let reach = |from: f32, anchor: Vec3, dir: f32, want: f32| -> f32 {
+        let limit = if dir > 0.0 { 1.0 - from } else { from };
+        if (eval(from + dir * limit).0 - anchor).norm() <= want {
+            return limit;
+        }
+        let (mut lo, mut hi) = (0.0f32, limit);
         for _ in 0..24 {
             let mid = (lo + hi) * 0.5;
-            if chord_of(center.clamp(mid, 1.0 - mid), mid).norm() < target {
+            if (eval(from + dir * mid).0 - anchor).norm() < want {
                 lo = mid;
             } else {
                 hi = mid;
@@ -348,10 +356,27 @@ fn gate_transform(
         }
         (lo + hi) * 0.5
     };
-    dt = dt.min(dt_max);
-    let center = center.clamp(dt, 1.0 - dt);
-    let p_lo = eval(center - dt).0;
-    let p_hi = eval(center + dt).0;
+    let (t_lo, t_hi) = if (eval(1.0).0 - eval(0.0).0).norm() <= target {
+        (0.0, 1.0)
+    } else {
+        let anchor = eval(center).0;
+        let mut lo = center - reach(center, anchor, -1.0, target * 0.5);
+        let mut hi = center + reach(center, anchor, 1.0, target * 0.5);
+        // A side saturated at its segment end leaves the chord short —
+        // the other side completes it end-to-end. (An interior chord may
+        // fall short of the target by the curvature sag of the two
+        // anchor-length halves; that is not saturation, leave it be.)
+        if (eval(hi).0 - eval(lo).0).norm() < target - 1e-4 {
+            if lo <= 1e-6 {
+                hi = center + reach(center, eval(0.0).0, 1.0, target);
+            } else if hi >= 1.0 - 1e-6 {
+                lo = center - reach(center, eval(1.0).0, -1.0, target);
+            }
+        }
+        (lo, hi)
+    };
+    let p_lo = eval(t_lo).0;
+    let p_hi = eval(t_hi).0;
     let chord = p_hi - p_lo;
     if chord.norm() < 1e-4 {
         return None;
@@ -1601,6 +1626,109 @@ mod tests {
             (t.translation - Vec3::new(2.0, -2.0, 0.0)).norm() < 1e-2,
             "snapped back onto the lower lip, got {:?}",
             t.translation
+        );
+    }
+
+    #[test]
+    fn dragged_gate_on_a_curved_lip_keeps_its_gain() {
+        // Rim-like geometry: a curved middle vertex whose far end has
+        // degenerate handles — the parameterization compresses toward
+        // t = 1. With a parameter-symmetric chord the gate's midpoint
+        // lagged the lip more and more there, and successive equal drags
+        // advanced less and less (the reported "floating gizmo": the
+        // drag gain decayed toward zero long before the line's end).
+        let (mut world, cut, component) = world_with_cut();
+        let (v0, v1, v2) = (
+            component.points[0],
+            component.points[1],
+            component.points[2],
+        );
+        world
+            .insert(
+                v1,
+                Transform::new(
+                    Vec3::new(0.0, 0.0, 2.0),
+                    quat_from_rotation_y(0.0),
+                    Vec3::new(1.0, 1.0, 1.0),
+                ),
+            )
+            .unwrap();
+        world
+            .insert(
+                v1,
+                StrokeVertex {
+                    handle_in: Vec3::new(-2.0, 0.0, 0.0),
+                    handle_out: Vec3::new(2.0, 0.0, 0.0),
+                },
+            )
+            .unwrap();
+        for (v, drop, offset) in [(v0, 1.5, 1.0), (v1, 2.0, 1.5), (v2, 1.5, 1.0)] {
+            world
+                .insert(v, crate::cut::CutVertex { drop, offset })
+                .unwrap();
+        }
+        AddGateAction::new(
+            cut,
+            Gate {
+                segment: 1,
+                t: 0.5,
+                flip: true,
+            },
+        )
+        .apply(&mut world)
+        .unwrap();
+        let gate = world
+            .read_all::<Gate>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, _)| world.entity_at_index(index))
+            .next()
+            .unwrap();
+
+        let mut cache = std::collections::HashMap::new();
+        let settle = |world: &mut World, cache: &mut std::collections::HashMap<_, _>| {
+            for _ in 0..GATE_PASSES {
+                let updates = gate_updates(world, cache, true);
+                if updates.is_empty() {
+                    break;
+                }
+                apply_gate_updates(world, &updates);
+                for (entity, transform, _, _) in &updates {
+                    cache.insert(*entity, *transform);
+                }
+            }
+        };
+        settle(&mut world, &mut cache);
+
+        // Three equal +0.4 drags along the foot: each must keep most of
+        // its travel — the broken chord placement decayed 0.36 → 0.19 →
+        // 0.15 → … here, grinding to a halt mid-lip.
+        for _ in 0..3 {
+            let home = *world.get::<Transform>(gate).unwrap();
+            let dragged = Transform::new(
+                home.translation + Vec3::new(0.4, 0.0, 0.0),
+                home.rotation,
+                home.scale,
+            );
+            world.insert(gate, dragged).unwrap();
+            settle(&mut world, &mut cache);
+            let advanced = world.get::<Transform>(gate).unwrap().translation.x - home.translation.x;
+            assert!(
+                advanced > 0.25,
+                "each drag keeps most of its travel, got {advanced}"
+            );
+        }
+
+        // The settled midpoint stays glued to the on-lip anchor point —
+        // the invariant whose loss produced the lag.
+        let param = world.get::<Gate>(gate).unwrap().clone();
+        let (corners, profile) = local_path(&world, &host_points(&world, cut).unwrap()).unwrap();
+        let anchor = eval_lip(&corners, &profile, true, param.segment as usize, param.t).0;
+        let t = *world.get::<Transform>(gate).unwrap();
+        assert!(
+            (t.translation - anchor).norm() < 0.15,
+            "midpoint tracks the anchor, off by {}",
+            (t.translation - anchor).norm()
         );
     }
 
