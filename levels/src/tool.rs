@@ -858,7 +858,7 @@ mod tests {
         };
         // Gate at the origin facing +X (its stroke runs north-south).
         let gate = spawn(&mut world, 0.0, std::f32::consts::FRAC_PI_2);
-        world.insert(gate, crate::stroke::Gate).unwrap();
+        world.insert(gate, crate::stroke::Gate::default()).unwrap();
         let outside = spawn(&mut world, 5.0, 0.0);
         let inside = spawn(&mut world, -5.0, 0.0);
 
@@ -883,7 +883,7 @@ mod tests {
 
         let gate = world.spawn();
         world.insert(gate, RoadNode::default()).unwrap();
-        world.insert(gate, crate::stroke::Gate).unwrap();
+        world.insert(gate, crate::stroke::Gate::default()).unwrap();
         assert!(is_socket(&world, gate));
         // A plain node is not.
         let plain = world.spawn();

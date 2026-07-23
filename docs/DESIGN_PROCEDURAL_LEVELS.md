@@ -142,12 +142,18 @@ the entities mean.
   *one* stroke. **Closure is the next level up** — closed contours (with
   a different interior fill) will be assembled from stroke pieces; the
   stroke itself is never closed.
-  **Gates** (`Gate`): connection sockets droppable onto a stroke — child
-  `RoadNode`s on the line, +Z toward the side the drop click came from
-  (an open line has no interior; the author picks the facing). A gate is
-  **two-sided**: a road is met from whichever side it comes from —
-  network roads from the front (`b_from_front`), roads from behind
-  connect from behind (other socket kinds stay front-only).
+  **Gates** (`Gate { segment, t, flip }`): connection sockets **glued to
+  the stroke's path parametrically**, the same shape as an `EdgeAnchor`
+  on a road edge — child `RoadNode`s whose local transform is *derived
+  data*, recomputed from the parameter every frame, so a gate (and every
+  road into it) follows any reshape of the stroke's points. `flip` picks
+  which side of the line +Z faces (an open line has no interior; the
+  side is authored at drop time). Dragging a gate with the gizmo
+  *slides* it along the path (projection recovers the parameter — same
+  undo story as anchored nodes). A gate is **two-sided**: a road is met
+  from whichever side it comes from — network roads from the front
+  (`b_from_front`), roads from behind connect from behind (other socket
+  kinds stay front-only).
   **Grouping is plain hierarchy — there is no container component.** A
   root entity holding strokes, buildings and roads as its subtree IS the
   prefab ("villa" = fences + buildings + a driveway under one root).

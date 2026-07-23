@@ -287,19 +287,21 @@ pub(crate) fn anchor_updates(
 /// the inspector) simply stop at the cap instead of recursing forever.
 const MAX_PASSES: usize = 8;
 
-/// Settle every edge anchor in place — the `&mut World` variant used by
-/// scene baking and tests. Follow-only (no sliding: baking has no notion
-/// of "the author just moved this node"). The frame-loop variant is
-/// [`DeriveEdgeAnchors`].
+/// Settle every derived attachment in place — edge anchors, then stroke
+/// gates — the `&mut World` variant used by scene baking and tests.
+/// Follow-only (no sliding: baking has no notion of "the author just
+/// moved this node"). The frame-loop variants are [`DeriveEdgeAnchors`]
+/// and [`crate::stroke::DeriveGates`].
 pub fn settle_edge_anchors(world: &mut World) {
     let mut cache = std::collections::HashMap::new();
     for _ in 0..MAX_PASSES {
         let updates = anchor_updates(world, &mut cache, false);
         if updates.is_empty() {
-            return;
+            break;
         }
         apply_updates(world, &updates);
     }
+    crate::stroke::settle_gates(world);
 }
 
 /// Apply planned writes through `&mut World` (baking/tests path).

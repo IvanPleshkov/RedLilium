@@ -25,7 +25,8 @@ pub use building::{Building, PlaceBuildingAction};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
 pub use stroke::{
-    AddGateAction, AddStrokeAction, DuplicateSubtreeAction, Gate, Stroke, StrokeVertex, stroke_path,
+    AddGateAction, AddStrokeAction, DeriveGates, DuplicateSubtreeAction, Gate, Stroke,
+    StrokeVertex, stroke_path,
 };
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
 
@@ -120,6 +121,13 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         post.add(DeriveEdgeAnchors::default());
         post.add_edge::<DeriveEdgeAnchors, UpdateGlobalTransforms>()
             .expect("derive → propagate is acyclic");
+        // Gates derive after anchors (an anchored stroke's root settles
+        // first) and before propagation, same reasoning as above.
+        post.add(stroke::DeriveGates::default());
+        post.add_edge::<DeriveEdgeAnchors, stroke::DeriveGates>()
+            .expect("anchors → gates is acyclic");
+        post.add_edge::<stroke::DeriveGates, UpdateGlobalTransforms>()
+            .expect("gates → propagate is acyclic");
         // Click-select fallback: graph entities are meshless, so the GPU
         // entity-index pass cannot see them — nodes pick by cross-section,
         // roads by their midpoint handle cube.
@@ -184,15 +192,17 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
             },
         );
         // "Add gate": drop a connection socket onto the selected stroke at
-        // the point under the cursor (+Z toward the click side). Roads
-        // then connect to it from either side with the connect tool.
+        // the path point under the cursor (+Z toward the click side). The
+        // gate is parametric — it follows every reshape of the stroke, and
+        // dragging it slides it along the path. Roads then connect to it
+        // from either side with the connect tool.
         view.ops.add(
             "Add gate",
             |ctx| {
                 ctx.cursor_ray.as_ref().is_some_and(|ray| {
                     ctx.selection.iter().any(|&e| {
                         ctx.world.get::<Stroke>(e).is_some()
-                            && stroke::gate_spot(ctx.world, e, ray).is_some()
+                            && stroke::gate_param_at(ctx.world, e, ray).is_some()
                     })
                 })
             },
@@ -202,10 +212,10 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                 };
                 for &entity in ctx.selection.iter() {
                     if ctx.world.get::<Stroke>(entity).is_some()
-                        && let Some(local) = stroke::gate_spot(ctx.world, entity, ray)
+                        && let Some(param) = stroke::gate_param_at(ctx.world, entity, ray)
                     {
                         ctx.actions
-                            .push(Box::new(stroke::AddGateAction::new(entity, local)));
+                            .push(Box::new(stroke::AddGateAction::new(entity, param)));
                         break;
                     }
                 }

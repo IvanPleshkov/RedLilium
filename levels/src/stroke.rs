@@ -61,12 +61,36 @@ pub struct StrokeVertex {
     pub handle_in: Vec3,
 }
 
-/// Marker on a connection socket dropped onto a stroke: a child `RoadNode`
-/// on the line, +Z toward the side it was dropped from. Two-sided — roads
-/// are met from whichever side they come from (the standard socket rule
-/// generalized; see `tool::socket_meets_front`).
-#[derive(Debug, Clone, Default, Component)]
-pub struct Gate;
+/// A connection socket **glued to its stroke's path** — parametric, like
+/// an `EdgeAnchor` on a road edge: `segment` indexes the path segment
+/// (between points `i` and `i + 1`), `t` is the position along that
+/// segment's curve, `flip` picks which side of the line +Z faces (an open
+/// line has no interior — the side is authored at drop time). The gate's
+/// local `Transform` is **derived data**, recomputed from the parameter
+/// every frame ([`DeriveGates`]), so the socket — and every road into it —
+/// follows any reshape of the stroke; dragging the gate with the gizmo
+/// *slides* it along the path instead. Two-sided as a socket — roads are
+/// met from whichever side they come from (see
+/// `tool::socket_meets_front`).
+#[derive(Debug, Clone, Component)]
+pub struct Gate {
+    /// Path segment index (clamped to the live segment count).
+    pub segment: u32,
+    /// Position along the segment's curve, `0..=1`.
+    pub t: f32,
+    /// Face the right-hand side of the path instead of the left.
+    pub flip: bool,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self {
+            segment: 0,
+            t: 0.5,
+            flip: false,
+        }
+    }
+}
 
 /// Tessellation of one curved segment.
 const CURVE_STEPS: usize = 12;
@@ -158,31 +182,155 @@ pub(crate) fn stroke_frontage(world: &World, stroke: &Stroke) -> Option<f32> {
 /// Cursor reach for dropping a gate onto a stroke, world units.
 const GATE_DROP_RADIUS: f32 = 2.0;
 
-/// Where an "Add gate" click lands on a stroke: the stroke-local transform
-/// for a gate at the closest path point — positioned on the (tessellated)
-/// line, +Z toward the side the cursor is on (an open line has no interior
-/// to point away from — the author picks the facing by which side they
-/// click from; clicks dead-on default to the left-hand normal). `None`
-/// when the cursor is too far from the path or the stroke has no usable
-/// transform.
-pub(crate) fn gate_spot(
+/// A corner list stripped to geometry: `(position, handle_out point,
+/// handle_in point)` — the shared currency of segment evaluation, in
+/// whatever space the corners were taken (world or stroke-local).
+type Corners = Vec<(Vec3, Vec3, Vec3)>;
+
+/// The stroke's live corners in **stroke-local** space. Mirrors
+/// [`stroke_corners`] but reads only the vertices' local transforms —
+/// gate derivation must not depend on where the stroke root sits (moving
+/// the root, e.g. an anchored stroke sliding along its road, is not a
+/// reshape).
+fn local_corners(world: &World, stroke: &Stroke) -> Option<Corners> {
+    let corners: Corners = stroke
+        .points
+        .iter()
+        .filter_map(|&v| {
+            let vertex = world.get::<StrokeVertex>(v)?;
+            let t = world.get::<Transform>(v)?;
+            let m = t.to_matrix();
+            let point = |local: Vec3| {
+                let p = m * redlilium_core::math::Vec4::new(local.x, local.y, local.z, 1.0);
+                Vec3::new(p.x, p.y, p.z)
+            };
+            Some((
+                t.translation,
+                point(vertex.handle_out),
+                point(vertex.handle_in),
+            ))
+        })
+        .collect();
+    (corners.len() >= 2).then_some(corners)
+}
+
+/// Evaluate segment `i` (corner `i` → `i + 1`) at `t`: `(position,
+/// tangent)`. Straight segments (both adjacent handles absent) evaluate
+/// as a lerp; a degenerate cubic tangent falls back to the chord.
+fn eval_segment(corners: &[(Vec3, Vec3, Vec3)], i: usize, t: f32) -> (Vec3, Vec3) {
+    let (p0, h_out, _) = corners[i];
+    let (p3, _, h_in) = corners[i + 1];
+    let straight = (h_out - p0).norm() < HANDLE_EPS && (h_in - p3).norm() < HANDLE_EPS;
+    if straight {
+        return (p0 + (p3 - p0) * t, p3 - p0);
+    }
+    let s = 1.0 - t;
+    let pos =
+        p0 * (s * s * s) + h_out * (3.0 * t * s * s) + h_in * (3.0 * t * t * s) + p3 * (t * t * t);
+    let tangent =
+        (h_out - p0) * (3.0 * s * s) + (h_in - h_out) * (6.0 * s * t) + (p3 - h_in) * (3.0 * t * t);
+    if tangent.norm() < 1e-4 {
+        (pos, p3 - p0)
+    } else {
+        (pos, tangent)
+    }
+}
+
+/// A gate's derived stroke-local transform from a corner list: on the
+/// curve at the parameter, +Z along the side normal (`flip` picks the
+/// side). `None` when the tangent degenerates.
+fn gate_transform(corners: &Corners, gate: &Gate) -> Option<Transform> {
+    let i = (gate.segment as usize).min(corners.len() - 2);
+    let (pos, tangent) = eval_segment(corners, i, gate.t.clamp(0.0, 1.0));
+    let tangent = Vec3::new(tangent.x, 0.0, tangent.z);
+    if tangent.norm() < 1e-4 {
+        return None;
+    }
+    let tangent = tangent.normalize();
+    let n = Vec3::new(-tangent.z, 0.0, tangent.x) * if gate.flip { -1.0 } else { 1.0 };
+    Some(Transform::new(
+        pos,
+        quat_from_rotation_y(n.x.atan2(n.z)),
+        Vec3::new(1.0, 1.0, 1.0),
+    ))
+}
+
+/// Derive a gate's stroke-local transform from its path parameter. `None`
+/// when the parent stroke is gone or the path degenerates — broken
+/// topology yields no placement, the gate keeps its last one.
+pub(crate) fn derive_gate_state(
+    world: &World,
+    stroke_entity: Entity,
+    gate: &Gate,
+) -> Option<Transform> {
+    let stroke = world.get::<Stroke>(stroke_entity)?;
+    gate_transform(&local_corners(world, stroke)?, gate)
+}
+
+/// Project a stroke-local position onto the path: the `(segment, t)`
+/// closest to `pos`. Coarse scan + ternary refinement, like the road-edge
+/// projection in `anchor`.
+fn project_onto_path(corners: &Corners, pos: Vec3) -> (u32, f32) {
+    const COARSE: usize = 24;
+    let mut best = (0usize, 0.0f32, f32::MAX);
+    for i in 0..corners.len() - 1 {
+        for step in 0..=COARSE {
+            let t = step as f32 / COARSE as f32;
+            let d = (eval_segment(corners, i, t).0 - pos).norm_squared();
+            if d < best.2 {
+                best = (i, t, d);
+            }
+        }
+    }
+    let (i, coarse_t, _) = best;
+    let step = 1.0 / COARSE as f32;
+    let (mut a, mut b) = ((coarse_t - step).max(0.0), (coarse_t + step).min(1.0));
+    for _ in 0..30 {
+        let m1 = a + (b - a) / 3.0;
+        let m2 = b - (b - a) / 3.0;
+        if (eval_segment(corners, i, m1).0 - pos).norm_squared()
+            < (eval_segment(corners, i, m2).0 - pos).norm_squared()
+        {
+            b = m2;
+        } else {
+            a = m1;
+        }
+    }
+    (i as u32, (a + b) * 0.5)
+}
+
+/// Where an "Add gate" click lands on a stroke: the path parameter of the
+/// closest curve point, `flip` chosen so +Z faces the side the cursor is
+/// on (clicks dead-on default to the left-hand normal). `None` when the
+/// cursor is too far from the path.
+pub(crate) fn gate_param_at(
     world: &World,
     stroke_entity: Entity,
     ray: &redlilium_ecs::ui::ViewportRay,
-) -> Option<Transform> {
+) -> Option<Gate> {
     let stroke = world.get::<Stroke>(stroke_entity)?;
-    let path = stroke_path(world, stroke)?;
-    let mut best: Option<(f32, Vec3, Vec3, Vec3)> = None;
-    for i in 0..path.len() - 1 {
-        let (a, b) = (path[i], path[i + 1]);
-        let (dist, s, t) = crate::tool::ray_segment_closest(ray, a, b);
-        if best.is_none_or(|(d, _, _, _)| dist < d) {
-            let on_segment = a + (b - a) * s;
-            let on_ray = ray.origin + ray.dir * t;
-            best = Some((dist, on_segment, b - a, on_ray - on_segment));
+    let corners: Corners = stroke_corners(world, stroke)?
+        .into_iter()
+        .map(|(_, p, h_out, h_in)| (p, h_out, h_in))
+        .collect();
+    const STEPS: usize = 16;
+    let mut best: Option<(f32, usize, f32, Vec3, Vec3)> = None;
+    for i in 0..corners.len() - 1 {
+        let mut prev = eval_segment(&corners, i, 0.0).0;
+        for step in 1..=STEPS {
+            let t1 = step as f32 / STEPS as f32;
+            let next = eval_segment(&corners, i, t1).0;
+            let (dist, s, tr) = crate::tool::ray_segment_closest(ray, prev, next);
+            if best.is_none_or(|(d, _, _, _, _)| dist < d) {
+                let t = ((step - 1) as f32 + s) / STEPS as f32;
+                let on_segment = prev + (next - prev) * s;
+                let on_ray = ray.origin + ray.dir * tr;
+                best = Some((dist, i, t, next - prev, on_ray - on_segment));
+            }
+            prev = next;
         }
     }
-    let (dist, point, along, side) = best?;
+    let (dist, segment, t, along, side) = best?;
     if dist > GATE_DROP_RADIUS {
         return None;
     }
@@ -193,28 +341,180 @@ pub(crate) fn gate_spot(
     let along = along.normalize();
     let n = Vec3::new(-along.z, 0.0, along.x);
     let side = Vec3::new(side.x, 0.0, side.z);
-    let outward = if side.dot(&n) < 0.0 { -n } else { n };
+    Some(Gate {
+        segment: segment as u32,
+        t,
+        flip: side.dot(&n) < 0.0,
+    })
+}
 
-    // World gate pose → stroke-local (gates are children).
-    let parent = world.get::<GlobalTransform>(stroke_entity)?.0;
-    let inv = parent.try_inverse()?;
-    let local_point = {
-        let p = inv * redlilium_core::math::Vec4::new(point.x, point.y, point.z, 1.0);
-        Vec3::new(p.x, p.y, p.z)
+// ---------------------------------------------------------------------------
+// Gate derivation pass
+// ---------------------------------------------------------------------------
+
+/// One planned gate write: derived local transform, the fresh world
+/// matrix (parent GT × local — the anchor pass has already settled stroke
+/// roots by ordering), and the shifted parameter when the gate is
+/// *sliding*.
+type GateUpdate = (Entity, Transform, redlilium_core::math::Mat4, Option<Gate>);
+
+/// One gate derivation pass. Same cache contract as
+/// `anchor::anchor_updates`, but in **stroke-local** space: a gate whose
+/// local transform differs from BOTH the cache and the derived state was
+/// moved by the author → project it onto the path and shift the parameter
+/// (sliding, `flip` preserved). A gate equal to the cache follows the
+/// path (the points moved). Moving the stroke *root* never counts as a
+/// reshape — local coordinates don't see it.
+pub(crate) fn gate_updates(
+    world: &World,
+    cache: &mut std::collections::HashMap<Entity, Transform>,
+    slide: bool,
+) -> Vec<GateUpdate> {
+    let Ok(gates) = world.read_all::<Gate>() else {
+        return Vec::new();
     };
-    let local_out = {
-        let d = inv * redlilium_core::math::Vec4::new(outward.x, outward.y, outward.z, 0.0);
-        Vec3::new(d.x, 0.0, d.z)
-    };
-    if local_out.norm() < 1e-4 {
-        return None;
+    let mut updates = Vec::new();
+    for (index, gate) in gates.iter() {
+        let Some(entity) = world.entity_at_index(index) else {
+            continue;
+        };
+        let Some(parent) = world.get::<redlilium_ecs::Parent>(entity).map(|p| p.0) else {
+            continue;
+        };
+        let Some(stroke) = world.get::<Stroke>(parent) else {
+            continue;
+        };
+        let Some(corners) = local_corners(world, stroke) else {
+            continue;
+        };
+        let parent_m = world
+            .get::<GlobalTransform>(parent)
+            .map(|gt| gt.0)
+            .unwrap_or_else(redlilium_core::math::Mat4::identity);
+        let Some(derived) = gate_transform(&corners, gate) else {
+            continue;
+        };
+        let Some(t) = world.get::<Transform>(entity) else {
+            updates.push((entity, derived, parent_m * derived.to_matrix(), None));
+            continue;
+        };
+        if (t.to_matrix() - derived.to_matrix()).norm() <= 1e-4 {
+            cache.insert(entity, *t);
+            continue;
+        }
+        let moved = slide
+            && cache
+                .get(&entity)
+                .is_some_and(|prev| (prev.to_matrix() - t.to_matrix()).norm() > 1e-4);
+        if moved {
+            let (segment, new_t) = project_onto_path(&corners, t.translation);
+            let slid = Gate {
+                segment,
+                t: new_t,
+                flip: gate.flip,
+            };
+            if let Some(slid_transform) = gate_transform(&corners, &slid) {
+                updates.push((
+                    entity,
+                    slid_transform,
+                    parent_m * slid_transform.to_matrix(),
+                    Some(slid),
+                ));
+                continue;
+            }
+        }
+        updates.push((entity, derived, parent_m * derived.to_matrix(), None));
     }
-    let local_out = local_out.normalize();
-    Some(Transform::new(
-        local_point,
-        quat_from_rotation_y(local_out.x.atan2(local_out.z)),
-        Vec3::new(1.0, 1.0, 1.0),
-    ))
+    updates
+}
+
+/// Gates depend only on their own stroke's vertices — no chains — so a
+/// couple of passes always settle (the second run verifies quiescence).
+const GATE_PASSES: usize = 4;
+
+/// Apply planned gate writes through `&mut World` (baking/tests path).
+fn apply_gate_updates(world: &mut World, updates: &[GateUpdate]) {
+    for (entity, transform, world_m, param) in updates {
+        let _ = world.insert(*entity, *transform);
+        let _ = world.insert(*entity, GlobalTransform(*world_m));
+        if let Some(param) = param
+            && world.get::<Gate>(*entity).is_some()
+        {
+            let _ = world.insert(*entity, param.clone());
+        }
+    }
+}
+
+/// Settle every gate in place — the `&mut World` variant used by scene
+/// baking and tests. Follow-only, like `settle_edge_anchors` (which calls
+/// this — one baking entry point covers both derived attachments).
+pub(crate) fn settle_gates(world: &mut World) {
+    let mut cache = std::collections::HashMap::new();
+    for _ in 0..GATE_PASSES {
+        let updates = gate_updates(world, &mut cache, false);
+        if updates.is_empty() {
+            return;
+        }
+        apply_gate_updates(world, &updates);
+    }
+}
+
+/// Editing-view system: re-derives gates' placements from their strokes'
+/// paths, and converts authored gate moves (gizmo/inspector) into
+/// parameter shifts — the gate *slides* along the path. Ordered after
+/// `DeriveEdgeAnchors` (anchored stroke roots settle first) and before
+/// `UpdateGlobalTransforms`. The parameter write is derived-data
+/// maintenance, not an edit action: undo of the authoring Transform
+/// action restores the on-path position, and the projection recovers the
+/// old parameter from it.
+#[derive(Default)]
+pub struct DeriveGates {
+    /// Last settled local transform per gate — how an authored move is
+    /// told apart from a path reshape.
+    cache: std::sync::Mutex<std::collections::HashMap<Entity, Transform>>,
+}
+
+impl redlilium_ecs::System for DeriveGates {
+    type Result = ();
+
+    fn run<'a>(
+        &'a self,
+        ctx: &'a redlilium_ecs::SystemContext<'a>,
+    ) -> Result<(), redlilium_ecs::SystemError> {
+        use redlilium_ecs::WriteAll;
+        let mut cache = self.cache.lock().expect("gate cache");
+        cache.retain(|entity, _| ctx.raw_world().is_alive(*entity));
+        for _ in 0..GATE_PASSES {
+            let updates = gate_updates(ctx.raw_world(), &mut cache, true);
+            if updates.is_empty() {
+                break;
+            }
+            ctx.lock::<(
+                WriteAll<Transform>,
+                WriteAll<GlobalTransform>,
+                WriteAll<Gate>,
+            )>()
+            .execute(|(mut transforms, mut globals, mut gates)| {
+                for (entity, transform, world_m, param) in &updates {
+                    if let Some(mut slot) = transforms.get_mut(entity.index()) {
+                        *slot = *transform;
+                    }
+                    if let Some(mut global) = globals.get_mut(entity.index()) {
+                        global.0 = *world_m;
+                    }
+                    if let Some(param) = param
+                        && let Some(mut gate) = gates.get_mut(entity.index())
+                    {
+                        *gate = param.clone();
+                    }
+                }
+            });
+            for (entity, transform, _, _) in &updates {
+                cache.insert(*entity, *transform);
+            }
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -357,20 +657,22 @@ impl EditAction<World> for AddStrokeAction {
 }
 
 /// Undoable "add a gate to a stroke": spawns a child `RoadNode` + [`Gate`]
-/// at a stroke-local transform (typically produced by [`gate_spot`] — on
-/// the line, +Z toward the click side).
+/// at a path parameter (typically produced by [`gate_param_at`] — the
+/// curve point under the cursor, facing the click side). The transform is
+/// derived from the parameter at apply time and maintained by
+/// [`DeriveGates`] afterwards.
 #[derive(Debug)]
 pub struct AddGateAction {
     stroke: Entity,
-    local: Transform,
+    gate: Gate,
     created: Option<Entity>,
 }
 
 impl AddGateAction {
-    pub fn new(stroke: Entity, local: Transform) -> Self {
+    pub fn new(stroke: Entity, gate: Gate) -> Self {
         Self {
             stroke,
-            local,
+            gate,
             created: None,
         }
     }
@@ -378,21 +680,21 @@ impl AddGateAction {
 
 impl EditAction<World> for AddGateAction {
     fn apply(&mut self, world: &mut World) -> EditActionResult {
-        if world.get::<Stroke>(self.stroke).is_none() {
+        let Some(local) = derive_gate_state(world, self.stroke, &self.gate) else {
             return Err(EditActionError::TargetNotFound(
-                "gate target is not a stroke".into(),
+                "gate target is not a stroke with a usable path".into(),
             ));
-        }
+        };
         let parent_m = world
             .get::<GlobalTransform>(self.stroke)
             .map(|gt| gt.0)
             .ok_or_else(|| EditActionError::TargetNotFound("stroke has no transform".into()))?;
         let gate = world.spawn();
         let inserted = world
-            .insert(gate, self.local)
-            .and_then(|_| world.insert(gate, GlobalTransform(parent_m * self.local.to_matrix())))
+            .insert(gate, local)
+            .and_then(|_| world.insert(gate, GlobalTransform(parent_m * local.to_matrix())))
             .and_then(|_| world.insert(gate, crate::RoadNode { half_width: 1.5 }))
-            .and_then(|_| world.insert(gate, Gate))
+            .and_then(|_| world.insert(gate, self.gate.clone()))
             .and_then(|_| world.insert(gate, redlilium_ecs::Name("Gate".to_owned())));
         if let Err(e) = inserted {
             world.despawn(gate);
@@ -816,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_spot_faces_the_click_side_and_add_gate_roundtrips() {
+    fn gate_param_faces_the_click_side_and_add_gate_roundtrips() {
         let mut world = world();
         AddStrokeAction::at_point(Vec3::new(10.0, 0.0, 5.0))
             .apply(&mut world)
@@ -826,26 +1128,26 @@ mod tests {
 
         // Ray straight down just NORTH of the first segment's middle (the
         // segment spans x 6..14 at z = 5; the cursor is at z = 5.5): the
-        // gate lands on the line, +Z toward the click side (+Z north).
+        // parameter lands mid-segment, +Z toward the click side (north —
+        // the left normal of the +X tangent, so no flip).
         let ray = redlilium_ecs::ui::ViewportRay {
             origin: Vec3::new(10.0, 10.0, 5.5),
             dir: Vec3::new(0.0, -1.0, 0.0),
         };
-        let local = gate_spot(&world, stroke, &ray).expect("spot on the path");
-        assert!(local.translation.norm() < 1e-3, "segment midpoint");
-        let out = crate::bezier::heading(&local.to_matrix());
-        assert!((out - Vec3::new(0.0, 0.0, 1.0)).norm() < 1e-3);
+        let param = gate_param_at(&world, stroke, &ray).expect("param on the path");
+        assert_eq!(param.segment, 0);
+        assert!((param.t - 0.5).abs() < 0.05, "got t = {}", param.t);
+        assert!(!param.flip);
 
         // The mirror click from the south flips the facing.
         let ray_south = redlilium_ecs::ui::ViewportRay {
             origin: Vec3::new(10.0, 10.0, 4.5),
             dir: Vec3::new(0.0, -1.0, 0.0),
         };
-        let flipped = gate_spot(&world, stroke, &ray_south).expect("spot");
-        let out = crate::bezier::heading(&flipped.to_matrix());
-        assert!((out - Vec3::new(0.0, 0.0, -1.0)).norm() < 1e-3);
+        let flipped = gate_param_at(&world, stroke, &ray_south).expect("param");
+        assert!(flipped.flip);
 
-        let mut action = AddGateAction::new(stroke, local);
+        let mut action = AddGateAction::new(stroke, param);
         action.apply(&mut world).unwrap();
         let gate = world
             .read_all::<Gate>()
@@ -858,10 +1160,137 @@ mod tests {
         assert_eq!(world.get::<redlilium_ecs::Parent>(gate).unwrap().0, stroke);
         let gt = world.get::<GlobalTransform>(gate).unwrap().0;
         let pos = Vec3::new(gt[(0, 3)], gt[(1, 3)], gt[(2, 3)]);
-        assert!((pos - Vec3::new(10.0, 0.0, 5.0)).norm() < 1e-3);
+        assert!((pos - Vec3::new(10.0, 0.0, 5.0)).norm() < 1e-2);
+        let out = crate::bezier::heading(&gt);
+        assert!((out - Vec3::new(0.0, 0.0, 1.0)).norm() < 1e-3);
 
         action.undo(&mut world).unwrap();
         assert!(!world.is_alive(gate));
+    }
+
+    #[test]
+    fn gate_follows_when_stroke_points_move() {
+        let mut world = world();
+        world.register_inspector_default::<crate::RoadNode>();
+        AddStrokeAction::at_point(Vec3::new(10.0, 0.0, 5.0))
+            .apply(&mut world)
+            .unwrap();
+        let (stroke, component) = spawned_stroke(&world);
+        let mut action = AddGateAction::new(
+            stroke,
+            Gate {
+                segment: 0,
+                t: 0.5,
+                flip: false,
+            },
+        );
+        action.apply(&mut world).unwrap();
+        let gate = action.created.unwrap();
+        // Mid of the default front segment: stroke-local origin.
+        assert!(world.get::<Transform>(gate).unwrap().translation.norm() < 1e-3);
+
+        // Reshape the path: raise and shift the second point. The gate's
+        // local transform is derived data — it must follow onto the new
+        // segment, tangent and all (this is the "connection moves with
+        // the stroke's points" contract).
+        let v1 = component.points[1];
+        world
+            .insert(
+                v1,
+                Transform::new(
+                    Vec3::new(4.0, 0.0, 4.0),
+                    quat_from_rotation_y(0.0),
+                    Vec3::new(1.0, 1.0, 1.0),
+                ),
+            )
+            .unwrap();
+        crate::settle_edge_anchors(&mut world);
+
+        let t = *world.get::<Transform>(gate).unwrap();
+        // New segment (−4,0,0) → (4,0,4): midpoint (0,0,2).
+        assert!(
+            (t.translation - Vec3::new(0.0, 0.0, 2.0)).norm() < 1e-3,
+            "gate re-derived onto the moved segment, got {:?}",
+            t.translation
+        );
+        let n = Vec3::new(-4.0, 0.0, 8.0).normalize();
+        let heading = crate::bezier::heading(&t.to_matrix());
+        assert!(
+            (heading - n).norm() < 1e-3,
+            "gate normal follows the new tangent, got {heading:?}"
+        );
+        // World matrix updated too (parent at (10, 0, 5)).
+        let gt = world.get::<GlobalTransform>(gate).unwrap().0;
+        let pos = Vec3::new(gt[(0, 3)], gt[(1, 3)], gt[(2, 3)]);
+        assert!((pos - Vec3::new(10.0, 0.0, 7.0)).norm() < 1e-3);
+
+        // Settled: a second pass writes nothing.
+        assert!(gate_updates(&world, &mut Default::default(), false).is_empty());
+    }
+
+    #[test]
+    fn dragged_gate_slides_along_the_path_keeping_its_side() {
+        let mut world = world();
+        world.register_inspector_default::<crate::RoadNode>();
+        AddStrokeAction::at_point(Vec3::zeros())
+            .apply(&mut world)
+            .unwrap();
+        let (stroke, _) = spawned_stroke(&world);
+        AddGateAction::new(
+            stroke,
+            Gate {
+                segment: 0,
+                t: 0.5,
+                flip: true,
+            },
+        )
+        .apply(&mut world)
+        .unwrap();
+        let gate = world
+            .read_all::<Gate>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, _)| world.entity_at_index(index))
+            .next()
+            .unwrap();
+
+        // Prime the settled cache (system behavior), then drag the gate
+        // off the line toward the segment's east end.
+        let mut cache = std::collections::HashMap::new();
+        let settle = |world: &mut World, cache: &mut std::collections::HashMap<_, _>| {
+            for _ in 0..GATE_PASSES {
+                let updates = gate_updates(world, cache, true);
+                if updates.is_empty() {
+                    break;
+                }
+                apply_gate_updates(world, &updates);
+                for (entity, transform, _, _) in &updates {
+                    cache.insert(*entity, *transform);
+                }
+            }
+        };
+        settle(&mut world, &mut cache);
+        let home = *world.get::<Transform>(gate).unwrap();
+
+        let dragged = Transform::new(
+            Vec3::new(2.5, 0.0, 1.0),
+            home.rotation,
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(gate, dragged).unwrap();
+        settle(&mut world, &mut cache);
+
+        let param = world.get::<Gate>(gate).unwrap().clone();
+        assert_eq!(param.segment, 0);
+        // Projection of x = 2.5 on the (−4..4) segment: t = 6.5 / 8.
+        assert!((param.t - 0.8125).abs() < 1e-2, "slid to t = {}", param.t);
+        assert!(param.flip, "the authored side survives the slide");
+        let t = *world.get::<Transform>(gate).unwrap();
+        assert!(
+            (t.translation - Vec3::new(2.5, 0.0, 0.0)).norm() < 1e-2,
+            "snapped back onto the line, got {:?}",
+            t.translation
+        );
     }
 
     #[test]
@@ -878,12 +1307,14 @@ mod tests {
             .apply(&mut world)
             .unwrap();
         let (root, _) = spawned_stroke(&world);
-        let gate_local = Transform::new(
-            Vec3::zeros(),
-            quat_from_rotation_y(0.0),
-            Vec3::new(1.0, 1.0, 1.0),
+        let mut add_gate = AddGateAction::new(
+            root,
+            Gate {
+                segment: 0,
+                t: 0.5,
+                flip: false,
+            },
         );
-        let mut add_gate = AddGateAction::new(root, gate_local);
         add_gate.apply(&mut world).unwrap();
         let gate = world
             .read_all::<Gate>()

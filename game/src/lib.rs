@@ -803,18 +803,13 @@ pub fn spawn_levels_playground(world: &mut World) {
             world.insert(stroke, Stroke { points }).unwrap();
             stroke
         };
-        let gate_at = |world: &mut World, stroke: Entity, x: f32, z: f32, yaw: f32| -> Entity {
-            let gate = child(
-                world,
-                stroke,
-                Transform::new(
-                    Vec3::new(x, 0.0, z),
-                    quat_from_rotation_y(yaw),
-                    Vec3::new(1.0, 1.0, 1.0),
-                ),
-            );
+        // Gates are parametric on their stroke's path (segment, t, side);
+        // the placeholder transform settles at bake time and the gate then
+        // follows every reshape of the stroke.
+        let gate_at = |world: &mut World, stroke: Entity, segment: u32, t: f32, flip: bool| {
+            let gate = child(world, stroke, Transform::default());
             world.insert(gate, RoadNode { half_width: 1.5 }).unwrap();
-            world.insert(gate, Gate).unwrap();
+            world.insert(gate, Gate { segment, t, flip }).unwrap();
             world
                 .insert(gate, redlilium_ecs::Name("Gate".to_owned()))
                 .unwrap();
@@ -899,7 +894,9 @@ pub fn spawn_levels_playground(world: &mut World) {
                 ..Building::default()
             },
         );
-        let gate_a = gate_at(world, fence, 7.0, -3.0, std::f32::consts::FRAC_PI_2);
+        // On the fence's second segment (the curved NE bend), mid-way,
+        // facing east — the derived spot lands near the old (7, 0, −3).
+        let gate_a = gate_at(world, fence, 1, 0.5, false);
         let landing_a = node(world, 0.0, 0.0, 0.0);
         world
             .insert(
@@ -963,7 +960,9 @@ pub fn spawn_levels_playground(world: &mut World) {
         .apply(world)
         .unwrap();
 
-        let gate_b = gate_at(world, b, 0.0, 0.0, 0.0);
+        // Mid of the scarp line's first segment, facing north toward the
+        // east road (the +X tangent's left normal — no flip).
+        let gate_b = gate_at(world, b, 0, 0.5, false);
         let landing_b = node(world, 0.0, 0.0, 0.0);
         world
             .insert(
