@@ -93,21 +93,22 @@ impl Default for Gate {
 }
 
 /// Tessellation of one curved segment.
-const CURVE_STEPS: usize = 12;
+pub(crate) const CURVE_STEPS: usize = 12;
 
 /// Handles below this length (meters) count as absent — the approach on
 /// that side is straight.
 const HANDLE_EPS: f32 = 1e-3;
 
-/// The live path vertices in world space: `(vertex entity, position,
-/// world handle_out, world handle_in)`, path order. `None` with fewer
+/// The live path vertices of an ordered point list, world space:
+/// `(vertex entity, position, world handle_out, world handle_in)`, path
+/// order. Shared by every polyline-shaped entity built on the vertex
+/// machinery ([`Stroke`], [`Cut`](crate::cut::Cut)). `None` with fewer
 /// than 2 live vertices.
-pub(crate) fn stroke_corners(
+pub(crate) fn corners_of(
     world: &World,
-    stroke: &Stroke,
+    points: &[Entity],
 ) -> Option<Vec<(Entity, Vec3, Vec3, Vec3)>> {
-    let corners: Vec<(Entity, Vec3, Vec3, Vec3)> = stroke
-        .points
+    let corners: Vec<(Entity, Vec3, Vec3, Vec3)> = points
         .iter()
         .filter_map(|&v| {
             let vertex = world.get::<StrokeVertex>(v)?;
@@ -127,37 +128,55 @@ pub(crate) fn stroke_corners(
     (corners.len() >= 2).then_some(corners)
 }
 
-/// The stroke's path in world space, tessellated: straight segments
-/// contribute their start vertex, curved segments a cubic-Bézier fan of
-/// [`CURVE_STEPS`] samples. **Open** — the last vertex ends the path, it
-/// never connects back. `None` with fewer than 2 live vertices.
-pub fn stroke_path(world: &World, stroke: &Stroke) -> Option<Vec<Vec3>> {
-    let corners = stroke_corners(world, stroke)?;
+/// [`corners_of`] for a stroke's own point list.
+pub(crate) fn stroke_corners(
+    world: &World,
+    stroke: &Stroke,
+) -> Option<Vec<(Entity, Vec3, Vec3, Vec3)>> {
+    corners_of(world, &stroke.points)
+}
+
+/// Tessellate an open corner list: `(segment, t, position)` samples in
+/// path order. Straight segments contribute their start vertex, curved
+/// segments a cubic-Bézier fan of [`CURVE_STEPS`] interior samples; the
+/// last vertex closes the list at `t = 1` of the final segment. The
+/// `(segment, t)` tags let callers interpolate per-vertex attributes
+/// alongside the positions (a cut's drop profile rides them).
+pub(crate) fn tessellate(corners: &[(Vec3, Vec3, Vec3)]) -> Vec<(usize, f32, Vec3)> {
     let n = corners.len();
     let mut points = Vec::with_capacity(n * 2);
     for i in 0..n - 1 {
-        let (_, p0, h_out, _) = corners[i];
-        let (_, p3, _, h_in) = corners[i + 1];
-        points.push(p0);
+        let (p0, h_out, _) = corners[i];
+        let (p3, _, h_in) = corners[i + 1];
+        points.push((i, 0.0, p0));
         let straight = (h_out - p0).norm() < HANDLE_EPS && (h_in - p3).norm() < HANDLE_EPS;
         if straight {
             continue;
         }
-        // Cubic p0 → h_out → h_in → p3; interior samples only (endpoints
-        // are the vertices themselves).
+        // Interior samples only — endpoints are the vertices themselves.
         for step in 1..CURVE_STEPS {
             let t = step as f32 / CURVE_STEPS as f32;
-            let s = 1.0 - t;
-            points.push(
-                p0 * (s * s * s)
-                    + h_out * (3.0 * t * s * s)
-                    + h_in * (3.0 * t * t * s)
-                    + p3 * (t * t * t),
-            );
+            points.push((i, t, eval_segment(corners, i, t).0));
         }
     }
-    points.push(corners[n - 1].1);
-    Some(points)
+    points.push((n - 2, 1.0, corners[n - 1].0));
+    points
+}
+
+/// The stroke's path in world space, tessellated (see [`tessellate`]).
+/// **Open** — the last vertex ends the path, it never connects back.
+/// `None` with fewer than 2 live vertices.
+pub fn stroke_path(world: &World, stroke: &Stroke) -> Option<Vec<Vec3>> {
+    let corners: Corners = stroke_corners(world, stroke)?
+        .into_iter()
+        .map(|(_, p, h_out, h_in)| (p, h_out, h_in))
+        .collect();
+    Some(
+        tessellate(&corners)
+            .into_iter()
+            .map(|(_, _, p)| p)
+            .collect(),
+    )
 }
 
 /// Default path for a freshly stamped stroke: an L in local space — 8 m
@@ -185,7 +204,7 @@ const GATE_DROP_RADIUS: f32 = 2.0;
 /// A corner list stripped to geometry: `(position, handle_out point,
 /// handle_in point)` — the shared currency of segment evaluation, in
 /// whatever space the corners were taken (world or stroke-local).
-type Corners = Vec<(Vec3, Vec3, Vec3)>;
+pub(crate) type Corners = Vec<(Vec3, Vec3, Vec3)>;
 
 /// The stroke's live corners in **stroke-local** space. Mirrors
 /// [`stroke_corners`] but reads only the vertices' local transforms —
@@ -217,7 +236,7 @@ fn local_corners(world: &World, stroke: &Stroke) -> Option<Corners> {
 /// Evaluate segment `i` (corner `i` → `i + 1`) at `t`: `(position,
 /// tangent)`. Straight segments (both adjacent handles absent) evaluate
 /// as a lerp; a degenerate cubic tangent falls back to the chord.
-fn eval_segment(corners: &[(Vec3, Vec3, Vec3)], i: usize, t: f32) -> (Vec3, Vec3) {
+pub(crate) fn eval_segment(corners: &[(Vec3, Vec3, Vec3)], i: usize, t: f32) -> (Vec3, Vec3) {
     let (p0, h_out, _) = corners[i];
     let (p3, _, h_in) = corners[i + 1];
     let straight = (h_out - p0).norm() < HANDLE_EPS && (h_in - p3).norm() < HANDLE_EPS;

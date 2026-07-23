@@ -17,6 +17,8 @@ const EDGE_COLOR: [f32; 4] = [0.15, 0.85, 1.0, 1.0];
 const GRID_COLOR: [f32; 4] = [0.05, 0.4, 0.5, 1.0];
 /// Stroke paths (green).
 const STROKE_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
+/// Cut lips + face rungs (terracotta — earthworks).
+const CUT_COLOR: [f32; 4] = [0.95, 0.55, 0.2, 1.0];
 /// Building box massing (violet).
 const BUILDING_COLOR: [f32; 4] = [0.8, 0.5, 0.95, 1.0];
 
@@ -87,6 +89,38 @@ impl System for DrawLevelGraph {
                     };
                     for (_, p, h_out, h_in) in corners {
                         draw_handle_cube(&mut draw, p, HANDLE_HALF, STROKE_COLOR);
+                        for h in [h_out, h_in] {
+                            if (h - p).norm() > 1e-3 {
+                                draw.draw_line(pt(&p), pt(&h), GRID_COLOR);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Ok(cuts) = world.read_all::<crate::cut::Cut>() {
+                for (_, cut) in cuts.iter() {
+                    let Some((upper, lower)) = crate::cut::cut_paths(world, cut) else {
+                        continue;
+                    };
+                    // Both lips, plus a rung per sample where the step is
+                    // open — the face between them made visible (the face
+                    // itself is generator geometry).
+                    for lip in [&upper, &lower] {
+                        for pair in lip.windows(2) {
+                            draw.draw_line(pt(&pair[0]), pt(&pair[1]), CUT_COLOR);
+                        }
+                    }
+                    for (u, l) in upper.iter().zip(&lower) {
+                        if (u - l).norm() > 1e-3 {
+                            draw.draw_line(pt(u), pt(l), GRID_COLOR);
+                        }
+                    }
+                    let Some(corners) = crate::cut::cut_corners(world, cut) else {
+                        continue;
+                    };
+                    for (_, p, h_out, h_in) in corners {
+                        draw_handle_cube(&mut draw, p, HANDLE_HALF, CUT_COLOR);
                         for h in [h_out, h_in] {
                             if (h - p).norm() > 1e-3 {
                                 draw.draw_line(pt(&p), pt(&h), GRID_COLOR);

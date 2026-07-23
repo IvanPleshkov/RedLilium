@@ -747,7 +747,7 @@ pub fn spawn_levels_playground(world: &mut World) {
         use redlilium_core::math::quat_from_rotation_y;
         use redlilium_ecs::Entity;
         use redlilium_levels::{
-            Building, EdgeAnchor, Gate, PlaceBuildingAction, Stroke, StrokeVertex,
+            Building, Cut, CutVertex, EdgeAnchor, Gate, PlaceBuildingAction, Stroke, StrokeVertex,
         };
 
         let child = |world: &mut World, parent: Entity, local: Transform| -> Entity {
@@ -959,6 +959,72 @@ pub fn spawn_levels_playground(world: &mut World) {
         })
         .apply(world)
         .unwrap();
+
+        // Cut: a terrain-discontinuity line — unlike a stroke it OBLIGES
+        // the fill (C0/C1 breaks here). Master path = upper lip; the lower
+        // lip derives per-vertex from CutVertex.drop, straight down in
+        // world Y. This one is a pedestal rim south of the villa: the
+        // upper lip rides 1.5 m up, the drop deepens over the curved
+        // middle so the lower lip stays at grade under the crest.
+        let cut_at =
+            |world: &mut World, name: &str, t: Transform, verts: &[([f32; 3], f32)]| -> Entity {
+                let cut = world.spawn();
+                world.insert(cut, t).unwrap();
+                world.insert(cut, GlobalTransform(t.to_matrix())).unwrap();
+                world
+                    .insert(cut, redlilium_ecs::Name(name.to_owned()))
+                    .unwrap();
+                let points: Vec<Entity> = verts
+                    .iter()
+                    .enumerate()
+                    .map(|(n, &([x, y, z], drop))| {
+                        let v = child(
+                            world,
+                            cut,
+                            Transform::new(
+                                Vec3::new(x, y, z),
+                                quat_from_rotation_y(0.0),
+                                Vec3::new(1.0, 1.0, 1.0),
+                            ),
+                        );
+                        world.insert(v, StrokeVertex::default()).unwrap();
+                        world.insert(v, CutVertex { drop }).unwrap();
+                        world
+                            .insert(v, redlilium_ecs::Name(format!("Point {}", n + 1)))
+                            .unwrap();
+                        v
+                    })
+                    .collect();
+                world.insert(cut, Cut { points }).unwrap();
+                cut
+            };
+        let rim = cut_at(
+            world,
+            "Pedestal rim",
+            Transform::new(
+                Vec3::new(-16.0, 1.5, -20.0),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ),
+            &[
+                ([-6.0, 0.0, 0.0], 1.5),
+                ([0.0, 0.0, 2.0], 2.0),
+                ([6.0, 0.0, 0.0], 1.5),
+            ],
+        );
+        // Round the crest with mirrored (C1) handles on the middle vertex.
+        {
+            let points = world.get::<Cut>(rim).unwrap().points.clone();
+            world
+                .insert(
+                    points[1],
+                    StrokeVertex {
+                        handle_in: Vec3::new(-2.0, 0.0, 0.0),
+                        handle_out: Vec3::new(2.0, 0.0, 0.0),
+                    },
+                )
+                .unwrap();
+        }
 
         // Mid of the scarp line's first segment, facing north toward the
         // east road (the +X tangent's left normal — no flip).

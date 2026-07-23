@@ -422,6 +422,30 @@ pub(crate) fn selection_pick(
             }
         }
     }
+    if let Ok(cuts) = world.read_all::<crate::cut::Cut>() {
+        for (index, cut) in cuts.iter() {
+            let Some(entity) = world.entity_at_index(index) else {
+                continue;
+            };
+            // A cut picks by either lip (the derived lower one included —
+            // it is the same entity); its vertex cubes pick the vertices.
+            let Some((upper, lower)) = crate::cut::cut_paths(world, cut) else {
+                continue;
+            };
+            for lip in [&upper, &lower] {
+                for i in 0..lip.len() - 1 {
+                    let (dist, _, t) = ray_segment_closest(ray, lip[i], lip[i + 1]);
+                    consider(0, dist, PICK_RADIUS, t, entity);
+                }
+            }
+            if let Some(corners) = crate::cut::cut_corners(world, cut) {
+                for (vertex, p, _, _) in corners {
+                    let (dist, _, t) = ray_segment_closest(ray, p, p);
+                    consider(1, dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
+                }
+            }
+        }
+    }
     if let Ok(buildings) = world.read_all::<crate::building::Building>() {
         for (index, building) in buildings.iter() {
             let Some(entity) = world.entity_at_index(index) else {
@@ -833,6 +857,58 @@ mod tests {
         // Click mid-segment, away from any handle: the stroke itself.
         let hit = selection_pick(&world, &query(0.0, 0.0)).expect("hit");
         assert_eq!(hit.entity, stroke);
+    }
+
+    #[test]
+    fn cuts_pick_by_either_lip_and_vertices_win_on_top() {
+        let mut world = World::new();
+        redlilium_ecs::register_std_components(&mut world);
+        world.register_inspector_default::<RoadNode>();
+        world.register_inspector_default::<RoadSegment>();
+        world.register_inspector_default::<crate::cut::Cut>();
+        world.register_inspector_default::<crate::cut::CutVertex>();
+        world.register_inspector_default::<crate::stroke::StrokeVertex>();
+
+        use redlilium_core::abstract_editor::EditAction;
+        // Stamp at height 5 so the LOWER lip (y = 3) is reachable by a
+        // horizontal ray that never comes near the upper one.
+        crate::cut::AddCutAction::at_point(Vec3::new(0.0, 5.0, 0.0))
+            .apply(&mut world)
+            .unwrap();
+        let (cut, component) = world
+            .read_all::<crate::cut::Cut>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, c)| Some((world.entity_at_index(index)?, c.clone())))
+            .next()
+            .unwrap();
+
+        let down = |x: f32, z: f32| redlilium_ecs::ui::ViewportPickQuery {
+            ray: ViewportRay {
+                origin: Vec3::new(x, 10.0, z),
+                dir: Vec3::new(0.0, -1.0, 0.0),
+            },
+            scene_entity: None,
+            scene_point: None,
+        };
+        // Click ON a vertex: the point handle beats the lip through it.
+        let hit = selection_pick(&world, &down(-6.0, 0.0)).expect("hit");
+        assert_eq!(hit.entity, component.points[0], "vertex, not the cut");
+        // Mid-segment: the cut root.
+        let hit = selection_pick(&world, &down(-3.0, 0.0)).expect("hit");
+        assert_eq!(hit.entity, cut);
+        // A horizontal ray at the DERIVED lip's height (y = 3): the lower
+        // lip is pickable too, and it selects the same cut entity.
+        let lower = redlilium_ecs::ui::ViewportPickQuery {
+            ray: ViewportRay {
+                origin: Vec3::new(-3.0, 3.0, 10.0),
+                dir: Vec3::new(0.0, 0.0, -1.0),
+            },
+            scene_entity: None,
+            scene_point: None,
+        };
+        let hit = selection_pick(&world, &lower).expect("hit");
+        assert_eq!(hit.entity, cut);
     }
 
     #[test]

@@ -113,12 +113,13 @@ the entities mean.
   it conforms to roads and architecture — road edges and strokes (open
   curves *with heights*) are boundary conditions of the fill, never
   constraints on them. The fill flows **continuously everywhere it is not
-  told otherwise**; a stroke may later carry data that makes the fill
-  discontinuous *across the line* (a scarp: excavated or embanked, the
-  transition geometry — slope, retaining — generated from the height
-  delta, never authored as meshes). Closed regions with their own interior
-  fill (the flat parking-pad case) are a **future level assembled from
-  stroke pieces**, not a primitive. In particular, nothing in the
+  told otherwise** — and the entity that tells it otherwise is a **`Cut`**
+  (decided 2026-07-23, split out of the stroke design): strokes stay bare
+  lines with no terrain obligations, a cut *breaks* the fill's continuity
+  along its path (C1 crease or C0 step; the transition geometry — wall,
+  slope, retaining — is generated, never authored as meshes). Closed
+  regions with their own interior fill (the flat parking-pad case) are a
+  **future level assembled from stroke/cut pieces**, not a primitive. In particular, nothing in the
   authoring layer assumes a ground plane: strokes and buildings live in
   full 3D, and edge-anchored elements inherit height from the edge they
   sit on.
@@ -171,6 +172,35 @@ the entities mean.
   anchored transform faces the road (+Z into it, the tail extending
   outward). Two anchors would over-constrain a rigid stroke and are
   rejected.
+- **Cut** — the terrain-discontinuity line (decided 2026-07-23): where a
+  stroke is bare geometry with no obligations, a cut **obliges the fill**
+  — along its path the landscape creases (C1 break, C0 kept) or steps (C0
+  break — a height jump): pedestal rims, pool walls, moats, small cliffs,
+  embankments. Kept a **separate entity from the stroke** so the contract
+  is visible in the type — every stroke consumer would otherwise have to
+  remember "might also cut". The split is by *component*, not by code:
+  cuts reuse the shared vertex machinery (ordered `StrokeVertex` children,
+  pen handles, tessellation, two-tier picking).
+  **Master + profile** (the ruled-out alternative was two independently
+  authored curves — correspondence problems, desync, double editing): the
+  authored path is the **upper lip**; each vertex adds
+  `CutVertex { drop }` and the **lower lip is derived** — sunk `drop`
+  meters straight down in world Y, the drop interpolating along segments.
+  `drop = 0` collapses the step into a pure crease; positive drop lowers
+  the path's **right-hand side** (of travel direction). One master
+  parameterization keeps attachments and the future closure level on a
+  single locus per piece. This slice: vertical faces only; the planned
+  extension is a per-vertex **plan offset** of the lower lip for battered
+  slopes/embankments (with the offset-curve self-intersection caveat on
+  concave bends — clamp by curvature or leave it to the generator).
+  **Division of labor for crossings** (a road gate through a cut = stairs,
+  a ramp): the engine owns the *intent* and the boundary conditions — the
+  semantic tag and the two full-3D chords (road edge + cut lip), plus the
+  **claimed interval on the cut face** the crossing consumes (so the
+  generator doesn't also build wall there — symmetric to how an edge
+  anchor claims `[u_min, u_max]`). The generated volume (steps, railings,
+  collision) is tyroxine's. Cut faces themselves are generator geometry:
+  the cut owns only the boundary description.
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a
   driveway/building exit crossing the sidewalk to meet the road. Not a
@@ -352,9 +382,9 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
 2. **Phase 2 — terrain + tools.** Region extraction between roads (planar
    graph faces), terrain fill + control points, intersection surfaces,
    viewport tools (§6.2), debug-draw (§6.4).
-3. **Phase 3 — buildings.** Assembly-graph asset, stroke-driven terrain
-   seams (cut/fill along scarp strokes), interior/exterior + occluder
-   metadata. Gets its own design doc/round.
+3. **Phase 3 — buildings.** Assembly-graph asset, cut-driven terrain
+   seams (the `Cut` faces excavated/embanked by the generator),
+   interior/exterior + occluder metadata. Gets its own design doc/round.
 4. **Later** (explicitly deferred): tyroxine as the real generator, navmesh,
    LOD baking (LOD1 and below), incremental invalidation, streaming budgets.
 
@@ -372,14 +402,15 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
 - Chunk cell identity for terrain regions (roads/intersections have natural
   ids; regions appear/disappear as the graph changes).
 - **Stroke semantics & terrain coupling** — how a stroke's meaning
-  (fence, scarp with a height delta, curb, plot edge) is declared and
-  handed to tyroxine alongside road geometry: one mechanism for all
-  architecture semantics, designed once it can be specified (§3: strokes
-  are bare geometry today). Also open: how stroke heights parameterize
-  the terrain boundary condition, how a discontinuity across a scarp
-  stroke (slope vs retaining wall) is selected, and how **closed contours
-  assembled from stroke pieces** (the next level up) get their own
-  interior fill.
+  (fence, lamp line, pipe run, curb, plot edge) is declared and handed to
+  tyroxine alongside road geometry: one mechanism for all architecture
+  semantics, designed once it can be specified (§3: strokes are bare
+  geometry today). Also open: how stroke/cut lips parameterize the
+  terrain boundary condition, how a cut face's treatment (bare wall vs
+  retaining vs slope, once the plan offset lands) is selected, the
+  crossing semantics (stairs/ramp through a cut, with its claimed face
+  interval), and how **closed contours assembled from stroke/cut pieces**
+  (the next level up) get their own interior fill.
 - ~~Road attachment side~~ — **resolved** (2026-07-18): `RoadSegment` grew
   `b_from_front` — the road meets `b` on its +Z side instead of the default
   −Z. The connect tool sets it automatically when the clicked target is a

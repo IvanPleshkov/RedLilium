@@ -14,6 +14,7 @@
 pub mod anchor;
 pub mod bezier;
 pub mod building;
+pub mod cut;
 mod draw;
 pub mod graph;
 pub mod junction;
@@ -22,6 +23,7 @@ mod tool;
 
 pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_anchors};
 pub use building::{Building, PlaceBuildingAction};
+pub use cut::{AddCutAction, Cut, CutVertex, cut_paths};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
 pub use stroke::{
@@ -104,6 +106,8 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<Stroke>();
         world.register_inspector_default::<StrokeVertex>();
         world.register_inspector_default::<Gate>();
+        world.register_inspector_default::<Cut>();
+        world.register_inspector_default::<CutVertex>();
         world.register_inspector_default::<Building>();
     }
 
@@ -188,6 +192,19 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                         })));
                 } else if let Some(point) = tool::ground_hit(ray) {
                     ctx.actions.push(Box::new(AddStrokeAction::at_point(point)));
+                }
+            },
+        );
+        // "Add cut": stamp a terrain-discontinuity line at the ground
+        // click point — a straight default with the default step; drag
+        // the vertices and tune each vertex's drop in the inspector. The
+        // lower lip is derived, never authored.
+        view.ops.add(
+            "Add cut",
+            |ctx| ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some(),
+            |ctx| {
+                if let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) {
+                    ctx.actions.push(Box::new(AddCutAction::at_point(point)));
                 }
             },
         );

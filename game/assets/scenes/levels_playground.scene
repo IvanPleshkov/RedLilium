@@ -6,6 +6,25 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "DirectionalLight",
+                    schema_version: 1,
+                    data: Map([
+                        ("color", List([
+                            F32(1.0),
+                            F32(0.98),
+                            F32(0.95),
+                        ])),
+                        ("intensity", F32(1.6)),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Sun")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -25,25 +44,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Sun")),
-                    ]),
-                ),
-                (
-                    type_name: "DirectionalLight",
-                    schema_version: 1,
-                    data: Map([
-                        ("color", List([
-                            F32(1.0),
-                            F32(0.98),
-                            F32(0.95),
-                        ])),
-                        ("intensity", F32(1.6)),
                     ]),
                 ),
                 (
@@ -313,6 +313,19 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "EdgeAnchor",
+                    schema_version: 1,
+                    data: Map([
+                        ("parent_road", Entity(
+                            index: 6,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(true)),
+                        ("u_min", F32(0.35)),
+                        ("u_max", F32(0.65)),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -339,19 +352,6 @@
                     schema_version: 1,
                     data: Map([
                         ("half_width", F32(1.4600067)),
-                    ]),
-                ),
-                (
-                    type_name: "EdgeAnchor",
-                    schema_version: 1,
-                    data: Map([
-                        ("parent_road", Entity(
-                            index: 6,
-                            spawn_tick: 0,
-                        )),
-                        ("right_edge", Bool(true)),
-                        ("u_min", F32(0.35)),
-                        ("u_max", F32(0.65)),
                     ]),
                 ),
             ],
@@ -854,28 +854,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Transform",
-                    schema_version: 1,
-                    data: Map([
-                        ("translation", List([
-                            F32(-14.0),
-                            F32(0.0),
-                            F32(2.0),
-                        ])),
-                        ("rotation", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                            F32(1.0),
-                        ])),
-                        ("scale", List([
-                            F32(1.0),
-                            F32(1.0),
-                            F32(1.0),
-                        ])),
-                    ]),
-                ),
-                (
                     type_name: "Children",
                     schema_version: 1,
                     data: Map([
@@ -902,21 +880,14 @@
                         ("0", String("Villa")),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 26,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
                         ("translation", List([
+                            F32(-14.0),
                             F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
+                            F32(2.0),
                         ])),
                         ("rotation", List([
                             F32(0.0),
@@ -931,6 +902,13 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 26,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Parent",
                     schema_version: 1,
@@ -981,6 +959,28 @@
                     ]),
                 ),
                 (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
                     type_name: "Stroke",
                     schema_version: 1,
                     data: Map([
@@ -1016,6 +1016,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 1")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1035,23 +1052,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 26,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 1")),
                     ]),
                 ),
                 (
@@ -1078,6 +1078,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 2")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1097,23 +1114,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 26,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 2")),
                     ]),
                 ),
                 (
@@ -1140,6 +1140,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 3")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1159,23 +1176,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 26,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 3")),
                     ]),
                 ),
                 (
@@ -1202,6 +1202,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 4")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1221,23 +1238,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 26,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 4")),
                     ]),
                 ),
                 (
@@ -1264,6 +1264,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 5")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1283,23 +1300,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 26,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 5")),
                     ]),
                 ),
                 (
@@ -1325,28 +1325,6 @@
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
-                (
-                    type_name: "Transform",
-                    schema_version: 1,
-                    data: Map([
-                        ("translation", List([
-                            F32(-2.0),
-                            F32(0.0),
-                            F32(-4.5),
-                        ])),
-                        ("rotation", List([
-                            F32(0.0),
-                            F32(0.0),
-                            F32(0.0),
-                            F32(1.0),
-                        ])),
-                        ("scale", List([
-                            F32(1.0),
-                            F32(1.0),
-                            F32(1.0),
-                        ])),
-                    ]),
-                ),
                 (
                     type_name: "Parent",
                     schema_version: 1,
@@ -1375,21 +1353,14 @@
                         ("seed", U64(0)),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 33,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
                         ("translation", List([
-                            F32(4.0),
+                            F32(-2.0),
                             F32(0.0),
-                            F32(-6.0),
+                            F32(-4.5),
                         ])),
                         ("rotation", List([
                             F32(0.0),
@@ -1404,6 +1375,13 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 33,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
                 (
                     type_name: "Parent",
                     schema_version: 1,
@@ -1432,6 +1410,28 @@
                         ("seed", U64(0)),
                     ]),
                 ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(4.0),
+                            F32(0.0),
+                            F32(-6.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
             ],
         ),
         (
@@ -1439,6 +1439,23 @@
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 26,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Gate")),
+                    ]),
+                ),
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -1459,23 +1476,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 26,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Gate")),
                     ]),
                 ),
                 (
@@ -1501,6 +1501,19 @@
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
+                (
+                    type_name: "EdgeAnchor",
+                    schema_version: 1,
+                    data: Map([
+                        ("parent_road", Entity(
+                            index: 6,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(false)),
+                        ("u_min", F32(0.55)),
+                        ("u_max", F32(0.7)),
+                    ]),
+                ),
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -1528,19 +1541,6 @@
                     schema_version: 1,
                     data: Map([
                         ("half_width", F32(0.9815369)),
-                    ]),
-                ),
-                (
-                    type_name: "EdgeAnchor",
-                    schema_version: 1,
-                    data: Map([
-                        ("parent_road", Entity(
-                            index: 6,
-                            spawn_tick: 0,
-                        )),
-                        ("right_edge", Bool(false)),
-                        ("u_min", F32(0.55)),
-                        ("u_max", F32(0.7)),
                     ]),
                 ),
             ],
@@ -1575,6 +1575,37 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Children",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", List([
+                            Entity(
+                                index: 38,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 39,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 40,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 50,
+                                spawn_tick: 0,
+                            ),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Scarp line")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1594,37 +1625,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Children",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", List([
-                            Entity(
-                                index: 38,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 39,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 40,
-                                spawn_tick: 0,
-                            ),
-                            Entity(
-                                index: 46,
-                                spawn_tick: 0,
-                            ),
-                        ])),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Scarp line")),
                     ]),
                 ),
                 (
@@ -1655,6 +1655,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 37,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 1")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1674,23 +1691,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 37,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 1")),
                     ]),
                 ),
                 (
@@ -1717,6 +1717,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 37,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 2")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1736,23 +1753,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 37,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 2")),
                     ]),
                 ),
                 (
@@ -1779,6 +1779,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 37,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 3")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1798,23 +1815,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 37,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 3")),
                     ]),
                 ),
                 (
@@ -1841,6 +1841,24 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Building")),
+                    ]),
+                ),
+                (
+                    type_name: "Building",
+                    schema_version: 1,
+                    data: Map([
+                        ("floors", U64(3)),
+                        ("floor_height", F32(3.0)),
+                        ("half_width", F32(3.0)),
+                        ("half_depth", F32(3.0)),
+                        ("seed", U64(0)),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1862,24 +1880,6 @@
                         ])),
                     ]),
                 ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Building")),
-                    ]),
-                ),
-                (
-                    type_name: "Building",
-                    schema_version: 1,
-                    data: Map([
-                        ("floors", U64(3)),
-                        ("floor_height", F32(3.0)),
-                        ("half_width", F32(3.0)),
-                        ("half_depth", F32(3.0)),
-                        ("seed", U64(0)),
-                    ]),
-                ),
             ],
         ),
         (
@@ -1887,28 +1887,6 @@
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
-                (
-                    type_name: "Transform",
-                    schema_version: 1,
-                    data: Map([
-                        ("translation", List([
-                            F32(37.0),
-                            F32(0.0),
-                            F32(24.0),
-                        ])),
-                        ("rotation", List([
-                            F32(-0.7071068),
-                            F32(0.0),
-                            F32(0.7071067),
-                            F32(-0.0),
-                        ])),
-                        ("scale", List([
-                            F32(1.0),
-                            F32(1.0),
-                            F32(1.0),
-                        ])),
-                    ]),
-                ),
                 (
                     type_name: "Children",
                     schema_version: 1,
@@ -1950,6 +1928,28 @@
                     ]),
                 ),
                 (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(37.0),
+                            F32(0.0),
+                            F32(24.0),
+                        ])),
+                        ("rotation", List([
+                            F32(-0.7071068),
+                            F32(0.0),
+                            F32(0.7071067),
+                            F32(-0.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
                     type_name: "Stroke",
                     schema_version: 1,
                     data: Map([
@@ -1977,6 +1977,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 42,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 1")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -1996,23 +2013,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 42,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 1")),
                     ]),
                 ),
                 (
@@ -2039,6 +2039,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 42,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 2")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -2058,23 +2075,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 42,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 2")),
                     ]),
                 ),
                 (
@@ -2101,6 +2101,23 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 42,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 3")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -2120,23 +2137,6 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
-                    ]),
-                ),
-                (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 42,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Point 3")),
                     ]),
                 ),
                 (
@@ -2163,6 +2163,306 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Cut",
+                    schema_version: 1,
+                    data: Map([
+                        ("points", List([
+                            Entity(
+                                index: 47,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 48,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 49,
+                                spawn_tick: 0,
+                            ),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Children",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", List([
+                            Entity(
+                                index: 47,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 48,
+                                spawn_tick: 0,
+                            ),
+                            Entity(
+                                index: 49,
+                                spawn_tick: 0,
+                            ),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Pedestal rim")),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(-16.0),
+                            F32(1.5),
+                            F32(-20.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 47,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 46,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 1")),
+                    ]),
+                ),
+                (
+                    type_name: "CutVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("drop", F32(1.5)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(-6.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 48,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 46,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 2")),
+                    ]),
+                ),
+                (
+                    type_name: "CutVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("drop", F32(2.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(2.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(2.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(-2.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 49,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 46,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Point 3")),
+                    ]),
+                ),
+                (
+                    type_name: "CutVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("drop", F32(1.5)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(6.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "StrokeVertex",
+                    schema_version: 1,
+                    data: Map([
+                        ("handle_out", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("handle_in", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 50,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(
+                            index: 37,
+                            spawn_tick: 0,
+                        )),
+                    ]),
+                ),
+                (
+                    type_name: "Name",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", String("Gate")),
+                    ]),
+                ),
+                (
                     type_name: "Transform",
                     schema_version: 1,
                     data: Map([
@@ -2185,23 +2485,6 @@
                     ]),
                 ),
                 (
-                    type_name: "Parent",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Entity(
-                            index: 37,
-                            spawn_tick: 0,
-                        )),
-                    ]),
-                ),
-                (
-                    type_name: "Name",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", String("Gate")),
-                    ]),
-                ),
-                (
                     type_name: "RoadNode",
                     schema_version: 1,
                     data: Map([
@@ -2220,10 +2503,23 @@
             ],
         ),
         (
-            entity_index: 47,
+            entity_index: 51,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
+                (
+                    type_name: "EdgeAnchor",
+                    schema_version: 1,
+                    data: Map([
+                        ("parent_road", Entity(
+                            index: 20,
+                            spawn_tick: 0,
+                        )),
+                        ("right_edge", Bool(true)),
+                        ("u_min", F32(0.4)),
+                        ("u_max", F32(0.6)),
+                    ]),
+                ),
                 (
                     type_name: "Transform",
                     schema_version: 1,
@@ -2253,23 +2549,10 @@
                         ("half_width", F32(1.199997)),
                     ]),
                 ),
-                (
-                    type_name: "EdgeAnchor",
-                    schema_version: 1,
-                    data: Map([
-                        ("parent_road", Entity(
-                            index: 20,
-                            spawn_tick: 0,
-                        )),
-                        ("right_edge", Bool(true)),
-                        ("u_min", F32(0.4)),
-                        ("u_max", F32(0.6)),
-                    ]),
-                ),
             ],
         ),
         (
-            entity_index: 48,
+            entity_index: 52,
             entity_spawn_tick: 0,
             entity_flags: 0,
             components: [
@@ -2278,11 +2561,11 @@
                     schema_version: 1,
                     data: Map([
                         ("a", Entity(
-                            index: 46,
+                            index: 50,
                             spawn_tick: 0,
                         )),
                         ("b", Entity(
-                            index: 47,
+                            index: 51,
                             spawn_tick: 0,
                         )),
                         ("tangent_a", F32(0.0)),
@@ -2296,36 +2579,38 @@
     resources: [],
     metadata: (
         engine_fingerprint: "",
-        timestamp: 1784815241,
+        timestamp: 1784829563,
         component_schemas: {
-            "Camera": "ad5fbce407082262",
-            "PointLight": "c2de590ad3761220",
-            "StrokeVertex": "0a01a76eb6db13ef",
-            "Transform": "8438ab3d4ed5ea92",
-            "CameraOutput": "ac6c44bbf8aba2c0",
-            "SpotLight": "00945c87ce2de8db",
-            "Children": "2bb9642f7f8700bb",
-            "Name": "e8b72b8ee639d17d",
-            "TemporalJitter": "9df8a573d172914a",
-            "RoadSegment": "0b419cbd0c745715",
-            "DirectionalLight": "12b906e5389ce958",
-            "Building": "ac8f99c310d8fbc8",
-            "CarSpawn": "c680d604bee70f02",
-            "EditorOnly": "c680d604bee70f02",
-            "Gate": "507f71b1519ff9db",
-            "CarController": "fc41e6ec35f9fc4f",
-            "RoadNode": "baff4354f0b378f3",
-            "FollowCamera": "21d1db18d14cff54",
-            "Stroke": "f062440ca3385d7c",
-            "CameraExposure": "ceddee969d47eaa0",
-            "Collider3D": "a39247f1249750e7",
-            "Parent": "a91799e57333f547",
             "EdgeAnchor": "8bd5bd105a1910c6",
-            "FreeFlyCamera": "5f11e33f3f164d87",
+            "CameraExposure": "ceddee969d47eaa0",
+            "FollowCamera": "21d1db18d14cff54",
+            "TemporalJitter": "9df8a573d172914a",
+            "Parent": "a91799e57333f547",
+            "Name": "e8b72b8ee639d17d",
+            "RoadNode": "baff4354f0b378f3",
             "Visibility": "c1bac1b299fc1b84",
-            "RigidBody3D": "4c303fe7f34110a5",
-            "RenderPath": "a423c0d36d1e6289",
+            "EditorOnly": "c680d604bee70f02",
             "Junction": "e7bd6fa35d204f69",
+            "RenderPath": "a423c0d36d1e6289",
+            "StrokeVertex": "0a01a76eb6db13ef",
+            "Collider3D": "a39247f1249750e7",
+            "FreeFlyCamera": "5f11e33f3f164d87",
+            "CarController": "fc41e6ec35f9fc4f",
+            "CutVertex": "8e1a98555d022d78",
+            "SpotLight": "00945c87ce2de8db",
+            "CarSpawn": "c680d604bee70f02",
+            "PointLight": "c2de590ad3761220",
+            "Gate": "507f71b1519ff9db",
+            "RigidBody3D": "4c303fe7f34110a5",
+            "Cut": "f062440ca3385d7c",
+            "CameraOutput": "ac6c44bbf8aba2c0",
+            "DirectionalLight": "12b906e5389ce958",
+            "Camera": "ad5fbce407082262",
+            "Children": "2bb9642f7f8700bb",
+            "Building": "ac8f99c310d8fbc8",
+            "Transform": "8438ab3d4ed5ea92",
+            "Stroke": "f062440ca3385d7c",
+            "RoadSegment": "0b419cbd0c745715",
         },
     ),
 )
