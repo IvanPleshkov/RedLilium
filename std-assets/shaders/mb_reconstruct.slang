@@ -133,10 +133,18 @@ float4 fs_main(VsOutput input) : SV_Target {
         float s_depth = view_depth(s_uv);
 
         // f: centre in front of sample; b: sample in front of centre.
+        // McGuire's two occlusion cases, each gated by which surface is in
+        // front and reaching with THAT surface's own velocity:
+        //   f (centre in front): the centre is a moving foreground whose motion
+        //     reveals the background sample — reach = the centre's velocity.
+        //   b (sample in front): the sample is a moving foreground streaking
+        //     over the centre — reach = the sample's velocity.
+        // (The velocities must pair this way: swapping them suppresses blur at
+        // exactly the fg-over-bg silhouettes the tile filter exists to handle.)
         float f = soft_z(center_depth, s_depth);
         float b = soft_z(s_depth, center_depth);
-        float w = f * cone(dist, s_vel_len)          // moving background sample
-                + b * cone(dist, v_center_len)        // foreground streaks over
+        float w = f * cone(dist, v_center_len)        // centre reveals background
+                + b * cone(dist, s_vel_len)           // sample streaks over centre
                 + cylinder(dist, s_vel_len) * cylinder(dist, v_center_len) * 2.0; // co-planar
 
         weight += w;
