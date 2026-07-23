@@ -236,12 +236,52 @@ fn eval_segment(corners: &[(Vec3, Vec3, Vec3)], i: usize, t: f32) -> (Vec3, Vec3
     }
 }
 
-/// A gate's derived stroke-local transform from a corner list: on the
-/// curve at the parameter, +Z along the side normal (`flip` picks the
-/// side). `None` when the tangent degenerates.
-fn gate_transform(corners: &Corners, gate: &Gate) -> Option<Transform> {
+/// Default half-width of a gate's cross-section, meters.
+pub(crate) const GATE_HALF_WIDTH: f32 = 1.5;
+
+/// A gate's derived stroke-local transform from a corner list: the
+/// cross-section is the **chord between two points on the curve**, one on
+/// each side of the parameter, spanning the gate's width — its ends land
+/// exactly on the contour, tilt included (never projected onto a ground
+/// plane). Local X runs along the chord, +Z along the side normal
+/// (`flip` picks the side). `None` when the geometry degenerates.
+fn gate_transform(corners: &Corners, gate: &Gate, half_width: f32) -> Option<Transform> {
     let i = (gate.segment as usize).min(corners.len() - 2);
-    let (pos, tangent) = eval_segment(corners, i, gate.t.clamp(0.0, 1.0));
+    let target = 2.0 * half_width.max(0.05);
+    let center = gate.t.clamp(0.0, 1.0);
+    // Half-parameter reach: bisect until the chord between the two curve
+    // points matches the cross-section length (chord length grows
+    // monotonically with the reach on any sane curve). A segment too
+    // short to span the width uses all of what it has.
+    let chord_of = |c: f32, dt: f32| {
+        eval_segment(corners, i, (c + dt).min(1.0)).0
+            - eval_segment(corners, i, (c - dt).max(0.0)).0
+    };
+    let dt_max = 0.5f32;
+    let mut dt = if chord_of(0.5, dt_max).norm() <= target {
+        dt_max
+    } else {
+        let (mut lo, mut hi) = (0.0f32, dt_max);
+        for _ in 0..24 {
+            let mid = (lo + hi) * 0.5;
+            if chord_of(center.clamp(mid, 1.0 - mid), mid).norm() < target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        (lo + hi) * 0.5
+    };
+    dt = dt.min(dt_max);
+    let center = center.clamp(dt, 1.0 - dt);
+    let p_lo = eval_segment(corners, i, center - dt).0;
+    let p_hi = eval_segment(corners, i, center + dt).0;
+    let chord = p_hi - p_lo;
+    if chord.norm() < 1e-4 {
+        return None;
+    }
+
+    let (_, tangent) = eval_segment(corners, i, center);
     let tangent = Vec3::new(tangent.x, 0.0, tangent.z);
     if tangent.norm() < 1e-4 {
         return None;
@@ -249,8 +289,8 @@ fn gate_transform(corners: &Corners, gate: &Gate) -> Option<Transform> {
     let tangent = tangent.normalize();
     let n = Vec3::new(-tangent.z, 0.0, tangent.x) * if gate.flip { -1.0 } else { 1.0 };
     Some(Transform::new(
-        pos,
-        quat_from_rotation_y(n.x.atan2(n.z)),
+        (p_lo + p_hi) * 0.5,
+        crate::bezier::rotation_with_x_along(chord, n)?,
         Vec3::new(1.0, 1.0, 1.0),
     ))
 }
@@ -262,9 +302,10 @@ pub(crate) fn derive_gate_state(
     world: &World,
     stroke_entity: Entity,
     gate: &Gate,
+    half_width: f32,
 ) -> Option<Transform> {
     let stroke = world.get::<Stroke>(stroke_entity)?;
-    gate_transform(&local_corners(world, stroke)?, gate)
+    gate_transform(&local_corners(world, stroke)?, gate, half_width)
 }
 
 /// Project a stroke-local position onto the path: the `(segment, t)`
@@ -391,7 +432,11 @@ pub(crate) fn gate_updates(
             .get::<GlobalTransform>(parent)
             .map(|gt| gt.0)
             .unwrap_or_else(redlilium_core::math::Mat4::identity);
-        let Some(derived) = gate_transform(&corners, gate) else {
+        let half_width = world
+            .get::<crate::RoadNode>(entity)
+            .map(|n| n.half_width)
+            .unwrap_or(GATE_HALF_WIDTH);
+        let Some(derived) = gate_transform(&corners, gate, half_width) else {
             continue;
         };
         let Some(t) = world.get::<Transform>(entity) else {
@@ -413,7 +458,7 @@ pub(crate) fn gate_updates(
                 t: new_t,
                 flip: gate.flip,
             };
-            if let Some(slid_transform) = gate_transform(&corners, &slid) {
+            if let Some(slid_transform) = gate_transform(&corners, &slid, half_width) {
                 updates.push((
                     entity,
                     slid_transform,
@@ -680,7 +725,7 @@ impl AddGateAction {
 
 impl EditAction<World> for AddGateAction {
     fn apply(&mut self, world: &mut World) -> EditActionResult {
-        let Some(local) = derive_gate_state(world, self.stroke, &self.gate) else {
+        let Some(local) = derive_gate_state(world, self.stroke, &self.gate, GATE_HALF_WIDTH) else {
             return Err(EditActionError::TargetNotFound(
                 "gate target is not a stroke with a usable path".into(),
             ));
@@ -693,7 +738,14 @@ impl EditAction<World> for AddGateAction {
         let inserted = world
             .insert(gate, local)
             .and_then(|_| world.insert(gate, GlobalTransform(parent_m * local.to_matrix())))
-            .and_then(|_| world.insert(gate, crate::RoadNode { half_width: 1.5 }))
+            .and_then(|_| {
+                world.insert(
+                    gate,
+                    crate::RoadNode {
+                        half_width: GATE_HALF_WIDTH,
+                    },
+                )
+            })
             .and_then(|_| world.insert(gate, self.gate.clone()))
             .and_then(|_| world.insert(gate, redlilium_ecs::Name("Gate".to_owned())));
         if let Err(e) = inserted {
@@ -1226,6 +1278,63 @@ mod tests {
 
         // Settled: a second pass writes nothing.
         assert!(gate_updates(&world, &mut Default::default(), false).is_empty());
+    }
+
+    #[test]
+    fn gate_cross_section_ends_lie_on_a_climbing_stroke() {
+        let mut world = world();
+        world.register_inspector_default::<crate::RoadNode>();
+        AddStrokeAction::at_point(Vec3::zeros())
+            .apply(&mut world)
+            .unwrap();
+        let (stroke, component) = spawned_stroke(&world);
+        // Tilt the first segment: (−4,0,0) → (4,4,0), a 1:2 climb.
+        world
+            .insert(
+                component.points[1],
+                Transform::new(
+                    Vec3::new(4.0, 4.0, 0.0),
+                    quat_from_rotation_y(0.0),
+                    Vec3::new(1.0, 1.0, 1.0),
+                ),
+            )
+            .unwrap();
+        AddGateAction::new(
+            stroke,
+            Gate {
+                segment: 0,
+                t: 0.5,
+                flip: false,
+            },
+        )
+        .apply(&mut world)
+        .unwrap();
+        let gate = world
+            .read_all::<Gate>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, _)| world.entity_at_index(index))
+            .next()
+            .unwrap();
+
+        // The cross-section spans two points ON the climbing line — ends
+        // on the contour (y = (x + 4) / 2 along it), not a flat segment
+        // at the midpoint height.
+        let t = *world.get::<Transform>(gate).unwrap();
+        let section = crate::bezier::cross_section(&t.to_matrix(), GATE_HALF_WIDTH);
+        for end in [section[0], section[3]] {
+            assert!(
+                (end.y - (end.x + 4.0) / 2.0).abs() < 1e-3 && end.z.abs() < 1e-3,
+                "cross-section end on the contour, got {end:?}"
+            );
+        }
+        assert!(
+            (section[3].y - section[0].y).abs() > 1.0,
+            "the section genuinely tilts with the line"
+        );
+        // +Z still faces the side normal (horizontal here).
+        let heading = crate::bezier::heading(&t.to_matrix());
+        assert!((heading - Vec3::new(0.0, 0.0, 1.0)).norm() < 1e-3);
     }
 
     #[test]

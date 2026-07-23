@@ -58,6 +58,12 @@ impl Default for EdgeAnchor {
 /// half_width)`. `None` when the parent road is gone or the interval is
 /// degenerate — broken topology yields no placement, the node keeps its
 /// last one.
+///
+/// The cross-section IS the chord between the two contour points at
+/// `u_min`/`u_max` — **in full 3D**: its ends land exactly on the edge
+/// curve, tilt included; nothing is projected onto a ground plane. Local
+/// X runs along the chord, +Z points outward (away from the parent road,
+/// orthogonalized against the chord).
 pub fn derive_anchor_state(world: &World, anchor: &EdgeAnchor) -> Option<(Transform, f32)> {
     let patch = road_patch(world, anchor.parent_road)?;
     let v_edge = if anchor.right_edge { 1.0 } else { 0.0 };
@@ -73,22 +79,16 @@ pub fn derive_anchor_state(world: &World, anchor: &EdgeAnchor) -> Option<(Transf
         return None;
     }
 
-    // Local X exactly along the chord (yaw-only: a chord tilted in Y keeps
-    // its midpoint height but the cross-section stays horizontal).
-    let cx = Vec3::new(chord.x, 0.0, chord.z).normalize();
-    let mut yaw = (-cx.z).atan2(cx.x);
-    // +Z outward: flip 180° if the perpendicular faces the parent road.
+    // +Z outward: the cross-edge derivative, pointed away from the road,
+    // kept horizontal as the frame's preference direction.
     let outward = {
         let dv = bezier::eval_dv(&patch, (u_min + u_max) * 0.5, v_edge);
         dv * if anchor.right_edge { 1.0 } else { -1.0 }
     };
-    let z_axis = Vec3::new(yaw.sin(), 0.0, yaw.cos());
-    if z_axis.dot(&outward) < 0.0 {
-        yaw += std::f32::consts::PI;
-    }
+    let rotation = bezier::rotation_with_x_along(chord, Vec3::new(outward.x, 0.0, outward.z))?;
 
     let mid = (p0 + p1) * 0.5;
-    let transform = Transform::new(mid, quat_from_rotation_y(yaw), Vec3::new(1.0, 1.0, 1.0));
+    let transform = Transform::new(mid, rotation, Vec3::new(1.0, 1.0, 1.0));
     Some((transform, (length * 0.5).max(0.1)))
 }
 
@@ -617,6 +617,69 @@ mod tests {
         assert!((heading - Vec3::new(1.0, 0.0, 0.0)).norm() < 1e-3);
         // Chord of a fifth of a 20 m straight edge → half width ≈ 2.
         assert!((half_width - 2.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn anchored_chord_ends_lie_on_a_climbing_edge() {
+        let mut world = World::new();
+        redlilium_ecs::register_std_components(&mut world);
+        world.register_inspector_default::<RoadNode>();
+        world.register_inspector_default::<RoadSegment>();
+        world.register_inspector_default::<EdgeAnchor>();
+
+        // Road climbing 8 m over its run: the edge curve is not planar.
+        let node = |world: &mut World, x: f32, y: f32, z: f32| {
+            let e = world.spawn();
+            let t = Transform::new(
+                Vec3::new(x, y, z),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            );
+            world.insert(e, t).unwrap();
+            world.insert(e, GlobalTransform(t.to_matrix())).unwrap();
+            world.insert(e, RoadNode::default()).unwrap();
+            e
+        };
+        let a = node(&mut world, 0.0, 0.0, 0.0);
+        let b = node(&mut world, 0.0, 8.0, 20.0);
+        let road = world.spawn();
+        world
+            .insert(
+                road,
+                RoadSegment {
+                    a,
+                    b,
+                    ..RoadSegment::default()
+                },
+            )
+            .unwrap();
+
+        let anchor = EdgeAnchor {
+            parent_road: road,
+            right_edge: true,
+            u_min: 0.4,
+            u_max: 0.6,
+        };
+        let (t, half_width) = derive_anchor_state(&world, &anchor).expect("state");
+
+        // The cross-section IS the chord between the two contour points —
+        // its ends land exactly on the edge curve, tilt included (no
+        // ground-plane projection).
+        let patch = road_patch(&world, road).unwrap();
+        let p0 = bezier::eval(&patch, 0.4, 1.0);
+        let p1 = bezier::eval(&patch, 0.6, 1.0);
+        assert!((p1.y - p0.y).abs() > 0.5, "the edge genuinely climbs here");
+        let section = bezier::cross_section(&t.to_matrix(), half_width);
+        assert!(
+            (section[0] - p0).norm() < 1e-3,
+            "low end on the contour: {:?} vs {p0:?}",
+            section[0]
+        );
+        assert!(
+            (section[3] - p1).norm() < 1e-3,
+            "high end on the contour: {:?} vs {p1:?}",
+            section[3]
+        );
     }
 
     #[test]

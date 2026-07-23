@@ -26,6 +26,28 @@ pub fn heading(world: &Mat4) -> Vec3 {
     Vec3::new(d.x, d.y, d.z).normalize()
 }
 
+/// Rotation whose local **X runs along `x_axis` in full 3D** — a chord
+/// between two contour points keeps its tilt, it is never projected onto
+/// a ground plane — and whose local +Z points as close to `toward_z` as
+/// orthogonality allows. `None` when either input degenerates or they are
+/// (anti)parallel.
+pub fn rotation_with_x_along(x_axis: Vec3, toward_z: Vec3) -> Option<redlilium_core::math::Quat> {
+    use redlilium_core::math::nalgebra;
+    if x_axis.norm() < 1e-6 {
+        return None;
+    }
+    let x = x_axis.normalize();
+    let z0 = toward_z - x * x.dot(&toward_z);
+    if z0.norm() < 1e-6 {
+        return None;
+    }
+    let z = z0.normalize();
+    let y = z.cross(&x);
+    let m = nalgebra::Matrix3::from_columns(&[x, y, z]);
+    let rotation = nalgebra::Rotation3::from_matrix_unchecked(m);
+    Some(nalgebra::UnitQuaternion::from_rotation_matrix(&rotation).into_inner())
+}
+
 /// Build the road patch between two nodes.
 ///
 /// The end row's point order is flipped when connecting same-index corners

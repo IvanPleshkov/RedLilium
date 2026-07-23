@@ -180,11 +180,17 @@ the entities mean.
   `GlobalTransform`, recomputed by a bounded fixed-point pass each frame):
   position/orientation come from the **chord** between the edge points at
   `u_min`/`u_max` — local X along the chord, +Z outward from the road —
-  and `half_width` is half the chord. The seam is that *straight* chord,
-  not the curved edge: **a road piece's geometry is always the span between
-  two straight segments**, and closing the sliver between chord and true
-  edge curve is the mesh generator's job — it receives the parametric
-  interval in the `PieceDesc`, the same division of labor as cut profiles.
+  and `half_width` is half the chord. The chord is taken **in full 3D**
+  (decided 2026-07-23): its ends land exactly on the contour points, tilt
+  included — the connecting segment is *defined by two points on the
+  contour it attaches to*, never projected onto a ground plane. The same
+  rule holds for gates on strokes: a gate's cross-section is the chord
+  between two curve points spanning its width. The seam is that
+  *straight* chord, not the curved edge: **a road piece's geometry is
+  always the span between two straight segments**, and closing the sliver
+  between chord and true edge curve is the mesh generator's job — it
+  receives the parametric interval in the `PieceDesc`, the same division
+  of labor as cut profiles.
   Because the interval is parametric, the anchored node follows every
   parent-road edit. The driveway itself is then an **ordinary
   `RoadSegment`** out of the anchored node — its own edges are pickable
