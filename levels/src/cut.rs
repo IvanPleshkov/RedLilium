@@ -12,16 +12,20 @@
 //! **Master + profile.** The authored path is the **upper lip**, built on
 //! the shared vertex machinery — ordered child entities carrying
 //! [`StrokeVertex`](crate::StrokeVertex) pen handles. Each vertex adds a
-//! [`CutVertex`] profile whose `drop` sinks the **derived lower lip**
-//! straight down in world Y (this slice: vertical faces only; a plan
-//! offset for battered slopes/embankments is the planned extension).
-//! `drop == 0` merges the lips — the pure-crease case. There is never a
-//! second authored curve: the lower lip is derived, so the two can't
-//! desync and every attachment keeps a single path parameterization.
+//! [`CutVertex`] profile: `drop` sinks the **derived lower lip** straight
+//! down in world Y, `offset` pushes it toward the path's right-hand side
+//! (a battered slope/embankment instead of a vertical face; negative
+//! overhangs). `drop == 0` merges the lips — the pure-crease case. There
+//! is never a second authored curve: the lower lip is derived, so the
+//! two can't desync and every attachment keeps a single path
+//! parameterization.
 //!
-//! The face between the lips — and anything crossing it, like stairs from
-//! a road gate — is generator geometry (tyroxine); the cut owns only the
-//! boundary description the generator consumes.
+//! **Crossings**: a [`Gate`](crate::Gate) dropped on a cut sits on the
+//! lip of the side it faces (`flip` → the derived lip) — the socket at
+//! the foot of the face a road arrives at. The face between the lips —
+//! and the crossing's volume, stairs or a ramp — is generator geometry
+//! (tyroxine); the cut owns only the boundary description the generator
+//! consumes.
 
 use redlilium_core::abstract_editor::{EditAction, EditActionError, EditActionResult};
 use redlilium_core::math::{Vec3, quat_from_rotation_y};
@@ -50,18 +54,44 @@ pub struct CutVertex {
     /// Height of the step at this vertex, meters, interpolated along the
     /// adjacent segments.
     pub drop: f32,
+    /// Plan displacement of the derived lip at this vertex, meters,
+    /// toward the path's **right-hand side** (the side the drop lowers):
+    /// the face batters into a slope/embankment instead of a vertical
+    /// wall; negative overhangs. Beware concave bends — an offset beyond
+    /// the local curvature radius self-intersects (the classic
+    /// offset-curve caveat); the authoring layer does not clamp it.
+    pub offset: f32,
+}
+
+/// Displace a master-path sample onto the derived lip: sunk `drop`
+/// straight down in world Y and pushed `offset` toward the tangent's
+/// horizontal right-hand normal (a vertical tangent leaves the offset
+/// unapplied).
+pub(crate) fn lip_point(p: Vec3, tangent: Vec3, drop: f32, offset: f32) -> Vec3 {
+    let mut q = p - Vec3::new(0.0, drop, 0.0);
+    let h = Vec3::new(tangent.x, 0.0, tangent.z);
+    if h.norm() > 1e-4 {
+        let h = h.normalize();
+        q += Vec3::new(h.z, 0.0, -h.x) * offset;
+    }
+    q
 }
 
 /// Both lips of the cut, tessellated in world space: `(upper, lower)`,
 /// same sample count, index-aligned (sample `i` of the lower lip hangs
-/// beneath sample `i` of the upper — the face rungs). The drop
-/// interpolates linearly in the segment parameter between the two
+/// beneath sample `i` of the upper — the face rungs). Drop and offset
+/// interpolate linearly in the segment parameter between the two
 /// vertices' profiles. `None` with fewer than 2 live vertices.
 pub fn cut_paths(world: &World, cut: &Cut) -> Option<(Vec<Vec3>, Vec<Vec3>)> {
     let corners = crate::stroke::corners_of(world, &cut.points)?;
-    let drops: Vec<f32> = corners
+    let profile: Vec<(f32, f32)> = corners
         .iter()
-        .map(|(v, _, _, _)| world.get::<CutVertex>(*v).map(|c| c.drop).unwrap_or(0.0))
+        .map(|(v, _, _, _)| {
+            world
+                .get::<CutVertex>(*v)
+                .map(|c| (c.drop, c.offset))
+                .unwrap_or((0.0, 0.0))
+        })
         .collect();
     let geometry: crate::stroke::Corners = corners
         .into_iter()
@@ -72,8 +102,10 @@ pub fn cut_paths(world: &World, cut: &Cut) -> Option<(Vec<Vec3>, Vec<Vec3>)> {
     let lower: Vec<Vec3> = samples
         .iter()
         .map(|(i, t, p)| {
-            let drop = drops[*i] + (drops[*i + 1] - drops[*i]) * *t;
-            *p - Vec3::new(0.0, drop, 0.0)
+            let (d0, o0) = profile[*i];
+            let (d1, o1) = profile[*i + 1];
+            let (_, tangent) = crate::stroke::eval_segment(&geometry, *i, *t);
+            lip_point(*p, tangent, d0 + (d1 - d0) * *t, o0 + (o1 - o0) * *t)
         })
         .collect();
     Some((upper, lower))
@@ -146,7 +178,15 @@ impl EditAction<World> for AddCutAction {
                     )
                 })
                 .and_then(|_| world.insert(vertex, StrokeVertex::default()))
-                .and_then(|_| world.insert(vertex, CutVertex { drop: DEFAULT_DROP }))
+                .and_then(|_| {
+                    world.insert(
+                        vertex,
+                        CutVertex {
+                            drop: DEFAULT_DROP,
+                            offset: 0.0,
+                        },
+                    )
+                })
                 .and_then(|_| {
                     world.insert(vertex, redlilium_ecs::Name(format!("Point {}", n + 1)))
                 });
@@ -265,8 +305,24 @@ mod tests {
                 },
             )
             .unwrap();
-        world.insert(v0, CutVertex { drop: 1.0 }).unwrap();
-        world.insert(v1, CutVertex { drop: 3.0 }).unwrap();
+        world
+            .insert(
+                v0,
+                CutVertex {
+                    drop: 1.0,
+                    offset: 0.0,
+                },
+            )
+            .unwrap();
+        world
+            .insert(
+                v1,
+                CutVertex {
+                    drop: 3.0,
+                    offset: 0.0,
+                },
+            )
+            .unwrap();
 
         let (upper, lower) = cut_paths(&world, &component).expect("lips");
         // One curved segment → its Bézier fan joins the 3 vertices.
@@ -287,6 +343,45 @@ mod tests {
     }
 
     #[test]
+    fn offset_batters_the_face_toward_the_right_hand_side() {
+        let mut world = world();
+        AddCutAction::at_point(Vec3::zeros())
+            .apply(&mut world)
+            .unwrap();
+        let (_, component) = spawned_cut(&world);
+        // Travel is +X, so the right-hand side is −Z: with drop 2 and
+        // offset 1 the derived lip runs parallel one meter south, two
+        // meters down — a battered slope's foot line.
+        for &v in &component.points {
+            world
+                .insert(
+                    v,
+                    CutVertex {
+                        drop: 2.0,
+                        offset: 1.0,
+                    },
+                )
+                .unwrap();
+        }
+        let (upper, lower) = cut_paths(&world, &component).expect("lips");
+        for (u, l) in upper.iter().zip(&lower) {
+            assert!((l - (u + Vec3::new(0.0, -2.0, -1.0))).norm() < 1e-4);
+        }
+        // A negative offset overhangs — the lip tucks under the crest.
+        world
+            .insert(
+                component.points[0],
+                CutVertex {
+                    drop: 2.0,
+                    offset: -1.0,
+                },
+            )
+            .unwrap();
+        let (upper, lower) = cut_paths(&world, &component).expect("lips");
+        assert!((lower[0] - (upper[0] + Vec3::new(0.0, -2.0, 1.0))).norm() < 1e-4);
+    }
+
+    #[test]
     fn zero_drop_merges_the_lips_into_a_crease() {
         let mut world = world();
         AddCutAction::at_point(Vec3::zeros())
@@ -296,7 +391,15 @@ mod tests {
         // Zero the whole profile — the C0-continuous crease case (C1
         // still breaks in the fill; the lips coincide).
         for &v in &component.points {
-            world.insert(v, CutVertex { drop: 0.0 }).unwrap();
+            world
+                .insert(
+                    v,
+                    CutVertex {
+                        drop: 0.0,
+                        offset: 0.0,
+                    },
+                )
+                .unwrap();
         }
         let (upper, lower) = cut_paths(&world, &component).expect("lips");
         for (u, l) in upper.iter().zip(&lower) {
@@ -306,7 +409,13 @@ mod tests {
         // A vertex missing its profile component counts as drop = 0 too.
         let _ = world.remove::<CutVertex>(component.points[0]);
         world
-            .insert(component.points[1], CutVertex { drop: 2.0 })
+            .insert(
+                component.points[1],
+                CutVertex {
+                    drop: 2.0,
+                    offset: 0.0,
+                },
+            )
             .unwrap();
         let (upper, lower) = cut_paths(&world, &component).expect("lips");
         assert!((upper[0] - lower[0]).norm() < 1e-6, "missing profile = 0");

@@ -184,23 +184,28 @@ the entities mean.
   **Master + profile** (the ruled-out alternative was two independently
   authored curves — correspondence problems, desync, double editing): the
   authored path is the **upper lip**; each vertex adds
-  `CutVertex { drop }` and the **lower lip is derived** — sunk `drop`
-  meters straight down in world Y, the drop interpolating along segments.
-  `drop = 0` collapses the step into a pure crease; positive drop lowers
-  the path's **right-hand side** (of travel direction). One master
-  parameterization keeps attachments and the future closure level on a
-  single locus per piece. This slice: vertical faces only; the planned
-  extension is a per-vertex **plan offset** of the lower lip for battered
-  slopes/embankments (with the offset-curve self-intersection caveat on
-  concave bends — clamp by curvature or leave it to the generator).
+  `CutVertex { drop, offset }` and the **lower lip is derived** — sunk
+  `drop` meters straight down in world Y and pushed `offset` meters
+  toward the path's **right-hand side** (of travel direction — the side
+  the drop lowers), both interpolating along segments. `drop = 0`
+  collapses the step into a pure crease; `offset` batters the face into a
+  slope/embankment instead of a vertical wall, negative overhangs (with
+  the offset-curve self-intersection caveat on concave bends — the
+  authoring layer does not clamp it; generator's problem or author's
+  restraint). One master parameterization keeps attachments and the
+  future closure level on a single locus per piece.
   **Division of labor for crossings** (a road gate through a cut = stairs,
-  a ramp): the engine owns the *intent* and the boundary conditions — the
-  semantic tag and the two full-3D chords (road edge + cut lip), plus the
-  **claimed interval on the cut face** the crossing consumes (so the
-  generator doesn't also build wall there — symmetric to how an edge
-  anchor claims `[u_min, u_max]`). The generated volume (steps, railings,
-  collision) is tyroxine's. Cut faces themselves are generator geometry:
-  the cut owns only the boundary description.
+  a ramp): a `Gate` drops onto a cut exactly like onto a stroke — same
+  parametric machinery — and **sits on the lip of the side it faces**
+  (`flip`, the right-hand side, rides the derived lip: the socket at the
+  foot of the face; the left side rides the master). The engine owns the
+  *intent* and the boundary conditions — the gate's full-3D chord on its
+  lip plus, later, the semantic tag and the **claimed interval on the cut
+  face** the crossing consumes (so the generator doesn't also build wall
+  there — symmetric to how an edge anchor claims `[u_min, u_max]`; today
+  the interval is derivable from the gate's chord span). The generated
+  volume (steps, railings, collision) is tyroxine's. Cut faces themselves
+  are generator geometry: the cut owns only the boundary description.
 - **Edge anchor** (P5) — the way a connection lands on **part of a road's
   boundary curve** rather than on a node. The canonical case: a
   driveway/building exit crossing the sidewalk to meet the road. Not a

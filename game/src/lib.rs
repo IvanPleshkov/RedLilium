@@ -961,43 +961,49 @@ pub fn spawn_levels_playground(world: &mut World) {
         .unwrap();
 
         // Cut: a terrain-discontinuity line — unlike a stroke it OBLIGES
-        // the fill (C0/C1 breaks here). Master path = upper lip; the lower
-        // lip derives per-vertex from CutVertex.drop, straight down in
-        // world Y. This one is a pedestal rim south of the villa: the
-        // upper lip rides 1.5 m up, the drop deepens over the curved
-        // middle so the lower lip stays at grade under the crest.
-        let cut_at =
-            |world: &mut World, name: &str, t: Transform, verts: &[([f32; 3], f32)]| -> Entity {
-                let cut = world.spawn();
-                world.insert(cut, t).unwrap();
-                world.insert(cut, GlobalTransform(t.to_matrix())).unwrap();
-                world
-                    .insert(cut, redlilium_ecs::Name(name.to_owned()))
-                    .unwrap();
-                let points: Vec<Entity> = verts
-                    .iter()
-                    .enumerate()
-                    .map(|(n, &([x, y, z], drop))| {
-                        let v = child(
-                            world,
-                            cut,
-                            Transform::new(
-                                Vec3::new(x, y, z),
-                                quat_from_rotation_y(0.0),
-                                Vec3::new(1.0, 1.0, 1.0),
-                            ),
-                        );
-                        world.insert(v, StrokeVertex::default()).unwrap();
-                        world.insert(v, CutVertex { drop }).unwrap();
-                        world
-                            .insert(v, redlilium_ecs::Name(format!("Point {}", n + 1)))
-                            .unwrap();
-                        v
-                    })
-                    .collect();
-                world.insert(cut, Cut { points }).unwrap();
-                cut
-            };
+        // the fill (C0/C1 breaks here). Master path = upper lip; the
+        // lower lip derives per-vertex from CutVertex: sunk `drop` in
+        // world Y and pushed `offset` toward the path's right-hand side
+        // (a battered face instead of a vertical wall). This one is a
+        // pedestal rim south of the villa: the upper lip rides 1.5 m up,
+        // the drop deepens over the curved middle so the lower lip stays
+        // at grade under the crest, and the offset makes the face lean
+        // outward.
+        let cut_at = |world: &mut World,
+                      name: &str,
+                      t: Transform,
+                      verts: &[([f32; 3], f32, f32)]|
+         -> Entity {
+            let cut = world.spawn();
+            world.insert(cut, t).unwrap();
+            world.insert(cut, GlobalTransform(t.to_matrix())).unwrap();
+            world
+                .insert(cut, redlilium_ecs::Name(name.to_owned()))
+                .unwrap();
+            let points: Vec<Entity> = verts
+                .iter()
+                .enumerate()
+                .map(|(n, &([x, y, z], drop, offset))| {
+                    let v = child(
+                        world,
+                        cut,
+                        Transform::new(
+                            Vec3::new(x, y, z),
+                            quat_from_rotation_y(0.0),
+                            Vec3::new(1.0, 1.0, 1.0),
+                        ),
+                    );
+                    world.insert(v, StrokeVertex::default()).unwrap();
+                    world.insert(v, CutVertex { drop, offset }).unwrap();
+                    world
+                        .insert(v, redlilium_ecs::Name(format!("Point {}", n + 1)))
+                        .unwrap();
+                    v
+                })
+                .collect();
+            world.insert(cut, Cut { points }).unwrap();
+            cut
+        };
         let rim = cut_at(
             world,
             "Pedestal rim",
@@ -1007,9 +1013,9 @@ pub fn spawn_levels_playground(world: &mut World) {
                 Vec3::new(1.0, 1.0, 1.0),
             ),
             &[
-                ([-6.0, 0.0, 0.0], 1.5),
-                ([0.0, 0.0, 2.0], 2.0),
-                ([6.0, 0.0, 0.0], 1.5),
+                ([-6.0, 0.0, 0.0], 1.5, 1.0),
+                ([0.0, 0.0, 2.0], 2.0, 1.5),
+                ([6.0, 0.0, 0.0], 1.5, 1.0),
             ],
         );
         // Round the crest with mirrored (C1) handles on the middle vertex.
@@ -1025,6 +1031,23 @@ pub fn spawn_levels_playground(world: &mut World) {
                 )
                 .unwrap();
         }
+        // A gate ON the cut: the crossing socket — a stairs/ramp intent
+        // through the face (volume is the generator's). `flip` makes it
+        // face the right-hand (low) side, so it sits on the DERIVED lip
+        // at the foot of the pedestal; the driveway leaves it southward.
+        let rim_gate = gate_at(world, rim, 1, 0.5, true);
+        let rim_landing = node(world, -13.0, -30.0, 0.0);
+        let rim_drive = world.spawn();
+        world
+            .insert(
+                rim_drive,
+                RoadSegment {
+                    a: rim_gate,
+                    b: rim_landing,
+                    ..RoadSegment::default()
+                },
+            )
+            .unwrap();
 
         // Mid of the scarp line's first segment, facing north toward the
         // east road (the +X tangent's left normal — no flip).

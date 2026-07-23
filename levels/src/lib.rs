@@ -208,27 +208,32 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                 }
             },
         );
-        // "Add gate": drop a connection socket onto the selected stroke at
-        // the path point under the cursor (+Z toward the click side). The
-        // gate is parametric — it follows every reshape of the stroke, and
-        // dragging it slides it along the path. Roads then connect to it
-        // from either side with the connect tool.
+        // "Add gate": drop a connection socket onto the selected stroke or
+        // cut at the path point under the cursor (+Z toward the click
+        // side). The gate is parametric — it follows every reshape of the
+        // host, and dragging it slides it along the path. On a cut it sits
+        // on the lip of the side it faces (the stairs/ramp crossing
+        // socket). Roads then connect to it from either side with the
+        // connect tool.
+        let is_gate_host = |world: &redlilium_ecs::World, e: Entity| {
+            world.get::<Stroke>(e).is_some() || world.get::<Cut>(e).is_some()
+        };
         view.ops.add(
             "Add gate",
-            |ctx| {
+            move |ctx| {
                 ctx.cursor_ray.as_ref().is_some_and(|ray| {
                     ctx.selection.iter().any(|&e| {
-                        ctx.world.get::<Stroke>(e).is_some()
+                        is_gate_host(ctx.world, e)
                             && stroke::gate_param_at(ctx.world, e, ray).is_some()
                     })
                 })
             },
-            |ctx| {
+            move |ctx| {
                 let Some(ray) = ctx.cursor_ray.as_ref() else {
                     return;
                 };
                 for &entity in ctx.selection.iter() {
-                    if ctx.world.get::<Stroke>(entity).is_some()
+                    if is_gate_host(ctx.world, entity)
                         && let Some(param) = stroke::gate_param_at(ctx.world, entity, ray)
                     {
                         ctx.actions
