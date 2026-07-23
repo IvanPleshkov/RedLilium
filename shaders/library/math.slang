@@ -69,3 +69,56 @@ float3 safe_normalize(float3 v) {
     }
     return float3(0.0, 1.0, 0.0);
 }
+
+// Largest magnitude representable in an f16 (Rgba16Float) texel. Both the
+// scene_color intermediate and the bloom mip chain are f16, so this is the
+// clamp ceiling below — a finite fp32 value above it would round to +Inf on
+// store and poison every downstream pass.
+static const float F16_MAX = 65504.0;
+
+// Force a value finite and f16-storable: NaN -> 0, -Inf -> 0, +Inf -> F16_MAX,
+// finite -> clamped to [0, F16_MAX] (radiance is non-negative). Used at every
+// write into an f16 render target that can carry an extreme HDR highlight
+// (skybox/resolve scene_color, the bloom taps) so a sun-bright Inf/NaN never
+// spreads a black or colored block up the chain (#152).
+//
+// The guard tests the IEEE-754 bit pattern, NOT a float compare like `x == x`:
+// on the Vulkan/MoltenVK path Metal compiles the final MSL with fast-math, which
+// assumes operands are never NaN/Inf and folds `x == x` to a constant `true`, so
+// a float NaN test is silently dropped before it reaches the GPU (this is why the
+// artifact was Vulkan-only — the WGSL/naga source keeps the compare, Metal drops
+// it). Integer bit ops are untouched by fast-math, so this holds on every backend.
+float sanitize_finite(float x) {
+    uint bits = asuint(x);
+    if (((bits >> 23) & 0xFFu) == 0xFFu) {
+        // exponent all-ones: NaN (nonzero mantissa) or Inf (zero mantissa).
+        if ((bits & 0x7FFFFFu) != 0u) {
+            return 0.0; // NaN
+        }
+        return (bits >> 31) != 0u ? 0.0 : F16_MAX; // -Inf : +Inf
+    }
+    return clamp(x, 0.0, F16_MAX);
+}
+
+// Per-channel `sanitize_finite`.
+float3 sanitize_finite3(float3 v) {
+    return float3(sanitize_finite(v.x), sanitize_finite(v.y), sanitize_finite(v.z));
+}
+
+// True if `x` is NaN, tested via the IEEE-754 bit pattern (exponent all-ones,
+// nonzero mantissa). Use this instead of the `isnan()` intrinsic or the `x != x`
+// self-inequality: both are folded to a constant `false` by Metal fast-math on
+// the Vulkan/MoltenVK path (fast-math assumes operands are never NaN), leaving a
+// dead guard there (#152). Integer bit ops survive fast-math on every backend.
+bool is_nan(float x) {
+    uint bits = asuint(x);
+    return (((bits >> 23) & 0xFFu) == 0xFFu) && ((bits & 0x7FFFFFu) != 0u);
+}
+
+// True if any component is NaN (fast-math-proof; see `is_nan`).
+bool any_nan2(float2 v) {
+    return is_nan(v.x) || is_nan(v.y);
+}
+bool any_nan3(float3 v) {
+    return is_nan(v.x) || is_nan(v.y) || is_nan(v.z);
+}

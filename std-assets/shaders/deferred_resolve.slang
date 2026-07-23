@@ -184,5 +184,9 @@ float4 fs_main(VsOutput input) : SV_Target {
     float3 ambient = (kd_ibl * diffuse_ibl + specular_ibl) * ao;
 
     // Scene-referred linear out — display transform happens downstream.
-    return float4(ambient + lo, 1.0);
+    // Sanitize the write: a bad prefilter/irradiance texel or a large finite
+    // radiance (bright point light, grazing specular) can overflow the f16
+    // scene_color target to Inf and poison the bloom/TAA/composite chain (#152).
+    // Clamp keeps scene_color finite at the source, same invariant as skybox.
+    return float4(sanitize_finite3(ambient + lo), 1.0);
 }

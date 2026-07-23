@@ -11,6 +11,8 @@
 // use the plain weights.
 //#pragma variant_system KARIS
 
+import math;
+
 struct VsOutput {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
@@ -45,23 +47,15 @@ Texture2D source;
 [[vk::binding(2, 0)]]
 SamplerState linear_sampler;
 
-// Sanitize bloom taps to a finite range. A very bright sky/sun can exceed the
-// f16 range and land as +Inf (or a NaN from upstream) in scene_color; the
-// Karis weight 1/(1+luma) then hits 1/Inf = 0 and Inf*0 = NaN, which spreads a
-// black block up the mip chain. `min()`/`clamp()` NaN semantics differ across
-// backends (WGSL returns the other operand, SPIR-V FMin may propagate), so
-// kill NaN explicitly via the self-inequality (NaN != NaN) and clamp Inf to
-// the f16 max — every tap comes out finite regardless of backend.
-static const float BLOOM_CLAMP = 65504.0;
-
-float sanitize(float x) {
-    // x == x is false only for NaN; clamp is well-defined once NaN is excluded.
-    return (x == x) ? clamp(x, 0.0, BLOOM_CLAMP) : 0.0;
-}
-
+// Sanitize bloom taps to a finite range (`math::sanitize_finite3`, a fast-math-
+// proof IEEE-754 bit test — see math.slang). A very bright sky/sun can exceed
+// the f16 range and land as +Inf (or a NaN from upstream) in scene_color; the
+// Karis weight 1/(1+luma) then hits 1/Inf = 0 and Inf*0 = NaN, which would
+// otherwise spread a black block up the mip chain (#152). scene_color is now
+// clamped at its source too, so this is defense-in-depth for the mip>0 taps.
 float3 fetch(float2 uv) {
     float3 c = source.Sample(linear_sampler, uv).rgb;
-    return float3(sanitize(c.x), sanitize(c.y), sanitize(c.z));
+    return sanitize_finite3(c);
 }
 
 float luma(float3 c) {

@@ -16,6 +16,7 @@
 // ADR-039) carry zero velocity; their history is reprojected through the
 // camera matrices instead (sky moves with camera rotation, not geometry).
 
+import math; // fast-math-proof NaN guards (any_nan2 / any_nan3, #152)
 import motion; // shared reprojection helpers (#149)
 
 // =============================================================================
@@ -187,10 +188,12 @@ float4 fs_main(VsOutput input) : SV_Target {
     // Full-current fallback must be a BRANCH, not `lerp(history, current,
     // 1.0)`: the first frame's history texture is uninitialized and may
     // hold NaN — which survives any arithmetic (including lerp at alpha 1),
-    // gets written back, and poisons the accumulation forever. Phrased so a
-    // NaN prev_uv (degenerate reprojection) also lands here: comparisons
-    // with NaN are false, so `on_screen` fails.
-    bool on_screen = all(prev_uv >= float2(0.0)) && all(prev_uv <= float2(1.0));
+    // gets written back, and poisons the accumulation forever. A degenerate
+    // reprojection can also make prev_uv NaN; rather than lean on "comparisons
+    // with NaN are false" (Metal fast-math relaxes that on the Vulkan/MoltenVK
+    // path, #152), reject a NaN prev_uv explicitly with the bit-test guard.
+    bool on_screen = !any_nan2(prev_uv)
+        && all(prev_uv >= float2(0.0)) && all(prev_uv <= float2(1.0));
     if (params.y < 0.5 || !on_screen) {
         return float4(current, 1.0);
     }
@@ -198,8 +201,9 @@ float4 fs_main(VsOutput input) : SV_Target {
     float3 history_color = history.Sample(linear_sampler, prev_uv).rgb;
     // Belt and suspenders against the same feedback loop: a NaN that slips
     // into the history (driver-dependent contents, future passes) resets to
-    // the current sample instead of propagating.
-    if (any(isnan(history_color))) {
+    // the current sample instead of propagating. `any_nan3`, not the `isnan()`
+    // intrinsic — fast-math folds `isnan()` to false on MoltenVK (#152).
+    if (any_nan3(history_color)) {
         history_color = current;
     }
     float3 clipped = ycocg_to_rgb(
