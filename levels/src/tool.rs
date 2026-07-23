@@ -3,9 +3,13 @@
 //! Click a node to anchor, click another node to connect them, click empty
 //! ground to spawn a new node there and connect in one stroke — the freshly
 //! created node becomes the next anchor, so a whole chain lays down as a
-//! series of clicks. Escape drops the anchor, a second Escape leaves the
-//! tool. Node picking is CPU-side ray-vs-segment math: graph nodes carry no
-//! mesh, so the editor's GPU entity-index pass cannot see them.
+//! series of clicks. Clicking a road edge docks via an edge-anchored node;
+//! clicking a stroke or cut path docks via a fresh
+//! [`Gate`](crate::stroke::Gate) on it (facing
+//! the arriving road — on a cut that also picks the lip it lands on).
+//! Escape drops the anchor, a second Escape leaves the tool. Node picking
+//! is CPU-side ray-vs-segment math: graph nodes carry no mesh, so the
+//! editor's GPU entity-index pass cannot see them.
 
 use std::sync::{Arc, Mutex};
 
@@ -45,7 +49,7 @@ impl ViewportTool for ConnectRoadsTool {
     }
 
     fn status_hint(&self) -> &str {
-        "click a node or road edge to anchor · click ground to place · Esc: drop anchor / exit"
+        "click a node, road edge or stroke/cut to anchor · click ground to place · Esc: drop anchor / exit"
     }
 
     fn update(&mut self, ctx: &mut ViewportToolCtx<'_>) -> ToolFlow {
@@ -83,20 +87,36 @@ impl ViewportTool for ConnectRoadsTool {
             .flatten()
             // The anchor's own roads' edges are not landing targets.
             .filter(|hit| !road_touches(ctx.world, hit.road, self.anchor));
+        // A stroke/cut path is the last geometry tier before bare ground.
+        let gate_hit = (hovered.is_none() && edge.is_none())
+            .then(|| crate::stroke::gate_host_under_cursor(ctx.world, &ray))
+            .flatten()
+            // Face the arriving road when an anchor is set — on a cut this
+            // also picks the lip the gate lands on.
+            .map(|(host, mut gate)| {
+                if let Some(toward) = self
+                    .anchor
+                    .and_then(|a| crate::graph::node_center(ctx.world, a))
+                    && let Some(flip) = crate::stroke::gate_facing(ctx.world, host, &gate, toward)
+                {
+                    gate.flip = flip;
+                }
+                (host, gate)
+            });
 
         let ground = ground_hit(&ray);
 
-        self.draw_feedback(ctx, hovered, edge, ground);
+        self.draw_feedback(ctx, hovered, edge, gate_hit.clone(), ground);
 
         if ctx.input.clicked {
-            match (self.anchor, hovered, edge) {
+            match (self.anchor, hovered, edge, gate_hit) {
                 // First click on a node: anchor there.
-                (None, Some(node), _) => self.anchor = Some(node),
+                (None, Some(node), _, _) => self.anchor = Some(node),
                 // Click a second node: connect, chain from it. A socket
                 // target is met from its front (+Z) side — except a gate,
                 // which is two-sided and accepts a road from whichever
                 // side it comes from.
-                (Some(anchor), Some(node), _) => {
+                (Some(anchor), Some(node), _, _) => {
                     if node != anchor {
                         let from_front = socket_meets_front(ctx.world, node, anchor);
                         ctx.actions
@@ -109,7 +129,7 @@ impl ViewportTool for ConnectRoadsTool {
                 // terminates (a driveway INTO the edge). Without one, the
                 // fresh anchored node becomes the anchor — a road chain
                 // grows OUT of the edge.
-                (anchor, None, Some(hit)) => {
+                (anchor, None, Some(hit), _) => {
                     let half_width = anchor
                         .and_then(|a| ctx.world.get::<RoadNode>(a).map(|n| n.half_width))
                         .unwrap_or_else(|| RoadNode::default().half_width);
@@ -130,9 +150,23 @@ impl ViewportTool for ConnectRoadsTool {
                     }
                     ctx.actions.push(Box::new(action));
                 }
+                // Click a stroke or cut path: drop a gate there and dock.
+                // Same gesture shape as the road edge — with an anchor the
+                // road arrives INTO the gate and the gesture terminates;
+                // without one the fresh gate anchors a chain growing OUT
+                // of the line.
+                (anchor, None, None, Some((host, gate))) => {
+                    let action = crate::stroke::AddGateAction::with_road(host, gate, anchor);
+                    if anchor.is_none() {
+                        self.pending_anchor = Some(action.report.clone());
+                    } else {
+                        self.anchor = None;
+                    }
+                    ctx.actions.push(Box::new(action));
+                }
                 // Click empty ground: spawn a node there (and a road from
                 // the anchor, when one is set). The report chains the anchor.
-                (anchor, None, None) => {
+                (anchor, None, None, None) => {
                     if let Some(point) = ground {
                         let action =
                             AddNodeAction::new(anchor, node_transform(anchor, point, ctx.world));
@@ -157,6 +191,7 @@ impl ConnectRoadsTool {
         ctx: &ViewportToolCtx<'_>,
         hovered: Option<Entity>,
         edge: Option<EdgeHit>,
+        gate_hit: Option<(Entity, crate::stroke::Gate)>,
         ground: Option<Vec3>,
     ) {
         if !ctx.world.has_resource::<DebugDrawer>() {
@@ -214,6 +249,37 @@ impl ConnectRoadsTool {
                 if let Some((a_mat, a_half)) = self.anchor.and_then(|a| node_shape(ctx.world, a)) {
                     let a_c = Vec3::new(a_mat[(0, 3)], a_mat[(1, 3)], a_mat[(2, 3)]);
                     let chord = ((t.translation - a_c).norm() / 3.0).max(0.1);
+                    let patch =
+                        bezier::patch_from_nodes(&a_mat, a_half, chord, &mat, hw, chord, true);
+                    draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);
+                }
+            }
+            return;
+        }
+
+        // Preview the would-be gate on the hovered stroke/cut: its
+        // cross-section on the faced lip, plus the road arriving from the
+        // anchor when one is set.
+        if let Some((host, gate)) = gate_hit {
+            let derived = crate::stroke::derive_gate_state(
+                ctx.world,
+                host,
+                &gate,
+                crate::stroke::GATE_HALF_WIDTH,
+            );
+            if let Some(local) = derived
+                && let Some(parent) = ctx.world.get::<GlobalTransform>(host)
+            {
+                let mat = parent.0 * local.to_matrix();
+                let hw = crate::stroke::GATE_HALF_WIDTH;
+                let section = bezier::cross_section(&mat, hw);
+                draw.draw_line(pt(&section[0]), pt(&section[3]), HOVER_COLOR);
+                let center = (section[0] + section[3]) * 0.5;
+                let out = bezier::heading(&mat);
+                draw.draw_line(pt(&center), pt(&(center + out * 1.5)), HOVER_COLOR);
+                if let Some((a_mat, a_half)) = self.anchor.and_then(|a| node_shape(ctx.world, a)) {
+                    let a_c = Vec3::new(a_mat[(0, 3)], a_mat[(1, 3)], a_mat[(2, 3)]);
+                    let chord = ((center - a_c).norm() / 3.0).max(0.1);
                     let patch =
                         bezier::patch_from_nodes(&a_mat, a_half, chord, &mat, hw, chord, true);
                     draw_patch_outline(&mut draw, &patch, PREVIEW_COLOR);

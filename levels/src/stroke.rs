@@ -30,6 +30,8 @@
 //!   the prefab ("villa" = fences + buildings + a driveway under one
 //!   root) — see [`DuplicateSubtreeAction`].
 
+use std::sync::{Arc, Mutex};
+
 use redlilium_core::abstract_editor::{EditAction, EditActionError, EditActionResult};
 use redlilium_core::math::{Vec3, quat_from_rotation_y};
 use redlilium_ecs::{
@@ -456,6 +458,19 @@ pub(crate) fn gate_param_at(
     host: Entity,
     ray: &redlilium_ecs::ui::ViewportRay,
 ) -> Option<Gate> {
+    gate_param_dist(world, host, ray)
+        .filter(|(_, dist)| *dist <= GATE_DROP_RADIUS)
+        .map(|(gate, _)| gate)
+}
+
+/// [`gate_param_at`] without the reach cutoff: the closest master-path
+/// parameter and its ray distance, so callers comparing across hosts can
+/// pick the nearest one before thresholding.
+fn gate_param_dist(
+    world: &World,
+    host: Entity,
+    ray: &redlilium_ecs::ui::ViewportRay,
+) -> Option<(Gate, f32)> {
     let corners: Corners = corners_of(world, &host_points(world, host)?)?
         .into_iter()
         .map(|(_, p, h_out, h_in)| (p, h_out, h_in))
@@ -478,9 +493,6 @@ pub(crate) fn gate_param_at(
         }
     }
     let (dist, segment, t, along, side) = best?;
-    if dist > GATE_DROP_RADIUS {
-        return None;
-    }
     let along = Vec3::new(along.x, 0.0, along.z);
     if along.norm() < 1e-4 {
         return None;
@@ -488,11 +500,70 @@ pub(crate) fn gate_param_at(
     let along = along.normalize();
     let n = Vec3::new(-along.z, 0.0, along.x);
     let side = Vec3::new(side.x, 0.0, side.z);
-    Some(Gate {
-        segment: segment as u32,
-        t,
-        flip: side.dot(&n) < 0.0,
-    })
+    Some((
+        Gate {
+            segment: segment as u32,
+            t,
+            flip: side.dot(&n) < 0.0,
+        },
+        dist,
+    ))
+}
+
+/// The gate host (stroke or cut) whose master path passes closest to the
+/// cursor ray, within [`GATE_DROP_RADIUS`], with the drop parameter — the
+/// connect tool's "click a stroke or cut to dock the road" pick.
+pub(crate) fn gate_host_under_cursor(
+    world: &World,
+    ray: &redlilium_ecs::ui::ViewportRay,
+) -> Option<(Entity, Gate)> {
+    let mut hosts: Vec<Entity> = Vec::new();
+    if let Ok(strokes) = world.read_all::<Stroke>() {
+        hosts.extend(
+            strokes
+                .iter()
+                .filter_map(|(index, _)| world.entity_at_index(index)),
+        );
+    }
+    if let Ok(cuts) = world.read_all::<crate::cut::Cut>() {
+        hosts.extend(
+            cuts.iter()
+                .filter_map(|(index, _)| world.entity_at_index(index)),
+        );
+    }
+    let mut best: Option<(f32, Entity, Gate)> = None;
+    for host in hosts {
+        if let Some((gate, dist)) = gate_param_dist(world, host, ray)
+            && dist <= GATE_DROP_RADIUS
+            && best.as_ref().is_none_or(|(d, _, _)| dist < *d)
+        {
+            best = Some((dist, host, gate));
+        }
+    }
+    best.map(|(_, host, gate)| (host, gate))
+}
+
+/// The `flip` that makes a gate at `(segment, t)` face the world-space
+/// point `toward`. A road arriving from an anchor must meet the gate's
+/// front, and on a cut the facing also picks the lip the gate sits on —
+/// the road docking from the low side lands at the foot of the face.
+/// `None` when the tangent or the offset degenerates (the caller keeps
+/// its click-side facing then).
+pub(crate) fn gate_facing(world: &World, host: Entity, gate: &Gate, toward: Vec3) -> Option<bool> {
+    let corners: Corners = corners_of(world, &host_points(world, host)?)?
+        .into_iter()
+        .map(|(_, p, h_out, h_in)| (p, h_out, h_in))
+        .collect();
+    let i = (gate.segment as usize).min(corners.len() - 2);
+    let (p, tangent) = eval_segment(&corners, i, gate.t.clamp(0.0, 1.0));
+    let along = Vec3::new(tangent.x, 0.0, tangent.z);
+    if along.norm() < 1e-4 {
+        return None;
+    }
+    let along = along.normalize();
+    let n = Vec3::new(-along.z, 0.0, along.x);
+    let side = Vec3::new(toward.x - p.x, 0.0, toward.z - p.z);
+    (side.norm() > 1e-4).then(|| side.dot(&n) < 0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -815,19 +886,35 @@ impl EditAction<World> for AddStrokeAction {
 /// through the face (the stairs/ramp volume is the generator's). The
 /// transform is derived from the parameter at apply time and maintained
 /// by [`DeriveGates`] afterwards.
+///
+/// With a `from` node ([`with_road`](Self::with_road) — the connect
+/// tool's dock-while-drawing gesture) a road arrives at the fresh gate
+/// too; its meeting side is measured from the geometry, per the
+/// two-sided gate rule. The `report` hands the created gate back to the
+/// tool so a chain can grow out of it.
 #[derive(Debug)]
 pub struct AddGateAction {
     host: Entity,
     gate: Gate,
+    from: Option<Entity>,
     created: Option<Entity>,
+    created_road: Option<Entity>,
+    pub report: Arc<Mutex<Option<Entity>>>,
 }
 
 impl AddGateAction {
     pub fn new(host: Entity, gate: Gate) -> Self {
+        Self::with_road(host, gate, None)
+    }
+
+    pub fn with_road(host: Entity, gate: Gate, from: Option<Entity>) -> Self {
         Self {
             host,
             gate,
+            from,
             created: None,
+            created_road: None,
+            report: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -843,10 +930,11 @@ impl EditAction<World> for AddGateAction {
             .get::<GlobalTransform>(self.host)
             .map(|gt| gt.0)
             .ok_or_else(|| EditActionError::TargetNotFound("gate host has no transform".into()))?;
+        let world_m = parent_m * local.to_matrix();
         let gate = world.spawn();
         let inserted = world
             .insert(gate, local)
-            .and_then(|_| world.insert(gate, GlobalTransform(parent_m * local.to_matrix())))
+            .and_then(|_| world.insert(gate, GlobalTransform(world_m)))
             .and_then(|_| {
                 world.insert(
                     gate,
@@ -862,15 +950,51 @@ impl EditAction<World> for AddGateAction {
             return Err(EditActionError::Custom(e.to_string()));
         }
         set_parent(world, gate, self.host);
+
+        self.created_road = None;
+        if let Some(from) = self.from.filter(|f| world.is_alive(*f)) {
+            // Two-sided gate: the road meets whichever side `from` is on.
+            let b_from_front = world.get::<GlobalTransform>(from).is_none_or(|gt| {
+                let d = Vec3::new(
+                    gt.0[(0, 3)] - world_m[(0, 3)],
+                    0.0,
+                    gt.0[(2, 3)] - world_m[(2, 3)],
+                );
+                d.dot(&crate::bezier::heading(&world_m)) >= 0.0
+            });
+            let road = world.spawn();
+            let r = world.insert(
+                road,
+                crate::RoadSegment {
+                    a: from,
+                    b: gate,
+                    b_from_front,
+                    ..crate::RoadSegment::default()
+                },
+            );
+            if let Err(e) = r {
+                world.despawn(road);
+                remove_parent(world, gate);
+                world.despawn(gate);
+                return Err(EditActionError::Custom(e.to_string()));
+            }
+            self.created_road = Some(road);
+        }
+
         self.created = Some(gate);
+        *self.report.lock().expect("gate report") = Some(gate);
         Ok(())
     }
 
     fn undo(&mut self, world: &mut World) -> EditActionResult {
+        if let Some(road) = self.created_road.take() {
+            world.despawn(road);
+        }
         if let Some(gate) = self.created.take() {
             remove_parent(world, gate);
             world.despawn(gate);
         }
+        *self.report.lock().expect("gate report") = None;
         Ok(())
     }
 
@@ -1955,5 +2079,102 @@ mod tests {
         assert_eq!(stroke_path(&world, &component).unwrap().len(), 2);
         world.despawn(component.points[1]);
         assert!(stroke_path(&world, &component).is_none());
+    }
+
+    #[test]
+    fn gate_host_pick_finds_the_nearest_of_strokes_and_cuts() {
+        // A cut at the origin and a stroke far east — the connect tool's
+        // path pick must return whichever line the cursor is actually on.
+        let (mut world, cut, _) = world_with_cut();
+        AddStrokeAction::at_point(Vec3::new(30.0, 0.0, 0.0))
+            .apply(&mut world)
+            .unwrap();
+        let (stroke, _) = spawned_stroke(&world);
+
+        // Down-ray just north of the cut's middle segment (z = 0 path).
+        let on_cut = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(-3.0, 10.0, 0.5),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        let (host, gate) = gate_host_under_cursor(&world, &on_cut).expect("cut hit");
+        assert_eq!(host, cut);
+        assert_eq!(gate.segment, 0);
+        assert!(!gate.flip, "+Z toward the click side (north)");
+
+        // Down-ray on the stroke's front segment (x 26..34 at z = 0).
+        let on_stroke = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(30.0, 10.0, -0.5),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        let (host, gate) = gate_host_under_cursor(&world, &on_stroke).expect("stroke hit");
+        assert_eq!(host, stroke);
+        assert!(gate.flip, "+Z toward the click side (south)");
+
+        // Far from both lines: no target.
+        let off = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(15.0, 10.0, 15.0),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        assert!(gate_host_under_cursor(&world, &off).is_none());
+    }
+
+    #[test]
+    fn docking_a_road_onto_a_cut_faces_the_arrival_and_undoes_whole() {
+        // Default cut at the origin: path (−6,0,0)→(0,0,0)→(6,0,0),
+        // drop 2 — the dropped side is −Z. A road drawn from a node
+        // south of the cut docks INTO it: the facing follows the
+        // arriving road, which on a cut also picks the lower lip.
+        let (mut world, cut, _) = world_with_cut();
+        world.register_inspector_default::<crate::RoadSegment>();
+        let from = world.spawn();
+        let t = Transform::new(
+            Vec3::new(-3.0, -2.0, -10.0),
+            quat_from_rotation_y(0.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        world.insert(from, t).unwrap();
+        world.insert(from, GlobalTransform(t.to_matrix())).unwrap();
+        world.insert(from, crate::RoadNode::default()).unwrap();
+
+        let mut gate = Gate {
+            segment: 0,
+            t: 0.5,
+            flip: false,
+        };
+        gate.flip = gate_facing(&world, cut, &gate, t.translation).expect("facing");
+        assert!(gate.flip, "the gate faces the road arriving from −Z");
+
+        let mut action = AddGateAction::with_road(cut, gate, Some(from));
+        action.apply(&mut world).unwrap();
+        let gate_e = action.report.lock().unwrap().expect("gate reported");
+
+        // On the lower lip, facing the arrival.
+        let gt = *world.get::<Transform>(gate_e).unwrap();
+        assert!(
+            (gt.translation - Vec3::new(-3.0, -2.0, 0.0)).norm() < 1e-3,
+            "docked at the foot of the face, got {:?}",
+            gt.translation
+        );
+        let heading = crate::bezier::heading(&gt.to_matrix());
+        assert!((heading - Vec3::new(0.0, 0.0, -1.0)).norm() < 1e-3);
+
+        // One road, from → gate, met from the gate's front (the road
+        // comes from the side the gate faces).
+        let (road, segment) = world
+            .read_all::<crate::RoadSegment>()
+            .unwrap()
+            .iter()
+            .filter_map(|(index, s)| Some((world.entity_at_index(index)?, s.clone())))
+            .next()
+            .expect("road spawned with the gate");
+        assert_eq!(segment.a, from);
+        assert_eq!(segment.b, gate_e);
+        assert!(segment.b_from_front);
+
+        // Undo removes gate AND road, and clears the report.
+        action.undo(&mut world).unwrap();
+        assert!(!world.is_alive(gate_e));
+        assert!(!world.is_alive(road));
+        assert!(action.report.lock().unwrap().is_none());
     }
 }
