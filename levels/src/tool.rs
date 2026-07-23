@@ -91,12 +91,15 @@ impl ViewportTool for ConnectRoadsTool {
         let gate_hit = (hovered.is_none() && edge.is_none())
             .then(|| crate::stroke::gate_host_under_cursor(ctx.world, &ray))
             .flatten()
-            // Face the arriving road when an anchor is set — on a cut this
-            // also picks the lip the gate lands on.
+            // On a stroke, face the arriving road when an anchor is set.
+            // On a cut the click already chose the lip (and with it the
+            // facing) — the gate is two-sided, the road meets it from
+            // whichever side it comes.
             .map(|(host, mut gate)| {
-                if let Some(toward) = self
-                    .anchor
-                    .and_then(|a| crate::graph::node_center(ctx.world, a))
+                if ctx.world.get::<crate::cut::Cut>(host).is_none()
+                    && let Some(toward) = self
+                        .anchor
+                        .and_then(|a| crate::graph::node_center(ctx.world, a))
                     && let Some(flip) = crate::stroke::gate_facing(ctx.world, host, &gate, toward)
                 {
                     gate.flip = flip;

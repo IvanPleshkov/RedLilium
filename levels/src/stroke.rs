@@ -463,36 +463,76 @@ pub(crate) fn gate_param_at(
         .map(|(gate, _)| gate)
 }
 
-/// [`gate_param_at`] without the reach cutoff: the closest master-path
-/// parameter and its ray distance, so callers comparing across hosts can
-/// pick the nearest one before thresholding.
+/// [`gate_param_at`] without the reach cutoff: the closest path parameter
+/// and its ray distance, so callers comparing across hosts can pick the
+/// nearest one before thresholding.
+///
+/// **Both lips participate**: the ray is tested against the master path
+/// AND the derived (dropped) lip, and a clearly nearer lip decides
+/// `flip` — clicking the upper brink of a cut docks up top, clicking the
+/// foot docks below. When the lips coincide (a stroke, a crease) or the
+/// projection is ambiguous (a zero-offset cut seen straight from above),
+/// the click's horizontal side of the path decides, as before.
 fn gate_param_dist(
     world: &World,
     host: Entity,
     ray: &redlilium_ecs::ui::ViewportRay,
 ) -> Option<(Gate, f32)> {
-    let corners: Corners = corners_of(world, &host_points(world, host)?)?
+    let raw = corners_of(world, &host_points(world, host)?)?;
+    let profile: Vec<(f32, f32)> = raw
+        .iter()
+        .map(|(v, _, _, _)| {
+            world
+                .get::<crate::cut::CutVertex>(*v)
+                .map(|c| (c.drop, c.offset))
+                .unwrap_or((0.0, 0.0))
+        })
+        .collect();
+    let corners: Corners = raw
         .into_iter()
         .map(|(_, p, h_out, h_in)| (p, h_out, h_in))
         .collect();
     const STEPS: usize = 16;
-    let mut best: Option<(f32, usize, f32, Vec3, Vec3)> = None;
+    // `(distance, segment, t, along, side)` per lip.
+    type Best = Option<(f32, usize, f32, Vec3, Vec3)>;
+    let (mut upper, mut lower): (Best, Best) = (None, None);
     for i in 0..corners.len() - 1 {
+        let (d0, o0) = profile[i];
+        let (d1, o1) = profile[i + 1];
+        let lip = |t: f32| {
+            let (p, tangent) = eval_segment(&corners, i, t);
+            crate::cut::lip_point(p, tangent, d0 + (d1 - d0) * t, o0 + (o1 - o0) * t)
+        };
         let mut prev = eval_segment(&corners, i, 0.0).0;
+        let mut prev_lip = lip(0.0);
         for step in 1..=STEPS {
             let t1 = step as f32 / STEPS as f32;
             let next = eval_segment(&corners, i, t1).0;
-            let (dist, s, tr) = crate::tool::ray_segment_closest(ray, prev, next);
-            if best.is_none_or(|(d, _, _, _, _)| dist < d) {
-                let t = ((step - 1) as f32 + s) / STEPS as f32;
-                let on_segment = prev + (next - prev) * s;
-                let on_ray = ray.origin + ray.dir * tr;
-                best = Some((dist, i, t, next - prev, on_ray - on_segment));
+            let next_lip = lip(t1);
+            for (best, a, b) in [(&mut upper, prev, next), (&mut lower, prev_lip, next_lip)] {
+                let (dist, s, tr) = crate::tool::ray_segment_closest(ray, a, b);
+                if best.is_none_or(|(d, _, _, _, _)| dist < d) {
+                    let t = ((step - 1) as f32 + s) / STEPS as f32;
+                    let on_segment = a + (b - a) * s;
+                    let on_ray = ray.origin + ray.dir * tr;
+                    *best = Some((dist, i, t, b - a, on_ray - on_segment));
+                }
             }
             prev = next;
+            prev_lip = next_lip;
         }
     }
-    let (dist, segment, t, along, side) = best?;
+    let (u, l) = (upper?, lower?);
+    // A lip must be nearer by a clear margin to claim the click; roughly
+    // equal distances mean the lips coincide or overlap in projection.
+    const LIP_MARGIN: f32 = 0.25;
+    let (dist, segment, t, along, side, lip_flip) = if l.0 + LIP_MARGIN < u.0 {
+        (l.0, l.1, l.2, l.3, l.4, Some(true))
+    } else if u.0 + LIP_MARGIN < l.0 {
+        (u.0, u.1, u.2, u.3, u.4, Some(false))
+    } else {
+        (u.0.min(l.0), u.1, u.2, u.3, u.4, None)
+    };
     let along = Vec3::new(along.x, 0.0, along.z);
     if along.norm() < 1e-4 {
         return None;
@@ -504,7 +544,7 @@ fn gate_param_dist(
         Gate {
             segment: segment as u32,
             t,
-            flip: side.dot(&n) < 0.0,
+            flip: lip_flip.unwrap_or(side.dot(&n) < 0.0),
         },
         dist,
     ))
@@ -544,11 +584,11 @@ pub(crate) fn gate_host_under_cursor(
 }
 
 /// The `flip` that makes a gate at `(segment, t)` face the world-space
-/// point `toward`. A road arriving from an anchor must meet the gate's
-/// front, and on a cut the facing also picks the lip the gate sits on —
-/// the road docking from the low side lands at the foot of the face.
-/// `None` when the tangent or the offset degenerates (the caller keeps
-/// its click-side facing then).
+/// point `toward` — so a road arriving from an anchor meets the gate's
+/// front. For **strokes only**: on a cut `flip` picks the lip, and that
+/// choice belongs to the click (see [`gate_param_dist`]), not to where
+/// the road happens to come from. `None` when the tangent or the offset
+/// degenerates (the caller keeps its click-side facing then).
 pub(crate) fn gate_facing(world: &World, host: Entity, gate: &Gate, toward: Vec3) -> Option<bool> {
     let corners: Corners = corners_of(world, &host_points(world, host)?)?
         .into_iter()
@@ -2136,13 +2176,16 @@ mod tests {
         world.insert(from, GlobalTransform(t.to_matrix())).unwrap();
         world.insert(from, crate::RoadNode::default()).unwrap();
 
-        let mut gate = Gate {
-            segment: 0,
-            t: 0.5,
-            flip: false,
+        // The click lands south of the path — a zero-offset cut is
+        // ambiguous between lips from above, so the click side decides:
+        // the gate faces −Z and therefore sits on the lower lip.
+        let click = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(-3.0, 10.0, -0.5),
+            dir: Vec3::new(0.0, -1.0, 0.0),
         };
-        gate.flip = gate_facing(&world, cut, &gate, t.translation).expect("facing");
-        assert!(gate.flip, "the gate faces the road arriving from −Z");
+        let gate = gate_param_at(&world, cut, &click).expect("click on the cut");
+        assert_eq!(gate.segment, 0);
+        assert!(gate.flip, "south click docks on the dropped side");
 
         let mut action = AddGateAction::with_road(cut, gate, Some(from));
         action.apply(&mut world).unwrap();
@@ -2176,5 +2219,76 @@ mod tests {
         assert!(!world.is_alive(gate_e));
         assert!(!world.is_alive(road));
         assert!(action.report.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn clicking_a_lip_of_an_offset_cut_picks_that_lip() {
+        // Batter the default cut: drop 2, offset 1.5 — the lower lip runs
+        // at (x, −2, −1.5), clearly separated from the master path in
+        // projection. The clicked lip decides the gate placement; the
+        // horizontal side of the click no longer matters.
+        let (mut world, cut, component) = world_with_cut();
+        for &v in &component.points {
+            world
+                .insert(
+                    v,
+                    crate::cut::CutVertex {
+                        drop: 2.0,
+                        offset: 1.5,
+                    },
+                )
+                .unwrap();
+        }
+
+        // Straight-down ray over the lower lip → the foot of the face.
+        let on_lower = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(-3.0, 10.0, -1.5),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        let gate = gate_param_at(&world, cut, &on_lower).expect("lower lip hit");
+        assert!(gate.flip, "the foot click docks below");
+
+        // Over the upper brink: nearest the master path, so it docks up
+        // top — regardless of which horizontal side the cursor grazes.
+        // This is the fix for "I clicked the upper segment but only got
+        // the lower one".
+        let on_upper = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(-3.0, 10.0, 0.0),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        let gate = gate_param_at(&world, cut, &on_upper).expect("upper lip hit");
+        assert!(!gate.flip, "the brink click docks up top");
+
+        // The lower lip is pickable at its own position even when the
+        // master path is out of drop reach there.
+        let far_south = redlilium_ecs::ui::ViewportRay {
+            origin: Vec3::new(-3.0, 10.0, -3.4),
+            dir: Vec3::new(0.0, -1.0, 0.0),
+        };
+        let gate = gate_param_at(&world, cut, &far_south).expect("still within lower-lip reach");
+        assert!(gate.flip);
+    }
+
+    #[test]
+    fn gate_facing_turns_a_stroke_gate_toward_the_road() {
+        let mut world = world();
+        AddStrokeAction::at_point(Vec3::new(10.0, 0.0, 5.0))
+            .apply(&mut world)
+            .unwrap();
+        let (stroke, _) = spawned_stroke(&world);
+        let gate = Gate {
+            segment: 0,
+            t: 0.5,
+            flip: false,
+        };
+        // Front segment runs +X at z = 5: north (+Z) is the left normal.
+        assert_eq!(
+            gate_facing(&world, stroke, &gate, Vec3::new(10.0, 0.0, 20.0)),
+            Some(false)
+        );
+        assert_eq!(
+            gate_facing(&world, stroke, &gate, Vec3::new(10.0, 0.0, -20.0)),
+            Some(true)
+        );
     }
 }
