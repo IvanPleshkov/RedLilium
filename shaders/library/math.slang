@@ -1,5 +1,24 @@
 // RedLilium Shader Library - Math Module
 // Mathematical constants and utility functions.
+//
+// -----------------------------------------------------------------------------
+// Numeric-safety policy for shaders (#152) — read before adding any NaN/Inf guard.
+//
+// 1. Fix at the source. When an unbounded value (bake, lighting, emissive) is
+//    written into a bounded format (f16), clamp it there. Kill the bad value,
+//    not its symptom downstream.
+// 2. Guard only at trust boundaries — where data enters from something you do
+//    not control (loaded/external assets, the scene_color writers). Once a
+//    boundary guarantees finiteness, downstream passes may assume it; do not
+//    re-sanitize every pass (that hides where the real boundary is).
+// 3. NEVER test NaN/Inf with float ops. `x == x`, the `isnan()` intrinsic, and
+//    `min`/`max` NaN semantics are folded away by Metal fast-math on the
+//    Vulkan/MoltenVK path (and vary by backend), so the guard silently dies.
+//    Use the bit-test helpers here (`sanitize_finite`, `is_nan`) — integer ops
+//    survive fast-math on every backend.
+// 4. Put every finiteness invariant under a test (e.g. xtask's sky_cube finite
+//    scan). An unchecked invariant rots silently — that is why #152 lived so long.
+// -----------------------------------------------------------------------------
 
 // Pi constant.
 static const float PI = 3.14159265359;
