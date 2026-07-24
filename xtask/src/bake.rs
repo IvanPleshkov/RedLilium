@@ -339,7 +339,7 @@ fn bake_table() -> Result<Baked, String> {
                                 defines_label(defines)
                             )
                         })?;
-                    spirv.insert(key, (compiled, name));
+                    spirv.insert(key, (canonicalize_spirv(compiled), name));
                 } else {
                     let compiled = compiler
                         .compile_to_wgsl(&source, entry, &[], defines)
@@ -463,6 +463,59 @@ fn render_groups(
 
 fn baked_dest() -> PathBuf {
     workspace_root().join("graphics/src/shader/baked_generated.rs")
+}
+
+/// Canonicalize a SPIR-V module so bakes are byte-reproducible across
+/// platforms: Slang's platform builds emit annotation instructions
+/// (`OpDecorate` & friends) in differing orders — legal per spec
+/// (annotations are an unordered set) but fatal for the byte-exact
+/// staleness gate, which would ping-pong between two machines' bakes.
+/// Sorting each contiguous annotation run makes the blob canonical
+/// without changing semantics. Anything unparseable is returned
+/// untouched — the gate then compares exactly what Slang produced.
+fn canonicalize_spirv(bytes: Vec<u8>) -> Vec<u8> {
+    const MAGIC: u32 = 0x0723_0203;
+    // OpDecorate, OpMemberDecorate, OpDecorateId, OpDecorateString,
+    // OpMemberDecorateString — plain annotations with no ordering
+    // semantics. The deprecated group decorations (73..=75) are
+    // order-sensitive, so they end a sortable run instead of joining it.
+    const SORTABLE: [u32; 5] = [71, 72, 332, 5632, 5633];
+    if bytes.len() < 20 || !bytes.len().is_multiple_of(4) {
+        return bytes;
+    }
+    let words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    if words[0] != MAGIC {
+        return bytes;
+    }
+    let mut out: Vec<u32> = words[..5].to_vec();
+    let mut run: Vec<Vec<u32>> = Vec::new();
+    fn flush(out: &mut Vec<u32>, run: &mut Vec<Vec<u32>>) {
+        run.sort();
+        for inst in run.drain(..) {
+            out.extend(inst);
+        }
+    }
+    let mut i = 5;
+    while i < words.len() {
+        let len = (words[i] >> 16) as usize;
+        if len == 0 || i + len > words.len() {
+            return bytes; // malformed — leave it to fail loudly downstream
+        }
+        let opcode = words[i] & 0xffff;
+        let inst = words[i..i + len].to_vec();
+        if SORTABLE.contains(&opcode) {
+            run.push(inst);
+        } else {
+            flush(&mut out, &mut run);
+            out.extend(inst);
+        }
+        i += len;
+    }
+    flush(&mut out, &mut run);
+    out.into_iter().flat_map(u32::to_le_bytes).collect()
 }
 
 /// Run generated Rust through `rustfmt` so the emitted file is byte-identical to
@@ -657,5 +710,54 @@ pub fn run() {
             eprintln!("unknown task {other:?}; available: bake-shaders [--check]");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn module(instructions: &[&[u32]]) -> Vec<u8> {
+        let mut words = vec![0x0723_0203u32, 0x0001_0500, 0, 100, 0];
+        for inst in instructions {
+            words.extend_from_slice(inst);
+        }
+        words.into_iter().flat_map(u32::to_le_bytes).collect()
+    }
+
+    const OP_DECORATE: u32 = 71;
+    const OP_ENTRY_POINT: u32 = 15;
+
+    fn op(opcode: u32, operands: &[u32]) -> Vec<u32> {
+        let mut inst = vec![((operands.len() as u32 + 1) << 16) | opcode];
+        inst.extend_from_slice(operands);
+        inst
+    }
+
+    /// The cross-platform repro case: two adjacent `OpDecorate BuiltIn`
+    /// instructions arrive in either order depending on the Slang build —
+    /// both orders must canonicalize to the same bytes, and the pass must
+    /// be idempotent.
+    #[test]
+    fn decoration_order_canonicalizes_across_emission_orders() {
+        let a = op(OP_DECORATE, &[0x0b, 0x0b, 0x2b]);
+        let b = op(OP_DECORATE, &[0x0c, 0x0b, 0x1149]);
+        let head = op(OP_ENTRY_POINT, &[0, 2, 0x6e69616d]);
+        let one = canonicalize_spirv(module(&[&head, &a, &b]));
+        let two = canonicalize_spirv(module(&[&head, &b, &a]));
+        assert_eq!(one, two);
+        assert_eq!(canonicalize_spirv(one.clone()), one, "idempotent");
+        // Non-annotation instructions stay in place.
+        assert_eq!(one[20..24], (((4u32) << 16) | OP_ENTRY_POINT).to_le_bytes());
+    }
+
+    /// Anything that does not parse as SPIR-V passes through untouched.
+    #[test]
+    fn non_spirv_bytes_pass_through() {
+        let junk = b"not a module".to_vec();
+        assert_eq!(canonicalize_spirv(junk.clone()), junk);
+        // Truncated instruction (word count runs past the end).
+        let bad = module(&[&[(8u32 << 16) | OP_DECORATE, 1]]);
+        assert_eq!(canonicalize_spirv(bad.clone()), bad);
     }
 }
