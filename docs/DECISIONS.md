@@ -2687,3 +2687,74 @@ every authored texture and material.
   permutation economy (point 3).
 - Normal mapping remains open until the tangent decision; the convention
   (+Y, linear) is fixed now so authored content does not fork.
+
+## ADR-040: Display Mapping — White Point and Highlight Roll-off to Headroom
+
+**Status:** accepted (#154). Supersedes the placeholder HDR path
+(`clamp(color, 0, 10)`) that the scene-referred post stack (#142) left in
+`display_output.slang`.
+
+### Context
+
+The display-output pass turns scene-referred linear radiance into
+display-referred output. Its SDR path tonemaps with Khronos PBR Neutral; its
+HDR path was a placeholder that hard-clamped extended-linear radiance at a magic
+10× SDR white and handed off to the OS compositor, which then clipped at the
+panel peak. That is not "HDR" — highlights hard-clip at whatever the panel can
+show, with no shaped shoulder, and on an SDR-headroom EDR surface (every SDR Mac
+panel, and the HDR surface is the window default) highlights blow out relative
+to the SDR path. Auto-exposure (#153) is display-independent scene metering and
+must not carry any of this.
+
+### Decision
+
+1. **White point: paper-white = `1.0`, pinned.** Scene-referred `1.0` is SDR
+   white = diffuse/UI reference. Only highlights above `1.0` get the display's
+   extended range; mids, diffuse, and UI stay at the reference. Floating white
+   up toward peak would *destroy* contrast, not add it — pinning paper-white and
+   extending highlights to peak is how the full panel range and maximum contrast
+   are obtained.
+2. **Headroom `H` = peak / paper-white, in ×SDR-white units (`H ≥ 1`).** SDR is
+   the degenerate `H = 1`. The HDR path rolls highlights off toward `H` instead
+   of clamping. Curve: the existing PBR Neutral shoulder generalized so its
+   asymptote is `H` instead of `1.0`
+   (`new_peak = H − (H−c)²/(peak + H − 2c)`, knee `c = 0.76`), which reduces
+   *exactly* to the SDR curve at `H = 1` and, being max-channel with the
+   existing desaturation term, keeps highlights colorful (they climb toward `H`
+   rather than washing to white) — the naga/luma path was rejected as
+   incompatible with the `H = 1` reduction. Negatives are floored before the toe
+   (replacing the old clamp's implicit `max(0)`). Output stays extended-linear
+   (`1.0` = paper white, up to `H`); the compositor decodes the
+   extended-sRGB-linear surface. See `shaders/library/color.slang`
+   (`tonemap_pbr_neutral_headroom`) and its CPU mirror in `core/color.rs`.
+3. **`H` source is the real display, polled and smoothed, never a build knob.**
+   macOS: `NSScreen.maximumExtendedDynamicRangeColorComponentValue`
+   (`graphics::display`), which tracks the brightness slider continuously — so
+   the hosts poll it per frame and ease it (~150 ms) into the world's
+   `DisplayHeadroom` resource, which the deferred pass folds into
+   `DisplayOutputUniforms.exposure.z`. Windows: the window monitor's peak
+   luminance from DXGI (`IDXGIOutput6::GetDesc1().MaxLuminance`, nits) over the
+   scRGB reference white (80 nits) — the query is display-API, not swapchain, so
+   it is backend-independent like the macOS one. (Written and compile-checked
+   cross-target; **runtime-unverified** on Windows HDR hardware — the SDR-white
+   slider may shift the effective reference.) **Absent ⇒ `H = 1`**: headless,
+   tests, Linux, and any window with no HDR screen are display-independent, so
+   goldens never depend on a display query. (An env-var override was tried and
+   removed — display state does not belong in the environment.) Linux/Wayland
+   colour-management is a later step.
+
+### Consequences
+
+- SDR output is unchanged (the `#else` branch and its goldens are untouched;
+  the generalized curve at `H = 1` matches within one quantization step, guarded
+  by cross-format agreement).
+- Auto-exposure feeds the roll-off unchanged — its multiplier lands *before* the
+  tonemap, so it normalizes the scene into the frame where `1.0` is the anchor;
+  it never floats display white.
+- **egui / translucent UI over highlights is not yet addressed**: opaque UI is
+  correct (composited at `1.0` = SDR white into the linear-HDR swapchain), but a
+  translucent widget drawn over a highlight that now reaches `H` blends against a
+  >1 destination and can punch through the darkening layer. Left as a follow-up
+  (a translucent-over-highlight verification case).
+- **Wide gamut (DCI-P3 / Rec.2020) is a separate axis** (output primaries), out
+  of scope here — this ADR is only the luminance tone curve.

@@ -15,6 +15,16 @@ use redlilium_ecs::{
 
 use crate::EngineContext;
 
+/// Dynamic-uniform scratch each frame may consume, bytes (the ring reserves
+/// this much per in-flight frame — see [`FrameRing`]).
+///
+/// Every push is rounded up to a 256-byte dynamic-uniform alignment, so this is
+/// ~16k pushes per frame: one `ModelUniforms` per visible renderable per camera
+/// plus each camera's pass uniforms. Generous on purpose — overshooting costs
+/// only uniform memory, while undershooting drops uniforms for the rest of the
+/// frame (loudly logged).
+const GAME_FRAME_RING_BYTES: u64 = 4 << 20;
+
 /// Builder over the game world and its schedules.
 ///
 /// Created by the runtime after the graphics device exists; the game's
@@ -66,7 +76,7 @@ impl App {
         world.insert_resource(RenderSchedule::empty());
         world.insert_resource(ScenePass::default());
         world.insert_resource(PipelineRegistry::default());
-        let frame_ring = FrameRing::new(engine.device(), 1 << 20, "game_frame_ring")
+        let frame_ring = FrameRing::new(engine.device(), GAME_FRAME_RING_BYTES, "game_frame_ring")
             .expect("failed to create game frame ring");
         world.insert_resource(frame_ring);
         let window_input = world.insert_resource(WindowInput::default());

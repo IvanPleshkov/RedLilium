@@ -68,6 +68,11 @@ pub fn draw_play_controls(ui: &mut egui::Ui, play_state: PlayState) -> Option<Pl
 
 /// Tier-1 build status for the titlebar indicator (ADR-037) — a compact
 /// mirror of `remote_commands::GameStatus`'s behavior-reload fields.
+///
+/// Consumed only by the macOS custom-titlebar toolbar, so it reads as dead
+/// code on other platforms; allowed there rather than `cfg`-gated so the item
+/// stays available if the indicator moves cross-platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub struct GameBuildStatus {
     pub stale: bool,
@@ -77,6 +82,7 @@ pub struct GameBuildStatus {
 }
 
 /// What the user asked for through the game-build indicator.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameBuildAction {
     /// Rebuild the game cdylib (Tier 1).
@@ -88,6 +94,7 @@ pub enum GameBuildAction {
 /// Draw the game-build indicator: a rebuild button when sources went stale,
 /// progress while cargo runs, a restart button when only a process restart
 /// helps, and the schema-divergence warning.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn draw_game_build_indicator(
     ui: &mut egui::Ui,
     status: GameBuildStatus,

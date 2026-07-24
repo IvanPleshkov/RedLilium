@@ -6,10 +6,10 @@ use redlilium_ecs::sync::RwLock;
 
 use redlilium_assets::{AssetDb, AssetProcessor};
 use redlilium_ecs::{
-    ChangedAssets, GameGenerationRegistry, MaterialAssetManager, MaterialInstanceLoader,
-    MaterialInstanceManager, MaterialLoader, MeshLoader, MeshManager, PipelineCache, ShaderLoader,
-    ShaderManager, ShadingRegistry, TextureLoader, TextureManager, VertexLayoutLoader,
-    VertexLayoutManager, World,
+    ChangedAssets, EnvironmentLoader, EnvironmentManager, GameGenerationRegistry,
+    MaterialAssetManager, MaterialInstanceLoader, MaterialInstanceManager, MaterialLoader,
+    MeshLoader, MeshManager, PipelineCache, ShaderLoader, ShaderManager, ShadingRegistry,
+    TextureLoader, TextureManager, VertexLayoutLoader, VertexLayoutManager, World,
 };
 use redlilium_graphics::GraphicsDevice;
 use redlilium_vfs::Vfs;
@@ -39,6 +39,7 @@ pub struct EngineContext {
     shading: Arc<RwLock<ShadingRegistry>>,
     materials: Arc<RwLock<MaterialAssetManager>>,
     material_instances: Arc<RwLock<MaterialInstanceManager>>,
+    environments: Arc<RwLock<EnvironmentManager>>,
     pipelines: Arc<RwLock<PipelineCache>>,
     changed_assets: Arc<RwLock<ChangedAssets>>,
     processor: Arc<RwLock<AssetProcessor>>,
@@ -130,6 +131,7 @@ impl EngineContext {
             .with_loader::<MaterialLoader>()
             .with_loader::<MaterialInstanceLoader>()
             .with_loader::<TextureLoader>()
+            .with_loader::<EnvironmentLoader>()
             .with_loader::<redlilium_ecs::SceneLoader>()
             .build();
 
@@ -141,6 +143,7 @@ impl EngineContext {
             shading: Arc::new(RwLock::new(ShadingRegistry::with_builtins())),
             materials: Arc::new(RwLock::new(MaterialAssetManager::new())),
             material_instances: Arc::new(RwLock::new(MaterialInstanceManager::new(device.clone()))),
+            environments: Arc::new(RwLock::new(EnvironmentManager::new())),
             pipelines: Arc::new(RwLock::new(PipelineCache::new(device.clone()))),
             changed_assets: Arc::new(RwLock::new(ChangedAssets::new())),
             processor: Arc::new(RwLock::new(processor)),
@@ -221,6 +224,7 @@ impl EngineContext {
         world.insert_resource_shared(self.shading.clone());
         world.insert_resource_shared(self.materials.clone());
         world.insert_resource_shared(self.material_instances.clone());
+        world.insert_resource_shared(self.environments.clone());
         world.insert_resource_shared(self.pipelines.clone());
         world.insert_resource_shared(self.changed_assets.clone());
         world.insert_resource_shared(self.processor.clone());

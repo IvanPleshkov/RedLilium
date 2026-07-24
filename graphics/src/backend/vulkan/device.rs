@@ -59,6 +59,13 @@ pub struct OptionalFeatures {
     /// `descriptorBindingUpdateUnusedWhilePending`, and
     /// `shaderSampledImageArrayNonUniformIndexing`. All-or-nothing.
     pub bindless: bool,
+    /// Present pacing: `VK_KHR_present_id` + `VK_KHR_present_wait` with both
+    /// feature bits. Lets the swapchain tag each present with an id and block
+    /// until a given id has actually reached the display, bounding how deep
+    /// the present queue can grow under FIFO (see
+    /// `swapchain::present_vulkan_frame`). Both or nothing — the wait is
+    /// meaningless without the id.
+    pub present_wait: bool,
 }
 
 /// GPU crash breadcrumb extensions the device advertises (#97).
@@ -354,6 +361,7 @@ pub fn select_physical_device(
                         ray_query: ray_query_supported(instance, device, &extensions),
                         mesh_shading: mesh_shading_supported(instance, device, &extensions),
                         bindless: bindless_supported(instance, device),
+                        present_wait: present_wait_supported(instance, device, &extensions),
                     },
                     breadcrumbs,
                     portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
@@ -431,6 +439,31 @@ fn mesh_shading_supported(
     unsafe { instance.get_physical_device_features2(device, &mut features2) };
 
     mesh.task_shader == vk::TRUE && mesh.mesh_shader == vk::TRUE
+}
+
+/// Whether the device supports present pacing: `VK_KHR_present_id` +
+/// `VK_KHR_present_wait` with both feature bits. Queried during selection so
+/// `vkCreateDevice` never sees a feature the device did not report. Drives
+/// the swapchain's bounded present queue (see
+/// `swapchain::present_vulkan_frame`).
+fn present_wait_supported(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+    extensions: &HashSet<Vec<u8>>,
+) -> bool {
+    let has_ext = |name: &CStr| extensions.contains(name.to_bytes());
+    if !has_ext(ash::khr::present_id::NAME) || !has_ext(ash::khr::present_wait::NAME) {
+        return false;
+    }
+
+    let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
+    let mut present_wait = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut present_id)
+        .push_next(&mut present_wait);
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    present_id.present_id == vk::TRUE && present_wait.present_wait == vk::TRUE
 }
 
 /// Whether the device supports the bindless-heap bundle (#117): the five
@@ -694,6 +727,14 @@ pub fn create_logical_device(
     if selected.optional.mesh_shading {
         device_extensions.push(ash::ext::mesh_shader::NAME.as_ptr());
     }
+    // Present pacing: id-tagged presents + a CPU wait on actual scanout, used
+    // by the swapchain to bound the present queue under FIFO. Only meaningful
+    // with a swapchain at all.
+    let enable_present_wait = enable_swapchain && selected.optional.present_wait;
+    if enable_present_wait {
+        device_extensions.push(ash::khr::present_id::NAME.as_ptr());
+        device_extensions.push(ash::khr::present_wait::NAME.as_ptr());
+    }
     // GPU crash breadcrumbs (#97): the vendor extensions (NV checkpoints, AMD
     // buffer marker) and device-fault reporting, enabled only when breadcrumbs
     // are on so the happy path adds no extensions. The portable fallback needs
@@ -771,6 +812,12 @@ pub fn create_logical_device(
     let enable_device_fault = enable_breadcrumbs && selected.breadcrumbs.device_fault;
     let mut fault_features = vk::PhysicalDeviceFaultFeaturesEXT::default().device_fault(true);
 
+    // Present-pacing feature structs — chained only when supported.
+    let mut present_id_features =
+        vk::PhysicalDevicePresentIdFeaturesKHR::default().present_id(true);
+    let mut present_wait_features =
+        vk::PhysicalDevicePresentWaitFeaturesKHR::default().present_wait(true);
+
     let mut create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extensions)
@@ -791,6 +838,11 @@ pub fn create_logical_device(
     }
     if selected.optional.mesh_shading {
         create_info = create_info.push_next(&mut mesh_shader_features);
+    }
+    if enable_present_wait {
+        create_info = create_info
+            .push_next(&mut present_id_features)
+            .push_next(&mut present_wait_features);
     }
 
     let device = unsafe { instance.create_device(selected.physical_device, &create_info, None) }

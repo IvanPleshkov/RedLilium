@@ -40,6 +40,10 @@ const BRDF_MODULE: &str = include_str!("../../../shaders/library/brdf.slang");
 /// Image-based lighting utilities (Slang).
 const IBL_MODULE: &str = include_str!("../../../shaders/library/ibl.slang");
 
+/// Screen-space motion / reprojection helpers shared by the temporal passes
+/// (TAA #148, motion blur #149) (Slang).
+const MOTION_MODULE: &str = include_str!("../../../shaders/library/motion.slang");
+
 /// Complete egui shader with vertex and fragment entry points (Slang).
 /// Entry points: `vs_main` (vertex) and `fs_main` (fragment).
 /// Use `EGUI_SHADER_SOURCE` to access the full shader for rendering.
@@ -74,6 +78,7 @@ impl ShaderLibrary {
                 ("color", COLOR_MODULE),
                 ("brdf", BRDF_MODULE),
                 ("ibl", IBL_MODULE),
+                ("motion", MOTION_MODULE),
             ],
         }
     }
@@ -106,12 +111,13 @@ mod tests {
         let library = ShaderLibrary::standard_slang();
         let modules: Vec<_> = library.modules().collect();
 
-        assert_eq!(modules.len(), 5);
+        assert_eq!(modules.len(), 6);
         assert!(modules.iter().any(|(name, _)| *name == "engine"));
         assert!(modules.iter().any(|(name, _)| *name == "math"));
         assert!(modules.iter().any(|(name, _)| *name == "color"));
         assert!(modules.iter().any(|(name, _)| *name == "brdf"));
         assert!(modules.iter().any(|(name, _)| *name == "ibl"));
+        assert!(modules.iter().any(|(name, _)| *name == "motion"));
     }
 
     #[test]

@@ -17,10 +17,10 @@ use crate::{DebugDrawer, DebugDrawerRenderer, ExclusiveSystem, System, SystemCon
 use super::pipeline::{CameraRenderPipeline, CameraView, PipelineRegistry, RecordCtx};
 use super::scene_drawer::VisibleScene;
 use super::{
-    CameraOutput, CameraTarget, CameraTargetSpec, FORWARD_PIPELINE, FrameRing, MainViewport,
-    MaterialAssetManager, MaterialInstanceManager, MeshManager, PipelineCache, RenderPath,
-    RenderSchedule, ShaderManager, ShadingRegistry, SizePolicy, TemporalJitter, TemporalState,
-    TextureManager, VertexLayoutManager, jitter_pixels,
+    CameraOutput, CameraTarget, CameraTargetSpec, EnvironmentManager, FORWARD_PIPELINE, FrameRing,
+    MainViewport, MaterialAssetManager, MaterialInstanceManager, MeshManager, PipelineCache,
+    RenderPath, RenderSchedule, ShaderManager, ShadingRegistry, SizePolicy, TemporalJitter,
+    TemporalState, TextureManager, VertexLayoutManager, jitter_pixels,
 };
 
 /// Apply a sub-pixel jitter to a view-projection: a clip-space translation
@@ -311,6 +311,12 @@ impl System for CameraRender {
             state.frame()
         });
 
+        // Hand this frame its own region of the uniform ring, once per frame and
+        // before any pass records a push. Every `FrameRing::push` in the engine
+        // runs underneath this dispatcher (both pipelines' `record` and
+        // `VisibleScene::gather`), so this is the one place that has to know.
+        world.resource_mut::<FrameRing>().begin_frame();
+
         // Every entity with a Camera AND a CameraTarget renders (ADR-029):
         // its RenderPath's pipeline records into its own target. Offscreen
         // cameras are emitted first, the primary (screen) camera last — so
@@ -581,9 +587,10 @@ impl System for EguiRender {
 /// systems (e.g., `UpdateGlobalTransforms`) under the multi-threaded runner.
 #[derive(Default)]
 pub struct MeshLoad {
-    /// Manager generations at the previous scan. Used to gate: unchanged generations
-    /// → skip the expensive scan pass.
-    last_gens: Option<[u64; 3]>,
+    /// Manager generations at the previous scan (mesh, instance, texture,
+    /// environment). Used to gate: unchanged generations → skip the expensive
+    /// scan pass.
+    last_gens: Option<[u64; 4]>,
 }
 
 impl ExclusiveSystem for MeshLoad {
@@ -591,7 +598,9 @@ impl ExclusiveSystem for MeshLoad {
     fn run(&mut self, world: &mut World) -> Result<Self::Result, SystemError> {
         use redlilium_assets::AssetRef;
 
-        use super::loaders::{MaterialInstanceSource, MeshSource, TextureSource};
+        use super::loaders::{
+            EnvironmentSource, MaterialInstanceSource, MeshSource, TextureSource,
+        };
 
         if !world.has_resource::<MeshManager>()
             || !world.has_resource::<VertexLayoutManager>()
@@ -614,11 +623,15 @@ impl ExclusiveSystem for MeshLoad {
         let mut texture_mgr = world
             .has_resource::<TextureManager>()
             .then(|| world.resource_mut::<TextureManager>());
+        let mut env_mgr = world
+            .has_resource::<EnvironmentManager>()
+            .then(|| world.resource_mut::<EnvironmentManager>());
 
         let gens = [
             mesh_mgr.generation(),
             instance_mgr.as_ref().map_or(0, |m| m.generation()),
             texture_mgr.as_ref().map_or(0, |m| m.generation()),
+            env_mgr.as_ref().map_or(0, |m| m.generation()),
         ];
         let changed = self.last_gens != Some(gens);
         self.last_gens = Some(gens);
@@ -651,6 +664,14 @@ impl ExclusiveSystem for MeshLoad {
                     Some(_) => {}
                     None => texture_mgr.request(r.source()),
                 }
+            } else if let Some(r) = any.downcast_ref::<AssetRef<EnvironmentSource>>()
+                && let Some(env_mgr) = env_mgr.as_mut()
+            {
+                match env_mgr.get(r.source().guid) {
+                    Some(env) if !r.is_current(env) => stale.push((component, idx)),
+                    Some(_) => {}
+                    None => env_mgr.request(r.source()),
+                }
             }
         });
 
@@ -676,6 +697,12 @@ impl ExclusiveSystem for MeshLoad {
                     && !r.is_current(texture)
                 {
                     r.resolve(texture.clone());
+                } else if let Some(r) = any.downcast_mut::<AssetRef<EnvironmentSource>>()
+                    && let Some(env_mgr) = env_mgr.as_mut()
+                    && let Some(env) = env_mgr.get(r.source().guid)
+                    && !r.is_current(env)
+                {
+                    r.resolve(env.clone());
                 }
             });
         }
@@ -722,6 +749,13 @@ impl System for MaterialInstanceLoad {
             &mut texture_mgr,
             &registry,
         );
+        // IBL environments (#145) resolve against the same textures — drive
+        // them here too, while the texture manager is already locked.
+        if world.has_resource::<EnvironmentManager>() {
+            world
+                .resource_mut::<EnvironmentManager>()
+                .drive(&mut processor, &db, &mut texture_mgr);
+        }
         Ok(())
     }
 }
@@ -773,6 +807,9 @@ impl System for HotReload {
                     world
                         .resource_mut::<MaterialInstanceManager>()
                         .invalidate(guid);
+                }
+                "environment" if world.has_resource::<EnvironmentManager>() => {
+                    world.resource_mut::<EnvironmentManager>().invalidate(guid);
                 }
                 _ => {}
             }

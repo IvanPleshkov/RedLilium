@@ -140,6 +140,17 @@ impl ScheduleId {
 // Time resource
 // ---------------------------------------------------------------------------
 
+/// The wall-clock CPU delta between frame starts, in seconds, *before* the
+/// host's frame pacing produced the delta that drives [`Time`].
+///
+/// Inserted each frame by hosts that pace their frame delta (the runtime,
+/// #149). Under a blocking present (vsync) the two can differ wildly frame to
+/// frame — the CPU wakes at scheduler-jittered instants and bursts after the
+/// present queue drains — so this is a diagnostic for frame-timing HUDs and
+/// logs. Motion and simulation must use [`Time`]. Absent when the host does
+/// not pace (or predates pacing); consumers must tolerate that.
+pub struct RawFrameDelta(pub f64);
+
 /// Time resource providing frame timing information to systems.
 ///
 /// Inserted into the [`World`] automatically by [`Schedules::run_frame`].
@@ -156,6 +167,14 @@ pub struct Time {
     elapsed: f64,
     /// The configured fixed timestep interval.
     fixed_delta: f64,
+    /// Exponentially-smoothed frame delta (tau ~= 0.15 s). A *stable* reference
+    /// interval for consumers that must not strobe under frame-time jitter
+    /// (the motion-blur shutter, #149) — deliberately separate from the
+    /// truthful [`frame_delta`](Self::frame_delta) that drives motion.
+    smoothed_frame_delta: f64,
+    /// Leftover accumulator as a `[0, 1)` fraction of the fixed step — the
+    /// blend factor for interpolating rendered poses between fixed steps.
+    fixed_alpha: f64,
 }
 
 impl Time {
@@ -166,6 +185,8 @@ impl Time {
             frame_delta: 0.0,
             elapsed: 0.0,
             fixed_delta,
+            smoothed_frame_delta: 0.0,
+            fixed_alpha: 0.0,
         }
     }
 
@@ -201,6 +222,25 @@ impl Time {
     /// Returns the configured fixed timestep interval.
     pub fn fixed_delta(&self) -> f64 {
         self.fixed_delta
+    }
+
+    /// Frame delta smoothed over ~a few frames (EMA, tau ~= 0.15 s).
+    ///
+    /// Unlike [`frame_delta`](Self::frame_delta) — which stays truthful because
+    /// it drives motion — this is a *stable* reference interval for consumers
+    /// that must be robust to frame-time jitter (the motion-blur shutter, #149,
+    /// scales by `smoothed_frame_delta / frame_delta` so blur length tracks a
+    /// steady clock instead of strobing with the vsync beat).
+    pub fn smoothed_frame_delta(&self) -> f64 {
+        self.smoothed_frame_delta
+    }
+
+    /// Fraction of the next fixed step already accumulated but not yet
+    /// simulated, in `[0, 1)`. This is the blend factor for interpolating
+    /// rendered poses between the two most recent fixed steps, so rendering
+    /// stays smooth when the render rate and the fixed physics rate disagree.
+    pub fn fixed_alpha(&self) -> f64 {
+        self.fixed_alpha
     }
 }
 
@@ -420,6 +460,16 @@ impl Schedules {
             time.frame_delta = delta_time;
             time.elapsed += delta_time;
             time.fixed_delta = self.fixed_timestep;
+            // Smoothed frame delta (jitter-robust reference for the MB shutter,
+            // #149). Seed on the first frame; otherwise EMA at tau ~= 0.15 s
+            // (dt-correct alpha) — averages ~6-15 frames, well above the 2-frame
+            // vsync beat but tracking a genuine sustained fps change in ~0.3 s.
+            if time.smoothed_frame_delta <= 0.0 {
+                time.smoothed_frame_delta = delta_time;
+            } else {
+                let alpha = 1.0 - (-delta_time / 0.15).exp();
+                time.smoothed_frame_delta += (delta_time - time.smoothed_frame_delta) * alpha;
+            }
         }
 
         // 2. Swap reactive trigger buffers and advance event queues exactly
@@ -477,6 +527,14 @@ impl Schedules {
             // to prevent unbounded growth.
             self.fixed_accumulator %= self.fixed_timestep;
         }
+
+        // Publish the leftover accumulator as a [0, 1) blend factor for
+        // render-side interpolation between fixed steps.
+        world.resource_mut::<Time>().fixed_alpha = if self.fixed_timestep > 0.0 {
+            self.fixed_accumulator / self.fixed_timestep
+        } else {
+            0.0
+        };
 
         // Restore effective delta to frame delta
         world.resource_mut::<Time>().delta = delta_time;

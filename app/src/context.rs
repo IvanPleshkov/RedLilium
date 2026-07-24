@@ -35,6 +35,9 @@ pub struct AppContext {
     pub(crate) frame_number: u64,
     /// Delta time since last frame in seconds.
     pub(crate) delta_time: f32,
+    /// Wall-clock CPU delta between frame starts in seconds, *before* frame
+    /// pacing (see [`crate::pacing`]). Diagnostic — motion uses `delta_time`.
+    pub(crate) raw_delta_time: f32,
     /// Time since application start in seconds.
     pub(crate) elapsed_time: f32,
     /// The surface texture format being used.
@@ -115,6 +118,18 @@ impl AppContext {
     /// Get the delta time since last frame in seconds.
     pub fn delta_time(&self) -> f32 {
         self.delta_time
+    }
+
+    /// Get the wall-clock CPU delta between frame starts in seconds, before
+    /// frame pacing (see [`crate::pacing`]).
+    ///
+    /// Under a blocking present (vsync) this differs from
+    /// [`delta_time`](Self::delta_time): the CPU wakes at scheduler-jittered
+    /// instants and bursts after the present queue drains, while the paced
+    /// delta estimates the interval the frame is actually displayed for.
+    /// Diagnostic — motion and simulation must use the paced delta.
+    pub fn raw_delta_time(&self) -> f32 {
+        self.raw_delta_time
     }
 
     /// Get the elapsed time since application start in seconds.
@@ -222,6 +237,12 @@ impl<'a> DrawContext<'a> {
     /// Get the delta time since last frame in seconds.
     pub fn delta_time(&self) -> f32 {
         self.app.delta_time
+    }
+
+    /// Get the wall-clock CPU delta before frame pacing, in seconds
+    /// (see [`AppContext::raw_delta_time`]).
+    pub fn raw_delta_time(&self) -> f32 {
+        self.app.raw_delta_time
     }
 
     /// Get the elapsed time since application start in seconds.

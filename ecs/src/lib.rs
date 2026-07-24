@@ -135,8 +135,8 @@ pub use system::{
     run_read_only_exclusive_system_blocking, run_system_blocking, run_system_once,
 };
 pub use system::{
-    FixedUpdate, PostUpdate, PreUpdate, Render, ScheduleId, ScheduleLabel, Schedules, Startup,
-    Time, Update,
+    FixedUpdate, PostUpdate, PreUpdate, RawFrameDelta, Render, ScheduleId, ScheduleLabel,
+    Schedules, Startup, Time, Update,
 };
 pub use system::{
     ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
@@ -192,18 +192,21 @@ pub use self::std::scene::{
 pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 #[cfg(feature = "rendering")]
 pub use rendering::{
-    AssetDragPayload, AssetRef, AssetRefSource, CameraExposure, CameraOutput, CameraRender,
+    AssetDragPayload, AssetRef, AssetRefSource, CameraAmbientOcclusion, CameraAutoExposure,
+    CameraBloom, CameraEnvironment, CameraExposure, CameraOutput, CameraRender,
     CameraRenderPipeline, CameraTarget, CameraTargetSpec, CameraView, ChangedAssets,
-    DEFERRED_PIPELINE, DebugRender, DeferredPipeline, DirtyMounts, DrawArgs, EguiRender,
-    EnsureCameraTargets, FORWARD_PIPELINE, FlushUploads, ForwardPipeline, FrameRing, FrameTarget,
+    DEFERRED_PIPELINE, DebugRender, DeferredPipeline, DirtyMounts, DisplayHeadroom, DrawArgs,
+    EguiRender, EnsureCameraTargets, EnvironmentData, EnvironmentLoader, EnvironmentManager,
+    EnvironmentSource, FORWARD_PIPELINE, FlushUploads, ForwardPipeline, FrameRing, FrameTarget,
     HotReload, MainViewport, MaterialAssetManager, MaterialInstanceData, MaterialInstanceLoad,
     MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource, MaterialLoader,
-    MeshLoad, MeshManager, MeshRenderer, NewAssetSpec, OutputFormat, PipelineCache,
+    MeshLoad, MeshManager, MeshRenderer, MotionBlur, NewAssetSpec, OutputFormat, PipelineCache,
     PipelineRegistry, PipelineTargets, Primitive, PropValue, RecordCtx, RenderPath, RenderPhase,
-    RenderSchedule, SceneDrawer, ScenePass, SetAssetReferenceAction, SetAssetSettingsAction,
-    Shader, ShaderLoader, ShaderManager, ShaderSource, ShadingRegistry, SizePolicy, TemporalJitter,
-    TemporalState, TextureManager, VisibleScene, asset_drop_target, inspect_asset_settings,
-    new_asset_spec, reference_accepted_kind, register_rendering_components, shaders,
+    RenderSchedule, ResolvedEnvironment, STD_ENVIRONMENT, SceneDrawer, ScenePass,
+    SetAssetReferenceAction, SetAssetSettingsAction, Shader, ShaderLoader, ShaderManager,
+    ShaderSource, ShadingRegistry, SizePolicy, TemporalJitter, TemporalState, TextureManager,
+    VisibleScene, asset_drop_target, inspect_asset_settings, new_asset_spec,
+    reference_accepted_kind, register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.
@@ -253,6 +256,7 @@ pub fn register_std_components(world: &mut World) {
         world.register_inspector::<physics::components3d::ImpulseJoint3D>();
         world.register_component::<physics::physics3d::RigidBody3DHandle>();
         world.register_component::<physics::physics3d::ImpulseJoint3DHandle>();
+        world.register_component::<physics::physics3d::PhysicsInterpolation>();
     }
     #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
     {

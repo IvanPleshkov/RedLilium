@@ -54,17 +54,18 @@ pub use asset_drag::{AssetDragPayload, asset_drop_target};
 pub use asset_inspect::{NewAssetSpec, new_asset_spec};
 pub use asset_inspect::{inspect_asset_settings, reference_accepted_kind};
 pub use components::{
-    CameraExposure, CameraOutput, CameraTarget, CameraTargetSpec, DEFERRED_PIPELINE,
-    FORWARD_PIPELINE, MeshRenderer, OutputFormat, PipelineTargets, Primitive, RenderPath,
-    SizePolicy, TemporalJitter,
+    CameraAmbientOcclusion, CameraAutoExposure, CameraBloom, CameraEnvironment, CameraExposure,
+    CameraOutput, CameraTarget, CameraTargetSpec, DEFERRED_PIPELINE, FORWARD_PIPELINE,
+    MeshRenderer, MotionBlur, OutputFormat, PipelineTargets, Primitive, RenderPath,
+    STD_ENVIRONMENT, SizePolicy, TemporalJitter,
 };
-pub use deferred::DeferredPipeline;
+pub use deferred::{DeferredPipeline, DisplayHeadroom};
 #[cfg(feature = "rendering")]
 pub use loaders::{
-    MaterialData, MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource,
-    MaterialLoader, MaterialSource, MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader,
-    ShaderSource, TextureLoader, TextureSettings, TextureSource, VertexLayoutLoader,
-    VertexLayoutSource,
+    EnvironmentData, EnvironmentLoader, EnvironmentSource, MaterialData, MaterialInstanceData,
+    MaterialInstanceLoader, MaterialInstanceSource, MaterialLoader, MaterialSource, MeshGenerator,
+    MeshLoader, MeshSource, Shader, ShaderLoader, ShaderSource, TextureLoader, TextureSettings,
+    TextureSource, VertexLayoutLoader, VertexLayoutSource,
 };
 pub use pipeline::{
     CameraRenderPipeline, CameraView, ForwardPipeline, PipelineRegistry, RecordCtx,
@@ -73,8 +74,9 @@ pub use pipeline::{
 pub use redlilium_assets::{AssetRef, AssetRefSource};
 #[cfg(feature = "rendering")]
 pub use resources::{
-    ChangedAssets, MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
-    ResolvedMaterial, ResolvedTexture, ShaderManager, VertexLayoutManager,
+    ChangedAssets, EnvironmentManager, MaterialAssetManager, MaterialInstanceManager,
+    PipelineCache, ResolvedEnvironment, ResolvedInstance, ResolvedMaterial, ResolvedTexture,
+    ShaderManager, VertexLayoutManager,
 };
 pub use resources::{
     FrameRing, MainViewport, MeshManager, RenderSchedule, TemporalState, TextureManager,
@@ -106,7 +108,12 @@ pub fn register_rendering_components(world: &mut World) {
     world.register_inspector::<CameraOutput>();
     world.register_inspector::<RenderPath>();
     world.register_inspector_default::<CameraExposure>();
+    world.register_inspector_default::<CameraAmbientOcclusion>();
+    world.register_inspector_default::<CameraBloom>();
+    world.register_inspector_default::<CameraAutoExposure>();
     world.register_inspector_default::<TemporalJitter>();
+    world.register_inspector_default::<MotionBlur>();
+    world.register_inspector_default::<CameraEnvironment>();
     world.register_component::<CameraTarget>();
     world.register_component::<PipelineTargets>();
 }

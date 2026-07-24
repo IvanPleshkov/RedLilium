@@ -1,5 +1,6 @@
 //! Main application struct and event loop.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use web_time::Instant;
@@ -21,6 +22,7 @@ use redlilium_graphics::{
 use crate::args::{AppArgs, WindowMode};
 use crate::context::{AppContext, DrawContext};
 use crate::handler::AppHandler;
+use crate::pacing::FramePacer;
 
 /// Main application struct that manages the window and graphics.
 ///
@@ -63,9 +65,29 @@ where
     prebuilt_instance: Option<Arc<GraphicsInstance>>,
     start_time: Instant,
     last_frame_time: Instant,
+    /// Turns the CPU-sampled frame delta into the interval the frame is
+    /// actually displayed for (see [`crate::pacing`]).
+    pacer: FramePacer,
+    /// Last few raw frame deltas, logged around a hitch so the cadence that
+    /// led up to it (present-queue refill bursts) is visible at debug level.
+    recent_raw_deltas: VecDeque<f32>,
+    /// Previous frame's phase timings in ms — update, acquire, fence wait,
+    /// draw+present — logged with a hitch to show where that frame slept.
+    last_phase_ms: [f32; 4],
+    /// Frames since the display period was last read from the monitor.
+    frames_since_monitor_probe: u32,
     running: bool,
     initialized: bool,
 }
+
+/// How often to re-read the monitor's refresh rate, in frames — often enough to
+/// follow a monitor or mode change, rarely enough to stay off the frame path.
+const MONITOR_PROBE_INTERVAL: u32 = 60;
+
+/// Raw deltas kept for the hitch log — long enough to show the cadence around
+/// a hitch (the frame before it and the queue-refill burst after a previous
+/// one), short enough to read in a log line.
+const RAW_DELTA_LOG_WINDOW: usize = 8;
 
 impl<H, A> App<H, A>
 where
@@ -82,6 +104,10 @@ where
             prebuilt_instance: None,
             start_time: Instant::now(),
             last_frame_time: Instant::now(),
+            pacer: FramePacer::new(),
+            recent_raw_deltas: VecDeque::with_capacity(RAW_DELTA_LOG_WINDOW),
+            last_phase_ms: [0.0; 4],
+            frames_since_monitor_probe: MONITOR_PROBE_INTERVAL,
             running: true,
             initialized: false,
         }
@@ -277,6 +303,7 @@ where
             scale_factor,
             frame_number: 0,
             delta_time: 0.0,
+            raw_delta_time: 0.0,
             elapsed_time: 0.0,
             surface_format,
             hdr_active,
@@ -407,6 +434,22 @@ where
             None => return false,
         };
 
+        // Configure to the window's CURRENT size, never the size the last
+        // applied resize recorded: an outdated-surface reconfigure can run
+        // mid-resize with the debounced event still pending, and Vulkan then
+        // silently clamps the swapchain to the real window extent while the
+        // frame is still recorded at the stale size — an out-of-bounds render
+        // area into the smaller swapchain image (device-lost on NVIDIA).
+        if let Some(size) = self.window.as_ref().map(|w| w.inner_size()) {
+            if size.width == 0 || size.height == 0 {
+                // Minimized — nothing sane to configure; the restore's resize
+                // event retries.
+                return false;
+            }
+            ctx.width = size.width;
+            ctx.height = size.height;
+        }
+
         // Wait for ALL in-flight frames before reconfiguring the surface.
         // The surface is shared across all frame slots, so any slot with
         // pending GPU work could still reference the old swapchain textures.
@@ -455,14 +498,78 @@ where
         self.apply_pending_resize();
 
         // If the previous frame reported the surface outdated (resize,
-        // monitor change), recreate the swapchain before acquiring.
+        // monitor change), recreate the swapchain before acquiring. The
+        // reconfigure re-reads the real window size, which may differ from
+        // what the last applied resize recorded (mid-storm) — the handler
+        // must hear about that change or it keeps rendering at the old size.
         if self.context.as_ref().is_some_and(|c| c.surface_outdated) {
-            self.reconfigure_surface();
+            let before = self.context.as_ref().map(|c| (c.width, c.height));
+            if self.reconfigure_surface()
+                && before != self.context.as_ref().map(|c| (c.width, c.height))
+                && let Some(ctx) = &mut self.context
+            {
+                self.handler.on_resize(ctx);
+            }
         }
 
         let now = Instant::now();
-        let delta_time = now.duration_since(self.last_frame_time).as_secs_f32();
+        let raw_delta = now.duration_since(self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
+
+        // Re-read the display period now and then (monitor or mode change, and
+        // it is not worth a query every frame).
+        self.frames_since_monitor_probe += 1;
+        if self.frames_since_monitor_probe >= MONITOR_PROBE_INTERVAL {
+            self.frames_since_monitor_probe = 0;
+            let probe_start = Instant::now();
+            let period = self
+                .window
+                .as_ref()
+                .and_then(|w| w.current_monitor())
+                .and_then(|m| m.refresh_rate_millihertz())
+                .filter(|mhz| *mhz > 0)
+                .map(|mhz| 1000.0 / mhz as f32);
+            self.pacer.set_display_period(period);
+            // The probe sits on the frame path once a second; if the OS query
+            // ever gets expensive it becomes a recurring hitch seed.
+            let probe_ms = probe_start.elapsed().as_secs_f32() * 1000.0;
+            if probe_ms > 1.0 {
+                log::debug!("monitor refresh-rate probe took {probe_ms:.2} ms");
+            }
+        }
+
+        // What the simulation needs is the interval this frame is *displayed*
+        // for, not the interval the CPU measured between frame starts. Under
+        // vsync those differ by up to ±13% frame to frame, which shows up as
+        // the world subtly speeding up and slowing down (see `pacing`).
+        self.pacer.set_vsync(self.args.vsync());
+        let delta_time = self.pacer.pace(raw_delta);
+
+        // Hitch forensics: one debug line with the cadence leading up to a
+        // long frame — enough to spot present-queue refill bursts (short raw
+        // deltas trailing a hitch, see `pacing`) without a profiler attached.
+        if let Some(period) = self.pacer.display_period()
+            && raw_delta > period * 1.5
+        {
+            let recent_ms: Vec<f32> = self
+                .recent_raw_deltas
+                .iter()
+                .map(|d| (d * 1e5).round() / 100.0)
+                .collect();
+            let [update, acquire, fence, draw] = self.last_phase_ms;
+            log::debug!(
+                "frame hitch: raw delta {:.2} ms vs {:.2} ms display period; \
+                 preceding raw deltas {recent_ms:?} ms; previous frame spent \
+                 update {update:.2} / acquire {acquire:.2} / fence {fence:.2} \
+                 / draw+present {draw:.2} ms",
+                raw_delta * 1000.0,
+                period * 1000.0,
+            );
+        }
+        if self.recent_raw_deltas.len() == RAW_DELTA_LOG_WINDOW {
+            self.recent_raw_deltas.pop_front();
+        }
+        self.recent_raw_deltas.push_back(raw_delta);
 
         // We need to split the borrow of self to handle the handler and context separately
         let ctx = match &mut self.context {
@@ -471,13 +578,16 @@ where
         };
 
         ctx.delta_time = delta_time;
+        ctx.raw_delta_time = raw_delta;
         ctx.elapsed_time = now.duration_since(self.start_time).as_secs_f32();
 
         // Call update
+        let phase_start = Instant::now();
         if !self.handler.on_update(ctx) {
             self.running = false;
             return;
         }
+        self.last_phase_ms[0] = phase_start.elapsed().as_secs_f32() * 1000.0;
 
         // Acquire the swapchain texture and begin the frame. The order differs by
         // platform. On native, acquire first so a `SurfaceOutdated` is caught
@@ -487,6 +597,7 @@ where
         // canvas transparent-black, so we must not acquire on a skipped tick (#33).
         #[cfg(not(target_arch = "wasm32"))]
         let (swapchain_texture, schedule) = {
+            let phase_start = Instant::now();
             let swapchain_texture = match ctx.surface.acquire_texture() {
                 Ok(t) => t,
                 Err(
@@ -504,10 +615,12 @@ where
                     return;
                 }
             };
+            self.last_phase_ms[1] = phase_start.elapsed().as_secs_f32() * 1000.0;
 
             // On fence-wait failure (GPU hang, device lost) the slot's resources
             // must not be recycled — skip this frame; the fence stays in its slot
             // and the next frame retries the wait.
+            let phase_start = Instant::now();
             let schedule = match ctx.pipeline.begin_frame() {
                 Ok(schedule) => schedule,
                 Err(e) => {
@@ -515,6 +628,7 @@ where
                     return;
                 }
             };
+            self.last_phase_ms[2] = phase_start.elapsed().as_secs_f32() * 1000.0;
             (swapchain_texture, schedule)
         };
 
@@ -557,11 +671,13 @@ where
         };
 
         // Call draw - handler returns the schedule after finishing
+        let phase_start = Instant::now();
         let schedule = self.handler.on_draw(draw_ctx);
 
         // End frame with the returned schedule
         if let Some(ctx) = &mut self.context {
             ctx.pipeline.end_frame(schedule);
+            self.last_phase_ms[3] = phase_start.elapsed().as_secs_f32() * 1000.0;
             ctx.frame_number += 1;
 
             // Check max frames limit

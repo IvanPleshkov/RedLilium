@@ -6,6 +6,8 @@
 // `scene_color` intermediate (#142) — exposure, tonemap, and display
 // encoding all live in display_output.slang.
 
+import math;
+
 // =============================================================================
 // Bindings
 // =============================================================================
@@ -59,6 +61,11 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
     // Scene-referred linear out — display transform happens downstream.
+    // Sanitize: an environment cubemap can carry a non-finite / f16-overflowing
+    // texel at the baked sun hot-spot (the IBL bake flags it as near-singular),
+    // which would otherwise land as Inf/NaN in scene_color and tonemap into a
+    // black or colored block on the sun (#152). Clamp at the write so every
+    // scene_color consumer (bloom, TAA, the display composite) sees finite data.
     float3 color = env_map.SampleLevel(env_sampler, input.view_dir, mip_level).rgb;
-    return float4(color, 1.0);
+    return float4(sanitize_finite3(color), 1.0);
 }

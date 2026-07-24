@@ -480,6 +480,10 @@ pub enum GpuSurfaceTexture {
         /// frame is rendered and presented normally, but present reports
         /// `SurfaceOutdated` so the caller reconfigures.
         suboptimal: bool,
+        /// Present-pacing id for this present (`0` = pacing off): the present
+        /// is id-tagged and paced with `vkWaitForPresentKHR` (bounded present
+        /// queue). Per-swapchain, restarts at 1 on every new chain.
+        present_id: u64,
     },
 }
 
@@ -554,6 +558,7 @@ impl GpuSurfaceTexture {
                 in_flight_fence,
                 present_command_buffer,
                 suboptimal,
+                present_id,
                 ..
             } => {
                 if let GpuBackend::Vulkan(vulkan_backend) = backend {
@@ -568,6 +573,7 @@ impl GpuSurfaceTexture {
                         in_flight_fence,
                         present_command_buffer,
                         frame_index,
+                        present_id,
                     )?;
                     if suboptimal {
                         Err(GraphicsError::SurfaceOutdated)
@@ -849,6 +855,7 @@ impl GpuSurface {
                         in_flight_fence: result.in_flight_fence,
                         present_command_buffer: result.present_command_buffer,
                         suboptimal: result.suboptimal,
+                        present_id: result.present_id,
                     })
                 } else {
                     Err(GraphicsError::Internal(

@@ -2,6 +2,8 @@
 
 #[cfg(feature = "rendering")]
 mod changed_assets;
+#[cfg(feature = "rendering")]
+mod environment_manager;
 mod frame_ring;
 mod main_viewport;
 #[cfg(feature = "rendering")]
@@ -21,6 +23,8 @@ mod vertex_layout_manager;
 
 #[cfg(feature = "rendering")]
 pub use changed_assets::ChangedAssets;
+#[cfg(feature = "rendering")]
+pub use environment_manager::{EnvironmentManager, ResolvedEnvironment};
 pub use frame_ring::FrameRing;
 pub use main_viewport::MainViewport;
 #[cfg(feature = "rendering")]

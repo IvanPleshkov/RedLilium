@@ -597,6 +597,12 @@ pub(crate) struct ComponentStorage {
     /// Type-erased component metadata (inspection, serialization, cloning, etc.).
     /// Present only for components registered via `register_inspector` / `register_inspector_default`.
     pub(crate) meta: Option<ComponentMeta>,
+    /// Monotonic registration sequence, assigned by `World::register_component`
+    /// in the order component types are first registered. Gives despawn a
+    /// deterministic, hash-seed-independent order in which to fire `on_remove`
+    /// hooks across component types (#43). `0` until assigned (e.g. storages
+    /// built directly in tests never go through registration).
+    pub(crate) registration_seq: u64,
 }
 
 impl ComponentStorage {
@@ -611,6 +617,7 @@ impl ComponentStorage {
             on_remove: ComponentHooks::new(),
             required_components: SmallVec::new(),
             meta: None,
+            registration_seq: 0,
         }
     }
 

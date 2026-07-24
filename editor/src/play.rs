@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
+use redlilium_core::abstract_editor::{ActionQueue, EditActionHistory};
 use redlilium_ecs::sync::RwLock;
+use redlilium_ecs::ui::Selection;
 use redlilium_ecs::{
     Camera, CameraOutput, CameraTarget, EcsRunner, Entity, FreeFlyCamera, MainViewport,
     OutputFormat, Render, RenderSchedule, Schedules, SizePolicy, SystemsContainer, Transform,
@@ -108,6 +110,13 @@ pub struct PlaySession {
     /// Flyover pose carried across pauses of this session — plain values
     /// copied out before the overlay dies, never references into it.
     saved_flyover: Option<(FreeFlyCamera, Transform)>,
+    /// History the pause-mode inspector drains play-world edits through
+    /// ([`dock_targets`](Self::dock_targets)). Always in **discarding** mode:
+    /// the play world is a throwaway copy dropped on Stop, so edits apply but
+    /// nothing accumulates and the world is never "dirty". Keeping the panels'
+    /// `EditAction` → `execute` path (not a direct `resource_mut`) preserves the
+    /// editor's mutate-only-through-actions invariant even here.
+    pause_history: EditActionHistory<World>,
 }
 
 impl PlaySession {
@@ -139,6 +148,7 @@ impl PlaySession {
             paused: false,
             overlay: None,
             saved_flyover: None,
+            pause_history: EditActionHistory::discarding(),
         }
     }
 
@@ -229,9 +239,10 @@ impl PlaySession {
         self.window_input.clone()
     }
 
-    /// Read access to the play world (play-world *inspection* is deliberately
-    /// not exposed to the panels yet).
-    #[cfg_attr(not(test), allow(dead_code))] // test seam + future inspection surface
+    /// Read access to the play world. The shell reads its `Selection` through
+    /// this while paused (the asset-vs-entity inspector arbitration must watch
+    /// the world the panels are actually bound to); the panels *edit* it
+    /// through [`dock_targets`](Self::dock_targets).
     pub fn world(&self) -> &World {
         &self.world
     }
@@ -248,6 +259,15 @@ impl PlaySession {
             return;
         }
         self.paused = true;
+
+        // Stand up the pause-mode inspection surface on the play world: the
+        // panels edit through an ActionQueue like any editing world, and carry
+        // their own Selection. Both are inert while the game runs (nothing
+        // ticks them) and the play world is dropped on Stop, so they need no
+        // teardown on resume. The history stays discarding (see the field).
+        self.world.insert_resource(ActionQueue::<World>::new());
+        self.world.insert_resource(Selection::new());
+        self.pause_history = EditActionHistory::discarding();
 
         let apparatus = match editor_apparatus_from(editing_world) {
             Ok(a) => a,
@@ -300,6 +320,42 @@ impl PlaySession {
 
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    /// Mutable access to the play world — for the shell to publish per-frame
+    /// host state the game renders with (e.g. the display headroom, #154)
+    /// before [`render`](Self::render). Not an entity-editing surface; that is
+    /// [`dock_targets`](Self::dock_targets), gated on pause.
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
+    }
+
+    /// The paused play world plus the history the inspector edits it through —
+    /// what the shell feeds the dock **instead of** the editing world while
+    /// paused, so the hierarchy/inspector observe and edit the *real* running
+    /// entities (the game camera, spawned actors, …). Disjoint field borrows,
+    /// so the dock gets a mutable world and a shared history at once.
+    ///
+    /// Only meaningful while [`is_paused`](Self::is_paused); off-pause the
+    /// ActionQueue the panels expect may be absent.
+    pub fn dock_targets(&mut self) -> (&mut World, &EditActionHistory<World>) {
+        (&mut self.world, &self.pause_history)
+    }
+
+    /// Drain the play world's [`ActionQueue`] into the discarding history,
+    /// applying this frame's pause-mode edits. Mirrors
+    /// [`crate::core::EditorWorld::drain_actions`] for the editing world. A
+    /// no-op unless paused with the queue present.
+    pub fn drain_pause_actions(&mut self) {
+        if !self.paused || !self.world.has_resource::<ActionQueue<World>>() {
+            return;
+        }
+        let actions = self.world.resource::<ActionQueue<World>>().drain();
+        for action in actions {
+            if let Err(e) = self.pause_history.execute(action, &mut self.world) {
+                log::warn!("pause-mode edit failed: {e}");
+            }
+        }
     }
 
     /// The camera the scene view shows: the flyover camera while paused with
@@ -504,6 +560,107 @@ mod tests {
             ew.world.iter_entities().count(),
             editor_entities,
             "editing world identical after Stop"
+        );
+    }
+
+    /// A component edit an inspector would push, targeting a real play-world
+    /// entity.
+    #[derive(Debug)]
+    struct SetBlipTag {
+        entity: Entity,
+        tag: u32,
+    }
+    impl redlilium_core::abstract_editor::EditAction<World> for SetBlipTag {
+        fn apply(
+            &mut self,
+            world: &mut World,
+        ) -> redlilium_core::abstract_editor::EditActionResult {
+            let _ = world.insert(self.entity, Blip { tag: self.tag });
+            Ok(())
+        }
+        fn undo(
+            &mut self,
+            _world: &mut World,
+        ) -> redlilium_core::abstract_editor::EditActionResult {
+            unreachable!("discarding history never undoes");
+        }
+        fn description(&self) -> &str {
+            "set blip tag"
+        }
+    }
+
+    /// Pause exposes the **real** play world to the panels: the inspection
+    /// ActionQueue + Selection appear on the play world, an edit pushed like the
+    /// inspector does lands on the running entity via the frame drain, and the
+    /// pause history retains nothing (ephemeral, no-undo) — the abstraction
+    /// leak (panels bound to the editing world in pause) is closed.
+    #[test]
+    fn pause_binds_panels_to_the_real_play_world_ephemerally() {
+        let instance = GraphicsInstance::new().expect("graphics instance");
+        let device = instance.create_device().expect("graphics device");
+        let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), Vfs::new());
+        let mut scene_view = SceneViewState::new(
+            device.clone(),
+            redlilium_graphics::TextureFormat::Bgra8UnormSrgb,
+        );
+        let runner = EcsRunner::single_thread();
+        let params = EditorWorldParams {
+            remote: false,
+            egui: false,
+        };
+        let mut ew = create_editor_world(&params, &engine, &mut scene_view, 1.0);
+        let ticks = Arc::new(AtomicU32::new(0));
+        let host = GameHost::from_static(Box::new(TestGame(ticks.clone())), &engine, &mut ew);
+        let mut play = PlaySession::start(&host, &engine, &runner, 1.0, None);
+
+        // The game spawned Blip{tag:7} — a runtime entity that lives *only* in
+        // the play world (the editing world never has it).
+        let blip = {
+            let blips = play.world().read_all::<Blip>().unwrap();
+            let idx = blips.iter().next().map(|(idx, _)| idx);
+            idx.and_then(|idx| play.world().entity_at_index(idx))
+        }
+        .expect("game spawned a Blip");
+        assert_eq!(play.world().get::<Blip>(blip).unwrap().tag, 7);
+        // Off pause the inspection surface is absent.
+        assert!(!play.world().has_resource::<ActionQueue<World>>());
+
+        play.pause(&ew.world);
+        assert!(
+            play.world().has_resource::<ActionQueue<World>>(),
+            "pause stands up the inspection ActionQueue on the play world"
+        );
+        assert!(play.world().has_resource::<Selection>());
+
+        // Push an edit the way the inspector does, then run the frame drain.
+        {
+            let (world, _history) = play.dock_targets();
+            world
+                .resource::<ActionQueue<World>>()
+                .push(Box::new(SetBlipTag {
+                    entity: blip,
+                    tag: 42,
+                }));
+        }
+        play.drain_pause_actions();
+        assert_eq!(
+            play.world().get::<Blip>(blip).unwrap().tag,
+            42,
+            "the edit landed on the real running entity"
+        );
+
+        // Ephemeral: nothing retained, world never reported dirty.
+        let (_world, history) = play.dock_targets();
+        assert!(!history.can_undo(), "pause edits are not undoable");
+        assert!(!history.has_unsaved_changes());
+
+        // Resume + Stop leave the editing world innocent of the game entity.
+        play.resume();
+        drop(play);
+        assert_eq!(
+            ew.world.read_all::<Blip>().unwrap().iter().count(),
+            0,
+            "the game entity never touched the editing world"
         );
     }
 }

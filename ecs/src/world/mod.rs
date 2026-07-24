@@ -174,6 +174,11 @@ type StampedWorldFn = (crate::type_identity::SourceId, fn(&mut World));
 pub struct World {
     entities: Entities,
     components: HashMap<TypeId, crate::sync::RwLock<ComponentStorage>>,
+    /// Monotonic counter handed out as each component type's
+    /// [`ComponentStorage::registration_seq`] on first registration. Gives
+    /// despawn a deterministic cross-type `on_remove` firing order that does
+    /// not depend on `HashMap` (hash-seed) iteration (#43).
+    next_registration_seq: u64,
     resources: Resources,
     /// Global tick counter for change detection. Atomic so runners can
     /// assign per-system ticks while worker threads hold `&World`.
@@ -239,6 +244,7 @@ impl World {
         Self {
             entities: Entities::new(),
             components: HashMap::new(),
+            next_registration_seq: 0,
             resources,
             // Starts at 1 so setup-time writes (stamped with tick 1) are
             // visible to never-run systems, whose `last_run` is 0.
@@ -587,8 +593,11 @@ impl World {
     ///
     /// `on_remove` hooks fire before removal (entity still alive, own
     /// component still readable) and exactly once per component; hook-less
-    /// components stay readable for the whole hook phase (see #43 for
-    /// ordering caveats between hooked components).
+    /// components stay readable for the whole hook phase. Hooked components
+    /// fire in **registration order** (deterministic, not `HashMap` order),
+    /// and each is removed immediately after its own hooks run — so an
+    /// `on_remove` hook sees sibling hooked components registered *after* it
+    /// still present, and those registered *before* it already gone (#43).
     pub fn despawn(&mut self, entity: Entity) -> bool {
         if !self.entities.is_alive(entity) {
             return false;
@@ -601,19 +610,24 @@ impl World {
         // TypeIds are snapshotted — presence is re-checked per hook, so a
         // hook that cascades a removal (e.g. removes another component of
         // this entity) does not cause that component's hooks to fire twice.
-        let hooked: smallvec::SmallVec<[TypeId; 4]> = self
+        // Snapshot each type's registration_seq alongside it and sort by it,
+        // so the cross-type firing order is deterministic (registration order)
+        // rather than `HashMap` iteration order (#43).
+        let mut hooked: smallvec::SmallVec<[(u64, TypeId); 4]> = self
             .components
             .iter_mut()
             .filter_map(|(type_id, lock)| {
                 let s = lock.get_mut();
-                (!s.on_remove.is_empty() && s.contains_untyped(index)).then_some(*type_id)
+                (!s.on_remove.is_empty() && s.contains_untyped(index))
+                    .then_some((s.registration_seq, *type_id))
             })
             .collect();
+        hooked.sort_unstable_by_key(|(seq, _)| *seq);
 
         // Pass 2: per hooked component — fire its hooks (re-validating
         // liveness and presence between calls), then remove it immediately
         // so a cascading remove() from a later hook cannot re-fire it (#43).
-        for type_id in hooked {
+        for (_seq, type_id) in hooked {
             let hooks = match self.storage_mut(&type_id) {
                 Some(s) => s.on_remove.clone(),
                 None => continue,

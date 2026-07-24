@@ -340,6 +340,27 @@ fn bake_brdf_lut() -> Vec<u8> {
 
 // === Environment cubemaps ===
 
+/// Largest magnitude an f16 (`Rgba16Float`) texel can hold. The IBL outputs
+/// are stored as f16; the Spruit Sunrise sun disk resamples to a radiance above
+/// this, so a raw `f16::from_f32` would round it to +Inf and bake a non-finite
+/// texel into the asset — which then poisons the runtime (scene_color, bloom,
+/// TAA) at the sun (#152). Clamp every radiance channel to this ceiling at pack
+/// time so the baked cubemaps are always finite. Mirrors `F16_MAX` in
+/// `shaders/library/math.slang`; the runtime `sanitize_finite` clamp is the
+/// defense-in-depth backstop, this removes the root cause in the data.
+const F16_MAX: f32 = 65504.0;
+
+/// Pack one radiance color channel to clamped-finite f16 little-endian bytes.
+/// NaN (a bad source pixel) → 0; anything above `F16_MAX` (or +Inf) → `F16_MAX`.
+fn pack_radiance_f16(c: f32) -> [u8; 2] {
+    let finite = if c.is_nan() {
+        0.0
+    } else {
+        c.clamp(0.0, F16_MAX)
+    };
+    half::f16::from_f32(finite).to_bits().to_le_bytes()
+}
+
 /// One cube level: every face's texels produced by `shade`, parallel over
 /// rows, packed as `Rgba16Float` (alpha 1) in face order.
 fn bake_cube_level(size: u32, shade: impl Fn(Vec3) -> Vec3 + Sync) -> Vec<u8> {
@@ -351,7 +372,7 @@ fn bake_cube_level(size: u32, shade: impl Fn(Vec3) -> Vec3 + Sync) -> Vec<u8> {
             for x in 0..size {
                 let color = shade(cubemap_dir(face, x, y, size));
                 for c in [color.x, color.y, color.z, 1.0] {
-                    row.extend_from_slice(&half::f16::from_f32(c).to_bits().to_le_bytes());
+                    row.extend_from_slice(&pack_radiance_f16(c));
                 }
             }
             row
@@ -390,7 +411,7 @@ fn bake_sky_cube(env: &Equirect) -> Vec<Vec<u8>> {
         for face in faces.iter() {
             for texel in face {
                 for c in [texel.x, texel.y, texel.z, 1.0] {
-                    level.extend_from_slice(&half::f16::from_f32(c).to_bits().to_le_bytes());
+                    level.extend_from_slice(&pack_radiance_f16(c));
                 }
             }
         }
@@ -783,5 +804,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The sky cubemap (what the skybox pass samples) must be finite in every
+    /// texel. The Spruit Sunrise sun disk resamples to a radiance above the f16
+    /// ceiling, so before the pack-time clamp (`pack_radiance_f16`) mip 0 held a
+    /// +Inf texel that poisoned scene_color / bloom / the display tonemap on the
+    /// sun (#152). This guards the root fix: any future overflow or a NaN source
+    /// pixel re-baked into the asset trips here instead of shipping.
+    #[test]
+    fn sky_cube_texels_are_finite() {
+        let path = workspace_root().join("std-assets/textures/ibl/sky_cube.ktx2");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("{} absent — skipping", path.display());
+            return;
+        };
+        let cpu = parse_ktx2(&bytes).expect("sky cube parses");
+        assert_eq!(cpu.format, TextureFormat::Rgba16Float);
+        let mut peak = 0.0f32;
+        let mut offset = 0usize;
+        for mip in 0..cpu.mip_level_count {
+            let size = (cpu.width >> mip).max(1) as usize;
+            let texels = size * size * 6;
+            for t in 0..texels {
+                let base = offset + t * 8;
+                for ch in 0..3 {
+                    let c = half::f16::from_le_bytes([
+                        cpu.data[base + ch * 2],
+                        cpu.data[base + ch * 2 + 1],
+                    ])
+                    .to_f32();
+                    assert!(
+                        c.is_finite() && c <= F16_MAX,
+                        "mip {mip} texel {t} channel {ch}: non-finite / over-range value {c}"
+                    );
+                    peak = peak.max(c);
+                }
+            }
+            offset += texels * 8;
+        }
+        // The sun highlight survives the clamp (it is pinned near the ceiling,
+        // not zeroed) — a collapse to ~0 would mean we killed the glow, not the Inf.
+        assert!(
+            peak > 1.0,
+            "sky cube lost its bright highlight (peak {peak})"
+        );
     }
 }

@@ -63,6 +63,51 @@ float3 tonemap_pbr_neutral(float3 color) {
     return lerp(color, float3(new_peak), g);
 }
 
+// Khronos PBR Neutral generalized to a display headroom `H` (#154).
+//
+// Same curve as `tonemap_pbr_neutral`, but the highlight shoulder asymptotes to
+// `H` (the display's peak in x-SDR-white units, H >= 1) instead of 1.0, so
+// highlights above paper-white roll off into the display's extended range
+// instead of hard-clipping. The knee, toe, and desaturation are unchanged —
+// only the ceiling moves — so:
+//   * at H == 1 this reduces EXACTLY to `tonemap_pbr_neutral` (SDR path);
+//   * below the knee it is identity (paper-white/mids/UI stay pinned);
+//   * as H grows the desaturation term fades (peak - new_peak shrinks), so a
+//     bright saturated color climbs toward H staying colorful rather than
+//     washing to white.
+// Output is scene/display linear (1.0 = paper white, up to H); the caller emits
+// it to an extended-linear-sRGB target without an encode.
+float3 tonemap_pbr_neutral_headroom(float3 color, float headroom) {
+    const float start_compression = 0.8 - 0.04;
+    const float desaturation = 0.15;
+
+    // Extended-range input can carry small negatives (TAA neighbourhood clip,
+    // f16 slop). The old `clamp(color, 0, 10)` floored them; the toe below is
+    // only defined for >= 0, so floor here too.
+    color = max(color, float3(0.0));
+    float h = max(headroom, 1.0);
+
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < start_compression) {
+        return color;
+    }
+
+    // `1.0` -> `h` in the two spots that set the shoulder asymptote; every
+    // other constant matches `tonemap_pbr_neutral`. At h == 1, d and new_peak
+    // are byte-for-byte that function's expressions. Continuous and C1 at the
+    // knee (new_peak == peak == start_compression there, unit slope).
+    float d = h - start_compression;
+    float new_peak = h - d * d / (peak + d - start_compression);
+    color *= new_peak / peak;
+
+    float g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
+    return lerp(color, float3(new_peak), g);
+}
+
 // Reinhard extended tone mapping with white point.
 float3 tonemap_reinhard_extended(float3 color, float white_point) {
     float white_sq = white_point * white_point;

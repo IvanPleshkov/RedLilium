@@ -69,6 +69,20 @@ const fn vs_fs_spec(name: &'static str, path: &'static str) -> ShaderSpec {
     }
 }
 
+const CS: &[(&str, ShaderStage)] = &[("cs_main", ShaderStage::Compute)];
+
+/// A compute spec (single `cs_main` entry) with default handling — bakes to
+/// WGSL (the Vulkan backend cross-compiles it via naga at load).
+const fn cs_spec(name: &'static str, path: &'static str) -> ShaderSpec {
+    ShaderSpec {
+        name,
+        path,
+        entry_points: CS,
+        force_spirv: false,
+        skip_reflection: false,
+    }
+}
+
 const REGISTRY: &[ShaderSpec] = &[
     vs_fs_spec("egui", "shaders/library/egui.slang"),
     vs_fs_spec("blit", "runtime/shaders/blit.slang"),
@@ -114,6 +128,49 @@ const REGISTRY: &[ShaderSpec] = &[
     ),
     // TAA resolve (#148): history accumulation with variance clipping.
     vs_fs_spec("std_taa_resolve", "std-assets/shaders/taa_resolve.slang"),
+    // Velocity completion (#149): fills camera-only motion into the background
+    // of GBUFFER_VELOCITY so motion blur (and TAA) see the sky move.
+    vs_fs_spec(
+        "std_velocity_complete",
+        "std-assets/shaders/velocity_complete.slang",
+    ),
+    // Motion blur (#149, McGuire/Guertin): TileMax + NeighborMax over the
+    // velocity buffer, then a reconstruction gather.
+    vs_fs_spec("std_mb_tile_max", "std-assets/shaders/mb_tile_max.slang"),
+    vs_fs_spec(
+        "std_mb_neighbor_max",
+        "std-assets/shaders/mb_neighbor_max.slang",
+    ),
+    vs_fs_spec(
+        "std_mb_reconstruct",
+        "std-assets/shaders/mb_reconstruct.slang",
+    ),
+    // Screen-space AO (#150): GTAO-lite horizon pass + its bilateral denoise.
+    vs_fs_spec("std_ssao", "std-assets/shaders/ssao.slang"),
+    vs_fs_spec("std_ssao_blur", "std-assets/shaders/ssao_blur.slang"),
+    // HDR bloom (#151): Jimenez dual-filter down (KARIS variant) + tent up.
+    vs_fs_spec("std_bloom_down", "std-assets/shaders/bloom_down.slang"),
+    vs_fs_spec("std_bloom_up", "std-assets/shaders/bloom_up.slang"),
+    // Auto-exposure / eye adaptation (#153): the two compute passes — build a
+    // luminance histogram of the scene, then meter an adapting exposure.
+    // `histogram_build` bakes straight to SPIR-V (`force_spirv`): its atomic
+    // add lowers, through Slang's WGSL target + naga, to an `OpAtomicIAdd` with
+    // a *relaxed* memory order plus a storage-class semantics bit — which
+    // Vulkan rejects (VUID-StandaloneSpirv-MemorySemantics-10871). Slang's own
+    // SPIR-V backend emits a spec-valid memory order. Auto-exposure is a
+    // native/Vulkan-only feature (the web demos don't use it), so losing the
+    // WGSL form costs nothing. The atomic-free resolve pass stays WGSL.
+    ShaderSpec {
+        name: "std_histogram_build",
+        path: "std-assets/shaders/histogram_build.slang",
+        entry_points: CS,
+        force_spirv: true,
+        skip_reflection: false,
+    },
+    cs_spec(
+        "std_histogram_resolve",
+        "std-assets/shaders/histogram_resolve.slang",
+    ),
     // Demo shaders — baked so the demos render on the default Slang-off build
     // too. (The pbr_ibl demo's own shaders retired with #144 — it consumes
     // the std deferred path now.)

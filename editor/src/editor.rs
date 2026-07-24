@@ -128,6 +128,13 @@ pub struct Editor {
     /// Smoothed frames-per-second for the status bar.
     fps: f32,
 
+    /// Smoothed display headroom H (#154): the window screen's EDR peak over
+    /// SDR white, polled each frame (it tracks the brightness slider live) and
+    /// eased so highlights don't pump. Fed to the rendered world's
+    /// [`DisplayHeadroom`] so the deferred display pass rolls highlights off to
+    /// the real panel range. `1.0` (SDR) until the first poll resolves a screen.
+    display_headroom: f32,
+
     /// Pending component import from asset browser (VFS read in progress).
     pending_import: Option<PendingImport>,
     /// Pending prefab import from asset browser (VFS read in progress).
@@ -212,6 +219,7 @@ impl Editor {
         Self {
             world: None,
             play: None,
+            display_headroom: redlilium_graphics::display::SDR_HEADROOM,
             game_host: None,
             static_game: None,
             behavior_spec: None,
@@ -1248,20 +1256,60 @@ impl AppHandler for Editor {
             return true;
         }
 
-        // When the entity selection changes to a non-empty set, drop the asset
-        // selection so the inspector switches back to the entity.
-        if let Some(ew) = self.world.as_ref() {
-            let current = ew
-                .world
-                .resource::<redlilium_ecs::ui::Selection>()
-                .entities()
-                .to_vec();
-            if current != self.last_selection {
-                if !current.is_empty() {
-                    self.asset_browser.clear_selected_file();
-                }
-                self.last_selection = current;
+        // Poll the window screen's EDR headroom (#154), ease it, and publish it
+        // to the world(s) the scene view renders, so the deferred display pass
+        // rolls highlights off to the real panel range. maxEDR tracks the
+        // brightness slider continuously; a ~150ms ease (at 60 fps) hides that
+        // jitter while still catching up to a monitor change within a few
+        // frames. Off macOS / no HDR screen the poll returns 1.0 (no-op).
+        {
+            let raw = redlilium_graphics::display::window_display_headroom(ctx.window().as_ref());
+            self.display_headroom += (raw - self.display_headroom) * 0.1;
+            let headroom = redlilium_ecs::DisplayHeadroom(self.display_headroom);
+            if let Some(ew) = self.world.as_mut() {
+                ew.world.insert_resource(headroom);
             }
+            if let Some(play) = self.play.as_mut() {
+                play.world_mut().insert_resource(headroom);
+            }
+        }
+
+        // When the entity selection changes to a non-empty set, drop the asset
+        // selection so the inspector switches back to the entity. Read it from
+        // whichever world the panels are bound to this frame — the paused play
+        // world (which carries its own Selection) or the editing world — so a
+        // pause-mode hierarchy pick clears the stale asset just like an editing
+        // pick. Watching only the editing world here left the inspector stuck
+        // on the last-selected asset for the whole pause (its Selection never
+        // moves while paused).
+        let paused = self.play.as_ref().is_some_and(|p| p.is_paused());
+        let current = if paused {
+            self.play
+                .as_ref()
+                .map(|p| p.world())
+                .filter(|w| w.has_resource::<redlilium_ecs::ui::Selection>())
+                .map(|w| {
+                    w.resource::<redlilium_ecs::ui::Selection>()
+                        .entities()
+                        .to_vec()
+                })
+                .unwrap_or_default()
+        } else {
+            self.world
+                .as_ref()
+                .map(|ew| {
+                    ew.world
+                        .resource::<redlilium_ecs::ui::Selection>()
+                        .entities()
+                        .to_vec()
+                })
+                .unwrap_or_default()
+        };
+        if current != self.last_selection {
+            if !current.is_empty() {
+                self.asset_browser.clear_selected_file();
+            }
+            self.last_selection = current;
         }
 
         // Entity picking: resolve last frame's GPU readbacks into selection.
@@ -1345,6 +1393,12 @@ impl AppHandler for Editor {
         // Drain action queue and execute through history (before systems so
         // that Changed<T> filters can detect the mutations this frame).
         self.world.as_mut().unwrap().drain_actions();
+        // Pause-mode inspector edits target the play world through its own
+        // (discarding) history — same EditAction path, ephemeral target. No-op
+        // unless paused.
+        if let Some(play) = self.play.as_mut() {
+            play.drain_pause_actions();
+        }
 
         // Tier-1 behavior reload (ADR-037): drain watcher/build events; a
         // finished green build swaps the behavior module between frames (the
@@ -1828,14 +1882,28 @@ impl AppHandler for Editor {
                                 scene_view_rect = Some(available);
                             }
                         } else {
-                            // Normal dock layout during Edit and Pause modes
+                            // Normal dock layout during Edit and Pause modes.
+                            // While paused the panels bind to the **play**
+                            // world (the frozen running game), so the
+                            // hierarchy/inspector observe and edit the real
+                            // runtime entities — the game camera, spawned
+                            // actors — instead of the editing world they never
+                            // appear in. Edits ride the play world's own
+                            // discarding history (ephemeral, no undo). Off
+                            // pause it stays the editing world.
+                            let paused = self.play.as_ref().is_some_and(|p| p.is_paused());
+                            let (world, history) = if paused {
+                                self.play.as_mut().unwrap().dock_targets()
+                            } else {
+                                (&mut ew.world, &ew.history)
+                            };
                             let mut tab_viewer = EditorTabViewer {
-                                world: &mut ew.world,
+                                world,
                                 inspector_state: &mut self.inspector_state,
                                 vfs: &self.vfs,
                                 asset_browser: &mut self.asset_browser,
                                 console: &mut self.console,
-                                history: &ew.history,
+                                history,
                                 scene_view_rect: None,
                                 drag_rect,
                                 scene_texture: self.scene_texture_id,

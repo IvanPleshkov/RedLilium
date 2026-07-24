@@ -12,6 +12,7 @@
 //! system through [`GameUi`], with a Quit button driving [`AppControl`].
 #![recursion_limit = "256"]
 
+use std::collections::VecDeque;
 use std::f32::consts::FRAC_PI_4;
 
 use redlilium_assets::Guid;
@@ -19,12 +20,15 @@ use redlilium_core::input::KeyCode;
 use redlilium_core::math::{Quat, Vec3, nalgebra};
 use redlilium_ecs::physics::components3d::{Collider3D, RigidBody3D};
 use redlilium_ecs::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
-use redlilium_ecs::physics::systems3d::{StepPhysics3D, SyncPhysicsBodies3D};
+use redlilium_ecs::physics::systems3d::{
+    InterpolatePhysics, RecordPhysicsPose, StepPhysics3D, SyncPhysicsBodies3D,
+};
 use redlilium_ecs::{
-    Camera, Component, DirectionalLight, GlobalTransform, MaterialInstanceSource, MeshGenerator,
-    MeshRenderer, MeshSource, Name, PostUpdate, Primitive, Read, Res, ResMut, SceneManager, System,
-    SystemContext, SystemError, Time, Transform, Update, UpdateGlobalTransforms, Visibility,
-    WindowInput, World, WriteAll,
+    Camera, CameraAutoExposure, CameraBloom, Component, DirectionalLight, Entity, ExclusiveSystem,
+    GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer, MeshSource, Name,
+    PostUpdate, Primitive, RawFrameDelta, Read, Res, ResMut, SceneManager, System, SystemContext,
+    SystemError, Time, Transform, Update, UpdateGlobalTransforms, Visibility, WindowInput, World,
+    WriteAll,
 };
 use redlilium_runtime::{App, GameUi, Plugin};
 // The Quit button is native-only (a browser tab has no "exit").
@@ -105,6 +109,15 @@ const CAR_FORWARD: PhysVector = PhysVector::new(0.0, 0.0, -1.0);
 /// redirect makes the car go where its nose points instead of drifting.
 const LATERAL_GRIP: f64 = 6.0;
 
+/// Fixed sub-step the follow camera integrates its smoothing with, seconds.
+///
+/// The camera must not inherit the frame rate: an exponential blend chasing a
+/// *moving* target settles at a lag of `v*dt / (1 - exp(-k*dt))`, which grows
+/// with `dt`, so stepping it once per frame makes the trailing distance vary
+/// with frame time. Integrating in fixed sub-steps makes the lag a property of
+/// this constant instead — the camera behaves identically at any frame rate.
+const CAMERA_SMOOTHING_STEP: f32 = 1.0 / 120.0;
+
 /// WASD arcade drive (#104): apply engine/steering impulses to the chassis
 /// body. No joints or wheels — forces on a single rigid body, tuned for feel,
 /// with steering authority scaled by speed (a parked car does not yaw).
@@ -169,7 +182,8 @@ impl System for DriveCar {
 
 /// Places the [`FollowCamera`] behind its [`CarController`] target with
 /// exponential smoothing. Runs in `PostUpdate` before transform propagation,
-/// reading the chassis pose [`StepPhysics3D`] wrote during `Update`.
+/// reading the chassis pose [`StepPhysics3D`] wrote during `FixedUpdate`
+/// (which runs earlier in the same frame, so the pose is this frame's latest).
 pub struct UpdateFollowCamera;
 
 impl System for UpdateFollowCamera {
@@ -209,8 +223,21 @@ impl System for UpdateFollowCamera {
                 };
                 let desired =
                     car_pos - forward * follow.distance + Vec3::new(0.0, follow.height, 0.0);
-                let blend = 1.0 - (-follow.stiffness * time.delta() as f32).exp();
-                let eye = cam_transform.translation + (desired - cam_transform.translation) * blend;
+                // Integrate the smoothing in fixed sub-steps rather than one
+                // step of the whole frame delta. `1 - exp(-k*dt)` is only
+                // frame-rate independent for a *stationary* target; chasing a
+                // moving one it settles at a lag of `v*dt / (1 - exp(-k*dt))`,
+                // which grows with `dt`. At a variable frame rate that made the
+                // camera's trailing distance breathe frame to frame. Pinning
+                // the integration step pins the lag.
+                let mut eye = cam_transform.translation;
+                let mut remaining = time.delta() as f32;
+                while remaining > 0.0 {
+                    let step = remaining.min(CAMERA_SMOOTHING_STEP);
+                    let blend = 1.0 - (-follow.stiffness * step).exp();
+                    eye += (desired - eye) * blend;
+                    remaining -= step;
+                }
 
                 let target = car_pos + Vec3::new(0.0, 0.8, 0.0);
                 let view = nalgebra::Isometry3::look_at_rh(
@@ -233,12 +260,24 @@ impl System for UpdateFollowCamera {
 /// States by [`SceneManager::current`]: the level scene → gameplay HUD, Esc
 /// returns to the menu; anything else → main menu with Play (switches to the
 /// level) and Quit.
-pub struct GameFlowUi;
+#[derive(Default)]
+pub struct GameFlowUi {
+    /// Sliding window of raw CPU frame deltas (seconds) behind the HUD's
+    /// min/max — long enough to catch the present-queue refill bursts that
+    /// follow a hitch (see redlilium-app's `pacing`).
+    raw_deltas: VecDeque<f64>,
+}
 
-impl System for GameFlowUi {
+/// Frames of raw-delta history behind the HUD min/max — ~2 s at 60 fps.
+const RAW_DELTA_WINDOW: usize = 120;
+
+/// The game camera entity, stashed at spawn so the in-game debug HUD can toggle
+/// per-camera post effects (bloom, #151) on it without a query→entity lookup.
+struct GameCamera(Entity);
+
+impl ExclusiveSystem for GameFlowUi {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-        let world = ctx.raw_world();
+    fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
         if !world.has_resource::<GameUi>() {
             return Ok(());
         }
@@ -252,6 +291,24 @@ impl System for GameFlowUi {
 
         if in_game {
             let delta = world.resource::<Time>().delta();
+            // The unpaced CPU delta the host published, if it does (the
+            // runtime, #149) — paced vs raw side by side is what tells a real
+            // missed-vsync cadence from a pacing artifact.
+            let raw = world
+                .has_resource::<RawFrameDelta>()
+                .then(|| world.resource::<RawFrameDelta>().0);
+            let raw_stats = raw.map(|raw| {
+                if self.raw_deltas.len() == RAW_DELTA_WINDOW {
+                    self.raw_deltas.pop_front();
+                }
+                self.raw_deltas.push_back(raw);
+                let (mut min, mut max) = (raw, raw);
+                for &d in &self.raw_deltas {
+                    min = min.min(d);
+                    max = max.max(d);
+                }
+                (raw, min, max)
+            });
             // PhysicsWorld3D appears once SyncPhysicsBodies3D first runs;
             // there is no ordering edge to it, so tolerate the first frame.
             let speed = if world.has_resource::<PhysicsWorld3D>() {
@@ -265,14 +322,53 @@ impl System for GameFlowUi {
             } else {
                 0.0
             };
+            // Post-FX toggles: the checkbox states are derived from whether the
+            // game camera carries the component; a change inserts/removes it
+            // after the panel (so the passes truly stop when off). Bloom (#151),
+            // auto-exposure (#153).
+            let camera = world
+                .has_resource::<GameCamera>()
+                .then(|| world.resource::<GameCamera>().0);
+            let mut bloom_on = camera.map(|c| world.get::<CameraBloom>(c).is_some());
+            let mut auto_exposure_on = camera.map(|c| world.get::<CameraAutoExposure>(c).is_some());
             egui::Window::new("Car Game — dev")
                 .default_pos([10.0, 10.0])
                 .resizable(false)
                 .show(&egui_ctx, |ui| {
                     ui.label(format!("frame: {:.2} ms", delta * 1000.0));
+                    if let Some((raw, min, max)) = raw_stats {
+                        ui.label(format!(
+                            "raw: {:.2} ms  [{:.1}..{:.1}]",
+                            raw * 1000.0,
+                            min * 1000.0,
+                            max * 1000.0
+                        ));
+                    }
                     ui.label(format!("speed: {speed:.1} m/s"));
+                    if let Some(on) = bloom_on.as_mut() {
+                        ui.checkbox(on, "Bloom");
+                    }
+                    if let Some(on) = auto_exposure_on.as_mut() {
+                        ui.checkbox(on, "Auto-exposure");
+                    }
                     ui.label("WASD — drive, Esc — menu");
                 });
+            if let (Some(camera), Some(on)) = (camera, bloom_on) {
+                let has = world.get::<CameraBloom>(camera).is_some();
+                if on && !has {
+                    let _ = world.insert(camera, CameraBloom::default());
+                } else if !on && has {
+                    let _ = world.remove::<CameraBloom>(camera);
+                }
+            }
+            if let (Some(camera), Some(on)) = (camera, auto_exposure_on) {
+                let has = world.get::<CameraAutoExposure>(camera).is_some();
+                if on && !has {
+                    let _ = world.insert(camera, CameraAutoExposure::default());
+                } else if !on && has {
+                    let _ = world.remove::<CameraAutoExposure>(camera);
+                }
+            }
             if world
                 .resource::<WindowInput>()
                 .is_key_pressed(KeyCode::Escape)
@@ -335,7 +431,10 @@ impl Plugin for CarGamePlugin {
 
     fn build(&self, app: &mut App) {
         log::info!("CarGamePlugin::build");
-        app.add_system::<Update, _>(GameFlowUi);
+        // Exclusive: the HUD's bloom toggle (#151) inserts/removes a component,
+        // which needs &mut World.
+        app.schedule_mut::<Update>()
+            .add_exclusive(GameFlowUi::default());
 
         // Marker-driven car spawn (#105), right after scene swaps land so the
         // car exists the same frame the level appears. `build` runs only in a
@@ -346,22 +445,45 @@ impl Plugin for CarGamePlugin {
         pre.add_edge::<redlilium_ecs::ApplySceneTransitions, SpawnCarAtMarkers>()
             .expect("no cycle");
 
-        // Physics pipeline: the drive system sits between body sync and the
-        // step.
-        let update = app.schedule_mut::<Update>();
-        update.add_exclusive(SyncPhysicsBodies3D);
-        update.add(DriveCar);
-        update.add(StepPhysics3D);
-        update
+        // Physics pipeline runs at a FIXED timestep (the FixedUpdate
+        // accumulator), so simulation speed is decoupled from frame rate: one
+        // 1/60 step per accumulated 1/60 of real time — 0 steps on a fast
+        // frame, N to catch up a slow one — instead of exactly one step per
+        // rendered frame. The old per-frame stepping ran the world in
+        // frame-rate-dependent slow-motion and juddered under full-screen load
+        // (equal sim steps shown at unequal real intervals). The drive system
+        // sits between body sync and the step; StepPhysics3D reads the fixed
+        // timestep from `Time::fixed_delta`.
+        // Physics ticks deliberately below the render rate; render-side
+        // interpolation (below) hides the mismatch, so this is a pure
+        // simulation-fidelity vs CPU dial, not a smoothness one.
+        app.schedules_mut().set_fixed_timestep(1.0 / 45.0);
+
+        let fixed = app.schedule_mut::<redlilium_ecs::FixedUpdate>();
+        fixed.add_exclusive(SyncPhysicsBodies3D);
+        fixed.add(DriveCar);
+        fixed.add(StepPhysics3D);
+        fixed.add(RecordPhysicsPose);
+        fixed
             .add_edge::<SyncPhysicsBodies3D, DriveCar>()
             .expect("no cycle");
-        update
+        fixed
             .add_edge::<DriveCar, StepPhysics3D>()
             .expect("no cycle");
+        // Snapshot the pose the step just wrote, once per fixed step.
+        fixed
+            .add_edge::<StepPhysics3D, RecordPhysicsPose>()
+            .expect("no cycle");
 
-        // Camera follows the post-step pose, before transforms propagate.
+        // Interpolate the two most recent fixed steps into Transform, then let
+        // the camera follow that (so it tracks the on-screen car, not the raw
+        // step), then propagate — the interpolated pose is what renders and
+        // what the motion-vector history snapshots.
         let post = app.schedule_mut::<PostUpdate>();
+        post.add(InterpolatePhysics);
         post.add(UpdateFollowCamera);
+        post.add_edge::<InterpolatePhysics, UpdateFollowCamera>()
+            .expect("no cycle");
         post.add_edge::<UpdateFollowCamera, UpdateGlobalTransforms>()
             .expect("no cycle");
     }
@@ -398,12 +520,46 @@ impl Plugin for CarGamePlugin {
         world
             .insert(camera, redlilium_ecs::TemporalJitter::default())
             .unwrap();
+        // Tile-based motion blur (#149): the follow camera pans with the car,
+        // so the environment streaks — motion blur sells the speed. A shorter
+        // shutter than the 0.5 default keeps it light rather than smeary.
+        world
+            .insert(
+                camera,
+                redlilium_ecs::MotionBlur {
+                    shutter: 0.35,
+                    samples: 15,
+                },
+            )
+            .unwrap();
+        // IBL environment as a per-camera asset (#145): the std sunrise set.
+        world
+            .insert(camera, redlilium_ecs::CameraEnvironment::default())
+            .unwrap();
+        // Screen-space ambient occlusion (#150) grounds the IBL ambient; its
+        // per-frame kernel rotation rides the TAA above.
+        world
+            .insert(camera, redlilium_ecs::CameraAmbientOcclusion::default())
+            .unwrap();
+        // HDR bloom (#151) — a subtle default glow on highlights.
+        world
+            .insert(camera, redlilium_ecs::CameraBloom::default())
+            .unwrap();
+        // Auto-exposure (#153) — the compute metering adapts the exposure to
+        // the scene (drives it in place of a manual CameraExposure); the dev
+        // HUD can toggle it off to compare.
+        world
+            .insert(camera, redlilium_ecs::CameraAutoExposure::default())
+            .unwrap();
         world.insert(camera, cam_transform).unwrap();
         world
             .insert(camera, GlobalTransform(cam_transform.to_matrix()))
             .unwrap();
         world.insert(camera, Visibility::VISIBLE).unwrap();
         world.insert(camera, follow).unwrap();
+        // Remember the camera so the in-game HUD's bloom toggle (#151) can find
+        // it without a query.
+        world.insert_resource(GameCamera(camera));
 
         // World content comes from scene assets, starting at the menu (#106).
         // A host that wants a different start scene overrides it through
@@ -1341,14 +1497,17 @@ mod tests {
 
         let mut schedules = Schedules::new();
         {
-            let update = schedules.get_mut::<Update>();
-            update.add_exclusive(SyncPhysicsBodies3D);
-            update.add(DriveCar);
-            update.add(StepPhysics3D);
-            update
+            // Mirror the production wiring: physics in FixedUpdate. The tests
+            // drive one 1/60 `run_frame` per loop, so the accumulator runs
+            // exactly one fixed step per call — same trajectory as before.
+            let fixed = schedules.get_mut::<redlilium_ecs::FixedUpdate>();
+            fixed.add_exclusive(SyncPhysicsBodies3D);
+            fixed.add(DriveCar);
+            fixed.add(StepPhysics3D);
+            fixed
                 .add_edge::<SyncPhysicsBodies3D, DriveCar>()
                 .expect("no cycle");
-            update
+            fixed
                 .add_edge::<DriveCar, StepPhysics3D>()
                 .expect("no cycle");
         }
