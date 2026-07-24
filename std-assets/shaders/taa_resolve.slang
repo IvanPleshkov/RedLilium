@@ -15,6 +15,22 @@
 // Background pixels (no geometry — the G-buffer albedo-alpha marker,
 // ADR-039) carry zero velocity; their history is reprojected through the
 // camera matrices instead (sky moves with camera rotation, not geometry).
+//
+// Three refinements over the base accumulate/clip (#148 follow-up):
+//   1. Karis anti-flicker: the current/history blend happens in a reversible
+//      tonemapped domain (c / (1 + luma)), so a sub-pixel HDR highlight that
+//      the jitter walks in and out of a pixel can no longer dominate the
+//      average and strobe. Exactly the sun-bright class of value from #152.
+//   2. Catmull-Rom history: the reprojected history is fetched with a 5-tap
+//      bicubic (bilinear-optimised) instead of a single bilinear tap, which
+//      undoes most of the per-frame reprojection blur that softens TAA.
+//   3. Depth disocclusion: each frame stashes its clamped view-depth in the
+//      history alpha (otherwise dead — always 1.0). Next frame the reprojected
+//      alpha is the *previous* depth at that pixel; a large relative mismatch
+//      under motion means the history came from a different surface (a moving
+//      foreground uncovering background), so the history is rejected even when
+//      its colour happens to fall inside the variance box. Gated by motion so
+//      static silhouettes keep their temporal AA.
 
 import math; // fast-math-proof NaN guards (any_nan2 / any_nan3, #152)
 import motion; // shared reprojection helpers (#149)
@@ -64,6 +80,9 @@ cbuffer TaaUniforms {
     // y = history validity (0 on the first frame after (re)creation),
     // zw = texel size (1 / target extent).
     float4 params;
+    // Camera world position (xyz) for the linear-depth disocclusion proxy the
+    // history carries in its alpha (#148 depth reject).
+    float4 camera_pos;
 };
 
 [[vk::binding(1, 0)]]
@@ -132,6 +151,78 @@ float3 clip_to_aabb(float3 aabb_min, float3 aabb_max, float3 q) {
     return q;
 }
 
+// Non-negative luma for the Karis anti-flicker weight (any positive-weight
+// combination works; this matches the YCoCg Y so it is consistent with the
+// clip box). `max(0)` because a Catmull-Rom overshoot can push a channel
+// slightly negative, and a negative luma would invert the weight.
+float taa_luma(float3 c) {
+    return max(dot(c, float3(0.25, 0.5, 0.25)), 0.0);
+}
+
+// Karis anti-flicker weight: the inverse of a sample's luma (Karis "High
+// Quality Temporal Supersampling"). Blending current and history as an
+// energy-preserving weighted average with this weight de-emphasises a bright
+// sub-pixel highlight that the jitter walks in and out of a pixel — the
+// firefly can no longer dominate the mean and strobe. A *steady* highlight
+// weighs current and history down equally, so its intensity is preserved
+// (unlike a tonemap round-trip, which is not exactly invertible at the f16
+// extreme and would permanently dim it).
+float taa_flicker_weight(float3 c) {
+    return 1.0 / (1.0 + taa_luma(c));
+}
+
+// 5-tap bilinear-optimised Catmull-Rom fetch (Playdead/INSIDE, MJP). A single
+// bilinear history tap blurs the accumulation a little more each frame; the
+// bicubic reconstruction restores most of that lost sharpness for four extra
+// samples. The Catmull-Rom lobes are negative, so the fetch can overshoot at
+// high-contrast edges — harmless here because the caller clips the result to
+// the neighbourhood AABB straight after. Returns rgb only; the alpha (depth
+// proxy) is fetched separately with a plain bilinear tap, which needs no
+// overshoot.
+float3 sample_history_catmull_rom(float2 uv, float2 texel, float2 resolution) {
+    float2 sample_pos = uv * resolution;
+    float2 tex_pos1 = floor(sample_pos - 0.5) + 0.5;
+    float2 f = sample_pos - tex_pos1;
+
+    // Catmull-Rom weights (sharpness 0.5) per axis.
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+
+    // Fuse the middle two taps into one bilinear fetch at their weighted
+    // centroid — the trick that turns 4x4 taps into 3x3, then a cross into 5.
+    float2 w12 = w1 + w2;
+    float2 offset12 = w2 / w12;
+
+    float2 tc0 = (tex_pos1 - 1.0) * texel;
+    float2 tc3 = (tex_pos1 + 2.0) * texel;
+    float2 tc12 = (tex_pos1 + offset12) * texel;
+
+    float3 result = float3(0.0);
+    result += history.Sample(linear_sampler, float2(tc12.x, tc0.y)).rgb * (w12.x * w0.y);
+    result += history.Sample(linear_sampler, float2(tc0.x, tc12.y)).rgb * (w0.x * w12.y);
+    result += history.Sample(linear_sampler, float2(tc12.x, tc12.y)).rgb * (w12.x * w12.y);
+    result += history.Sample(linear_sampler, float2(tc3.x, tc12.y)).rgb * (w3.x * w12.y);
+    result += history.Sample(linear_sampler, float2(tc12.x, tc3.y)).rgb * (w12.x * w3.y);
+    return result;
+}
+
+// Far sentinel for the view-depth proxy, kept under F16_MAX (65504) so it
+// stores losslessly enough in the history alpha and never rounds to +Inf
+// (a +Inf there would make the disocclusion subtraction NaN, poisoning the
+// blend — the #152 failure mode). Geometry farther than this simply reads as
+// "far", which is exactly right for disocclusion.
+static const float TAA_FAR_DEPTH = 60000.0;
+
+// Relative view-depth mismatch that starts / completes history rejection at a
+// disocclusion. Scale-invariant (fraction of the compared depth), matching the
+// motion-blur SOFT_Z_REL knob. Generous so a static silhouette whose bilinear
+// depth tap merely straddles an edge does not trip it (the motion gate below
+// is the real guard).
+static const float TAA_DEPTH_REJECT_LO = 0.05;
+static const float TAA_DEPTH_REJECT_HI = 0.25;
+
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
     float2 texel = params.zw;
@@ -143,6 +234,10 @@ float4 fs_main(VsOutput input) : SV_Target {
     // (object-independent) — its screen delta drives the adaptive blend.
     float2 prev_uv;
     float2 cam_uv;
+    // This pixel's clamped view-depth, stashed into the history alpha at the
+    // end so next frame can read the *previous* depth here and detect
+    // disocclusion. Sky sits at the far sentinel.
+    float depth;
     bool background = gbuffer_albedo.Sample(nearest_sampler, input.uv).a < 1.0 / 128.0;
     if (background) {
         // Sky has no object motion, so its camera reprojection (far-plane ray
@@ -150,6 +245,7 @@ float4 fs_main(VsOutput input) : SV_Target {
         float3 world = far_plane_world(inv_view_proj, input.uv);
         prev_uv = project_uv(prev_view_proj, world);
         cam_uv = prev_uv;
+        depth = TAA_FAR_DEPTH;
     } else {
         float2 velocity = gbuffer_velocity.Sample(nearest_sampler, input.uv).xy;
         prev_uv = reproject_prev_uv(input.uv, velocity);
@@ -158,6 +254,7 @@ float4 fs_main(VsOutput input) : SV_Target {
         // on the camera, so a moving object does not inflate the blend itself.
         float3 world = gbuffer_position.Sample(nearest_sampler, input.uv).xyz;
         cam_uv = project_uv(prev_view_proj, world);
+        depth = min(length(camera_pos.xyz - world), TAA_FAR_DEPTH);
     }
 
     // Camera-induced screen motion in pixels/frame → adaptive current-frame
@@ -195,10 +292,15 @@ float4 fs_main(VsOutput input) : SV_Target {
     bool on_screen = !any_nan2(prev_uv)
         && all(prev_uv >= float2(0.0)) && all(prev_uv <= float2(1.0));
     if (params.y < 0.5 || !on_screen) {
-        return float4(current, 1.0);
+        // Carry this frame's depth in alpha so the very first accumulated
+        // frame after priming has a valid previous depth to compare against.
+        return float4(current, depth);
     }
 
-    float3 history_color = history.Sample(linear_sampler, prev_uv).rgb;
+    // Catmull-Rom history fetch (bicubic, 5 bilinear taps) instead of a single
+    // bilinear tap — restores the sharpness a per-frame bilinear reprojection
+    // otherwise erodes. `resolution = 1 / texel`.
+    float3 history_color = sample_history_catmull_rom(prev_uv, texel, 1.0 / texel);
     // Belt and suspenders against the same feedback loop: a NaN that slips
     // into the history (driver-dependent contents, future passes) resets to
     // the current sample instead of propagating. `any_nan3`, not the `isnan()`
@@ -209,6 +311,27 @@ float4 fs_main(VsOutput input) : SV_Target {
     float3 clipped = ycocg_to_rgb(
         clip_to_aabb(aabb_min, aabb_max, rgb_to_ycocg(history_color)));
 
-    float3 result = lerp(clipped, current, blend);
-    return float4(result, 1.0);
+    // Depth disocclusion: the previous depth at the reprojected spot is the
+    // history alpha (a plain bilinear tap — no bicubic overshoot on a depth).
+    // A large *relative* mismatch means the reprojection landed on a different
+    // surface (a moving foreground uncovering background), so reject the
+    // history even when its colour happens to fall inside the variance box.
+    // Gated by `saturate(motion_px)`: with no reprojected motion there is no
+    // disocclusion, and a static silhouette whose bilinear depth tap straddles
+    // an edge must keep its temporal AA rather than re-alias.
+    float prev_depth = history.Sample(linear_sampler, prev_uv).a;
+    float depth_diff = abs(depth - prev_depth) / max(depth, 1e-3);
+    float motion_px = length((input.uv - prev_uv) / texel);
+    float reject =
+        smoothstep(TAA_DEPTH_REJECT_LO, TAA_DEPTH_REJECT_HI, depth_diff) * saturate(motion_px);
+    float blend_eff = lerp(blend, 1.0, reject);
+
+    // Karis anti-flicker: an energy-preserving weighted average, each endpoint
+    // scaled by the inverse of its luma, so a bright sub-pixel highlight cannot
+    // dominate the mix and strobe (a steady highlight is preserved — both
+    // endpoints weigh down equally).
+    float w_hist = (1.0 - blend_eff) * taa_flicker_weight(clipped);
+    float w_curr = blend_eff * taa_flicker_weight(current);
+    float3 result = (clipped * w_hist + current * w_curr) / max(w_hist + w_curr, 1e-5);
+    return float4(result, depth);
 }

@@ -387,6 +387,9 @@ struct TaaUniforms {
     prev_view_proj: [[f32; 4]; 4],
     /// x = current-frame blend, y = history validity, zw = texel size.
     params: [f32; 4],
+    /// Camera world position (xyz) for the linear-depth disocclusion proxy
+    /// stored in the history alpha (#148 depth reject).
+    camera_pos: [f32; 4],
 }
 
 /// Uniforms of the velocity-completion pass (must match
@@ -2119,6 +2122,7 @@ impl CameraRenderPipeline for DeferredPipeline {
                         1.0 / size.width.max(1) as f32,
                         1.0 / size.height.max(1) as f32,
                     ],
+                    camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
                 }))
             });
             // Motion blur (#149): TileMax / NeighborMax / reconstruction slots.
