@@ -564,6 +564,193 @@ fn deferred_taa_accumulates_stably() {
     );
 }
 
+/// Disocclusion no-ghost (#148 depth-reject + variance clip): a camera truck
+/// uncovers sky from behind the foreground objects, and their history must not
+/// smear onto the freshly revealed sky. The frame is captured mid-truck at the
+/// final pose and again once fully settled at that *same* pose. The comparison
+/// is restricted to the sky — zero screen velocity under a pure translation, so
+/// read straight off the velocity buffer — where static sky is identical
+/// between the two captures; any sky pixel that disagrees is a temporal ghost
+/// trailing a foreground silhouette. Masking to the sky isolates the ghost from
+/// the legitimate motion-softening on geometry edges, so no calibrated
+/// whole-image threshold is needed. A swapped/degenerate reprojection or a
+/// broken history rejection lights up a whole trailing band and fails here.
+#[test]
+fn deferred_taa_disocclusion_leaves_no_ghost() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let instance = GraphicsInstance::new().expect("graphics instance");
+    let device = instance.create_device().expect("graphics device");
+    if device.name() == "Dummy Adapter" {
+        eprintln!("dummy backend does not render; skipping disocclusion test");
+        return;
+    }
+
+    let mut vfs = Vfs::new();
+    vfs.mount("std", FileSystemProvider::new(STD_ASSETS_DIR));
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs);
+    engine.load_mount_db("std", STD_ASSETS_DIR);
+
+    let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+    let mut ew = create_editor_world_empty(
+        &EditorWorldParams {
+            remote: false,
+            egui: false,
+        },
+        &engine,
+        &mut scene_view,
+        1.0,
+    );
+    spawn_golden_scene(&mut ew.world);
+
+    let output_guid = redlilium_assets::Guid::stable("test/taa_ghost_camera_output");
+    let camera = ew.editor_camera;
+    set_output(&mut ew.world, camera, OutputFormat::Srgb, output_guid);
+    ew.world
+        .insert(camera, redlilium_ecs::TemporalJitter::default())
+        .unwrap();
+    ew.world
+        .insert(camera, CameraEnvironment::default())
+        .unwrap();
+    // Drive the camera transform directly for a deterministic truck; the
+    // free-fly integrator would otherwise overwrite it every tick.
+    let _ = ew.world.remove::<redlilium_ecs::FreeFlyCamera>(camera);
+
+    let runner = EcsRunner::single_thread();
+    ew.schedules.run_startup(&mut ew.world, &runner);
+    let mut pipeline = device.create_pipeline(2);
+
+    // Base framing = the default orbit pose; truck sideways along its own right
+    // axis so the foreground objects parallax against the sky.
+    let base = *ew.world.get::<Transform>(camera).expect("camera transform");
+    // Right axis = column 0 of the pose matrix (unit, camera scale is 1).
+    let bm = base.to_matrix();
+    let right = Vec3::new(bm[(0, 0)], bm[(1, 0)], bm[(2, 0)]);
+    // ~3 px/frame at this framing: enough to uncover a sky strip, slow enough
+    // that the adaptive blend stays on the long memory, where a ghost would
+    // persist for ~10 frames instead of being washed out by fast convergence.
+    const DX: f32 = 0.03;
+    const PAN_FRAMES: i32 = 8;
+    let pose = |i: i32| {
+        Transform::new(
+            base.translation + right * (DX * i as f32),
+            base.rotation,
+            base.scale,
+        )
+    };
+
+    // Settle at the base pose (also lets the async assets finish loading).
+    ew.world.insert(camera, pose(0)).unwrap();
+    let mut calm = 0u32;
+    for _ in 0..600 {
+        tick(&mut ew, &mut pipeline, &runner);
+        calm = if crate::remote_commands::assets_idle(&ew.world) {
+            calm + 1
+        } else {
+            0
+        };
+        if calm >= 3 {
+            break;
+        }
+    }
+    assert!(calm >= 3, "asset pipeline never went idle");
+    for _ in 0..24 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+
+    // Truck to the final pose; the last frame is captured mid-motion.
+    for i in 1..=PAN_FRAMES {
+        ew.world.insert(camera, pose(i)).unwrap();
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let panned = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+    // Sky mask from the same frame: zero screen velocity under a pure truck.
+    let velocity_texture = ew
+        .world
+        .get::<redlilium_ecs::PipelineTargets>(camera)
+        .expect("deferred targets")
+        .get(redlilium_ecs::rendering::deferred::GBUFFER_VELOCITY)
+        .expect("velocity target")
+        .clone();
+    let velocity = decode_velocity(&read_back_texture(
+        &device,
+        &mut pipeline,
+        velocity_texture,
+        4,
+    ));
+
+    // Hold the final pose until the history fully settles: any transient ghost
+    // has decayed, so this is the ground-truth sky at that pose.
+    for _ in 0..30 {
+        tick(&mut ew, &mut pipeline, &runner);
+    }
+    let settled = to_display_rgba8(
+        &read_back(&ew, &device, &mut pipeline, output_guid, OutputFormat::Srgb),
+        OutputFormat::Srgb,
+    );
+
+    // Compare over *deep* sky only. A pixel is sky when its screen velocity is
+    // ~zero (far plane under a pure truck); deep sky additionally requires every
+    // neighbour in a small radius to be sky, which erodes the object↔sky
+    // silhouette boundary out of the mask. That boundary is where the legitimate
+    // TAA edge-convergence (mid-motion vs settled) lives — excluding it leaves a
+    // clean baseline, while a disocclusion ghost smears several pixels *into*
+    // open sky and so still lands inside the eroded mask.
+    const SKY_EPS: f32 = 1e-3; // velocity below this ⇒ sky (far plane at zfar)
+    const ERODE: i32 = 2; // radius of geometry-free neighbourhood required
+    const GHOST_DIFF: u8 = 20; // per-channel display delta that counts as a ghost
+    let is_sky = |x: i32, y: i32| -> bool {
+        if x < 0 || y < 0 || x >= SIZE as i32 || y >= SIZE as i32 {
+            return false;
+        }
+        let v = velocity[(y as u32 * SIZE + x as u32) as usize];
+        (v[0] * v[0] + v[1] * v[1]).sqrt() < SKY_EPS
+    };
+    let deep_sky = |x: i32, y: i32| -> bool {
+        for dy in -ERODE..=ERODE {
+            for dx in -ERODE..=ERODE {
+                if !is_sky(x + dx, y + dy) {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+    let mut sky = 0usize;
+    let mut ghosted = 0usize;
+    let mut worst = 0u8;
+    for y in 0..SIZE as i32 {
+        for x in 0..SIZE as i32 {
+            if !deep_sky(x, y) {
+                continue;
+            }
+            sky += 1;
+            let p = panned.get_pixel(x as u32, y as u32).0;
+            let s = settled.get_pixel(x as u32, y as u32).0;
+            let d = (0..3).map(|c| p[c].abs_diff(s[c])).max().unwrap();
+            worst = worst.max(d);
+            if d > GHOST_DIFF {
+                ghosted += 1;
+            }
+        }
+    }
+    assert!(
+        sky > 5000,
+        "truck must expose enough deep sky to judge: {sky}"
+    );
+    // Validated on-device (M3/MoltenVK): with the current shader the eroded
+    // deep sky is spotless — 0 pixels differ by >GHOST_DIFF, worst delta 3.
+    // Bypassing the history rejection (variance clip + depth reject) lights up
+    // ~86 deep-sky pixels (worst ~89) — a whole trailing band. The cap sits well
+    // clear of the clean baseline and well under the broken signal.
+    assert!(
+        ghosted < 30,
+        "TAA ghost trail on revealed sky: {ghosted} deep-sky px differ >{GHOST_DIFF} (worst {worst}, of {sky})"
+    );
+}
+
 /// SSAO (#150) must only *darken* the image-based ambient, and must visibly
 /// darken contacts. Renders the fixed scene without AO, then with a strong
 /// `CameraAmbientOcclusion`, and asserts three properties that pin the effect
