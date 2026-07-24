@@ -434,6 +434,22 @@ where
             None => return false,
         };
 
+        // Configure to the window's CURRENT size, never the size the last
+        // applied resize recorded: an outdated-surface reconfigure can run
+        // mid-resize with the debounced event still pending, and Vulkan then
+        // silently clamps the swapchain to the real window extent while the
+        // frame is still recorded at the stale size — an out-of-bounds render
+        // area into the smaller swapchain image (device-lost on NVIDIA).
+        if let Some(size) = self.window.as_ref().map(|w| w.inner_size()) {
+            if size.width == 0 || size.height == 0 {
+                // Minimized — nothing sane to configure; the restore's resize
+                // event retries.
+                return false;
+            }
+            ctx.width = size.width;
+            ctx.height = size.height;
+        }
+
         // Wait for ALL in-flight frames before reconfiguring the surface.
         // The surface is shared across all frame slots, so any slot with
         // pending GPU work could still reference the old swapchain textures.
@@ -482,9 +498,18 @@ where
         self.apply_pending_resize();
 
         // If the previous frame reported the surface outdated (resize,
-        // monitor change), recreate the swapchain before acquiring.
+        // monitor change), recreate the swapchain before acquiring. The
+        // reconfigure re-reads the real window size, which may differ from
+        // what the last applied resize recorded (mid-storm) — the handler
+        // must hear about that change or it keeps rendering at the old size.
         if self.context.as_ref().is_some_and(|c| c.surface_outdated) {
-            self.reconfigure_surface();
+            let before = self.context.as_ref().map(|c| (c.width, c.height));
+            if self.reconfigure_surface()
+                && before != self.context.as_ref().map(|c| (c.width, c.height))
+                && let Some(ctx) = &mut self.context
+            {
+                self.handler.on_resize(ctx);
+            }
         }
 
         let now = Instant::now();

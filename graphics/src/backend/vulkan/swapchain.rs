@@ -53,6 +53,13 @@ pub struct VulkanSwapchain {
     /// the CPU then runs several frames ahead (near-zero deltas) and stalls
     /// whole refresh intervals catching up — a visible cadence oscillation.
     pub(crate) present_wait: bool,
+    /// Next present id for pacing, allocated per acquire. Ids must only be
+    /// monotonic **per swapchain object**, so every chain restarts at 1 —
+    /// which also guarantees a wait never references an id from a previous
+    /// (retired) chain: NVIDIA's `vkWaitForPresentKHR` has been observed to
+    /// hang far past its timeout waiting on an id the new chain will never
+    /// reach (frozen app → TDR → device lost during resize storms).
+    next_present_id: u64,
     /// Device handle for cleanup.
     device: ash::Device,
     /// Swapchain loader for cleanup.
@@ -151,6 +158,21 @@ impl VulkanSwapchain {
                 ),
             }
         };
+
+        // The spec forces `current_extent` when the surface reports one; a
+        // caller that asked for a different size will record frames at a size
+        // the swapchain images do not have — an out-of-bounds render area is
+        // device-lost territory, so make the clamp loud.
+        if extent.width != config.width || extent.height != config.height {
+            log::warn!(
+                "Swapchain clamped to the surface's current extent {}x{} (requested {}x{}); \
+                 frames must be recorded at the actual extent",
+                extent.width,
+                extent.height,
+                config.width,
+                config.height
+            );
+        }
 
         // A zero extent (minimized window) is invalid for vkCreateSwapchainKHR.
         // Report it as a parameter error so the caller skips reconfiguring
@@ -365,12 +387,15 @@ impl VulkanSwapchain {
         // stretch an interval (VRR included), never show a frame for less
         // than one, so waiting on the previous present is always sound there;
         // IMMEDIATE/MAILBOX presents are not display-quantized and need no
-        // bounding.
+        // bounding. REDLILIUM_NO_PRESENT_WAIT=1 is the diagnostic escape
+        // hatch: pacing is a driver-facing behavior (NVIDIA and AMD differ),
+        // and ruling it in or out of a repro must not require a rebuild.
         let present_wait = vulkan_backend.present_wait_loader().is_some()
             && matches!(
                 present_mode,
                 vk::PresentModeKHR::FIFO | vk::PresentModeKHR::FIFO_RELAXED
-            );
+            )
+            && !std::env::var("REDLILIUM_NO_PRESENT_WAIT").is_ok_and(|v| v == "1");
 
         log::info!(
             "Created Vulkan swapchain: {}x{} with {} images, {} frames in flight, {:?} / {:?}, \
@@ -400,6 +425,7 @@ impl VulkanSwapchain {
             present_command_buffers,
             current_frame: 0,
             present_wait,
+            next_present_id: 1,
             device: vulkan_backend.device().clone(),
             swapchain_loader: vulkan_backend.swapchain_loader().clone(),
             command_pool: vulkan_backend.command_pool(),
@@ -566,6 +592,18 @@ impl VulkanSwapchain {
             view: Arc::clone(&self.image_view_wrappers[image_idx]),
         };
 
+        // Present pacing: allocate this frame's present id (0 = pacing off).
+        // A skipped or failed present leaves a gap in the sequence, which is
+        // fine — `vkWaitForPresentKHR` waits on a watermark ("id at least
+        // N"), not on an exact match.
+        let present_id = if self.present_wait {
+            let id = self.next_present_id;
+            self.next_present_id += 1;
+            id
+        } else {
+            0
+        };
+
         Ok(VulkanSwapchainAcquireResult {
             view: vulkan_view,
             image_index,
@@ -577,7 +615,7 @@ impl VulkanSwapchain {
             in_flight_fence,
             present_command_buffer: present_cmd,
             suboptimal,
-            present_wait: self.present_wait,
+            present_id,
         })
     }
 }
@@ -607,9 +645,10 @@ pub struct VulkanSwapchainAcquireResult {
     /// surface (e.g. after a resize on X11). The frame should still be
     /// rendered and presented, but the surface needs reconfiguration.
     pub suboptimal: bool,
-    /// Whether the present should be id-tagged and paced with
-    /// `vkWaitForPresentKHR` (see [`VulkanSwapchain::present_wait`]).
-    pub present_wait: bool,
+    /// Present-pacing id for this frame's present, `0` when pacing is off
+    /// (see [`VulkanSwapchain::present_wait`]). Restarts at 1 on every new
+    /// swapchain so a pacing wait can never reference a retired chain.
+    pub present_id: u64,
 }
 
 /// Present a Vulkan swapchain image.
@@ -624,8 +663,8 @@ pub fn present_vulkan_frame(
     render_finished_semaphore: vk::Semaphore,
     in_flight_fence: vk::Fence,
     present_command_buffer: vk::CommandBuffer,
-    frame_index: u64,
-    present_wait: bool,
+    _frame_index: u64,
+    present_id: u64,
 ) -> Result<(), GraphicsError> {
     let cmd = present_command_buffer;
 
@@ -788,12 +827,13 @@ pub fn present_vulkan_frame(
         .swapchains(&swapchains)
         .image_indices(&image_indices);
 
-    // Present pacing: tag this present with a monotonic non-zero id (the
-    // Surface's frame counter is monotonic across swapchain recreations,
-    // which `vkWaitForPresentKHR`'s watermark semantics accept).
-    let present_ids = [frame_index + 1];
+    // Present pacing: tag this present with its per-swapchain id (allocated
+    // at acquire; `0` = pacing off). Ids restart at 1 on every new chain, so
+    // a pacing wait can never reference a retired chain's id.
+    let pacing = present_id > 0;
+    let present_ids = [present_id];
     let mut present_id_info = vk::PresentIdKHR::default().present_ids(&present_ids);
-    if present_wait {
+    if pacing {
         present_info = present_info.push_next(&mut present_id_info);
     }
 
@@ -808,17 +848,23 @@ pub fn present_vulkan_frame(
     // flight. Under FIFO this pins the frame cadence to the refresh clock at
     // the cost of ~1 frame of run-ahead; without it the driver queues presents
     // several frames deep and any hitch turns into a burst/stall oscillation.
-    // Skipped when this present did not reach the queue (OUT_OF_DATE et al).
-    // The timeout is a safety valve (compositor stall, occluded window) —
-    // pacing then degrades gracefully instead of failing the frame.
-    if present_wait
-        && frame_index > 0
-        && matches!(result, Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR))
+    //
+    // Waited ONLY after a cleanly successful present: SUBOPTIMAL means a
+    // resize/monitor transition is in flight, where NVIDIA's
+    // `vkWaitForPresentKHR` has been observed to hang far past its timeout
+    // (frozen app → TDR → device lost) — and pacing a dying chain buys
+    // nothing anyway. `present_id == 1` is the chain's first present: there
+    // is no previous id on this chain to wait for. The timeout is a safety
+    // valve (compositor stall, occluded window) — pacing then degrades
+    // gracefully instead of failing the frame.
+    if pacing
+        && present_id > 1
+        && matches!(result, Ok(false))
         && let Some(wait_loader) = vulkan_backend.present_wait_loader()
     {
         const PRESENT_WAIT_TIMEOUT_NS: u64 = 100_000_000; // 100 ms
         let wait_result = unsafe {
-            wait_loader.wait_for_present(swapchain, frame_index, PRESENT_WAIT_TIMEOUT_NS)
+            wait_loader.wait_for_present(swapchain, present_id - 1, PRESENT_WAIT_TIMEOUT_NS)
         };
         match wait_result {
             Ok(_) => {}
