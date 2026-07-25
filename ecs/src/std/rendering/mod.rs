@@ -90,8 +90,8 @@ pub use shading::{
 #[cfg(feature = "rendering")]
 pub use systems::HotReload;
 pub use systems::{
-    CameraRender, DebugRender, EguiRender, EnsureCameraTargets, FlushUploads, FrameTarget,
-    MaterialInstanceLoad, MeshLoad, ScenePass,
+    CameraRender, DebugRender, EguiPass, EguiRender, EnsureCameraTargets, FlushUploads,
+    FrameTarget, MaterialInstanceLoad, MeshLoad, ScenePass,
 };
 
 use crate::World;

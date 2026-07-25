@@ -238,8 +238,11 @@ pub fn create_editor_world_base(
     world.insert_resource(frame_ring);
     // The CameraRender dispatcher records its scene-pass handle here so the
     // egui overlay + debug pass can depend on it; the registry resolves each
-    // camera's RenderPath (ADR-035).
+    // camera's RenderPath (ADR-035). EguiPass carries the egui overlay's own
+    // handle out of the schedule so the selection-outline pass (appended after
+    // it) can order before the egui draw.
     world.insert_resource(ScenePass::default());
+    world.insert_resource(redlilium_ecs::EguiPass::default());
     world.insert_resource(PipelineRegistry::default());
 
     // Insert WindowInput resource

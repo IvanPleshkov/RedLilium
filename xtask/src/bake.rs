@@ -87,6 +87,11 @@ const REGISTRY: &[ShaderSpec] = &[
     vs_fs_spec("egui", "shaders/library/egui.slang"),
     vs_fs_spec("blit", "runtime/shaders/blit.slang"),
     vs_fs_spec("entity_index", "std-assets/shaders/entity_index.slang"),
+    // Editor-only selection outline (crate-local like blit — not an asset).
+    vs_fs_spec(
+        "selection_outline",
+        "editor/shaders/selection_outline.slang",
+    ),
     vs_fs_spec("opaque_color", "std-assets/shaders/opaque_color.slang"),
     vs_fs_spec(
         "opaque_textured",

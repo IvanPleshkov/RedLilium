@@ -511,17 +511,19 @@ fn tick(
         schedule.submit(play_graph);
     }
 
-    // While a session is live, `screenshot` captures its view camera — the
-    // game camera during Play, the flyover camera during pause. Exactly what
-    // the windowed scene view shows.
-    let source = play.as_deref().and_then(|p| p.scene_color());
-    remote_commands::inject_screenshot_pass(rc, &ew.world, scene_view.device(), &mut graph, source);
-
-    // Entity-index pass + readback, only while a remote pick is in flight
-    // (mirrors the windowed shell's on_draw picking block).
+    // Entity-index pass + readback while a remote pick is in flight, plus the
+    // selection outline whenever something is selected (mirrors the windowed
+    // shell's on_draw picking block — headless just has no egui pass to order
+    // before). Runs BEFORE the screenshot injection so a capture shows the
+    // outline, exactly like the windowed scene view.
     let pending_pick = scene_view.take_pending_pick();
     let pending_rect = scene_view.take_pending_rect_pick();
-    if pending_pick.is_some() || pending_rect.is_some() {
+    let selection_active = ew.world.has_resource::<redlilium_ecs::ui::Selection>()
+        && !ew
+            .world
+            .resource::<redlilium_ecs::ui::Selection>()
+            .is_empty();
+    if pending_pick.is_some() || pending_rect.is_some() || selection_active {
         scene_view.fill_picking_rings(&ew.world);
         if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
             let ei_handle = graph.add_graphics_pass(ei_pass);
@@ -535,11 +537,28 @@ fn tick(
                 let handle = graph.add_transfer_pass(readback);
                 graph.add_dependency(handle, ei_handle);
             }
+            if let Some(outline_pass) = scene_view.build_selection_outline_pass(&ew.world) {
+                let outline_handle = graph.add_graphics_pass(outline_pass);
+                graph.add_dependency(outline_handle, ei_handle);
+                let scene_handle = ew.world.resource::<redlilium_ecs::ScenePass>().0;
+                if let Some(scene_handle) = scene_handle {
+                    graph.add_dependency(outline_handle, scene_handle);
+                }
+                // The outline is now the CameraTarget's last writer — the
+                // screenshot injection below orders after it.
+                ew.world.resource_mut::<redlilium_ecs::ScenePass>().0 = Some(outline_handle);
+            }
         }
         if let Some([_, _, rw, rh]) = pending_rect {
             scene_view.set_rect_layout(rw, rh);
         }
     }
+
+    // While a session is live, `screenshot` captures its view camera — the
+    // game camera during Play, the flyover camera during pause. Exactly what
+    // the windowed scene view shows.
+    let source = play.as_deref().and_then(|p| p.scene_color());
+    remote_commands::inject_screenshot_pass(rc, &ew.world, scene_view.device(), &mut graph, source);
 
     schedule.render(graph);
     pipeline.end_frame(schedule);

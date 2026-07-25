@@ -40,6 +40,14 @@ fn apply_jitter(view_projection: &redlilium_core::math::Mat4, jx: f32, jy: f32) 
 #[derive(Default)]
 pub struct ScenePass(pub Option<PassHandle>);
 
+/// Holds this frame's egui overlay pass handle, reset by [`EguiRender`] each
+/// frame (handles are graph-local, so a stale one must never leak across
+/// frames). Optional resource: passes appended AFTER the Render schedule that
+/// write a texture egui samples — the editor's selection outline writing the
+/// scene camera's target — use it to order themselves before the egui draw.
+#[derive(Default)]
+pub struct EguiPass(pub Option<PassHandle>);
+
 /// Derives each camera's GPU render target from its serializable
 /// [`CameraOutput`] spec (ADR-029, #74).
 ///
@@ -528,6 +536,11 @@ impl System for EguiRender {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
         let world = ctx.raw_world();
+        // Handles are graph-local: clear before any early return so a stale
+        // handle never leaks into a later frame's graph.
+        if world.has_resource::<EguiPass>() {
+            world.resource_mut::<EguiPass>().0 = None;
+        }
         if !world.has_resource::<EguiController>()
             || !world.has_resource::<FrameTarget>()
             || !world.has_resource::<RenderSchedule>()
@@ -546,6 +559,7 @@ impl System for EguiRender {
             egui.end_frame(&ft.target, ft.width, ft.height)
         };
         let mut schedule = world.resource_mut::<RenderSchedule>();
+        let mut egui_handle = None;
         if let Some(graph) = schedule.graph_mut() {
             // Atlas uploads first (graph-ordered before the egui draw).
             egui.flush_uploads(graph);
@@ -554,7 +568,12 @@ impl System for EguiRender {
                 if let Some(scene_handle) = scene_handle {
                     graph.add_dependency(handle, scene_handle);
                 }
+                egui_handle = Some(handle);
             }
+        }
+        drop(schedule);
+        if egui_handle.is_some() && world.has_resource::<EguiPass>() {
+            world.resource_mut::<EguiPass>().0 = egui_handle;
         }
         Ok(())
     }

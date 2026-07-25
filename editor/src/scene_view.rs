@@ -9,15 +9,26 @@
 use std::sync::{Arc, Mutex};
 
 use redlilium_core::math::mat4_to_cols_array_2d;
-use redlilium_ecs::{Camera, Entity, GlobalTransform, MeshRenderer, Visibility, World, shaders};
+use redlilium_ecs::ui::Selection;
+use redlilium_ecs::{
+    Camera, CameraTarget, Entity, GlobalTransform, MeshRenderer, Visibility, World, shaders,
+};
 use redlilium_graphics::{
     BindingGroup, BindingGroupDescriptor, Buffer, BufferDescriptor, BufferTextureCopyRegion,
     BufferTextureLayout, BufferUsage, ColorAttachment, DepthConvention, DepthStencilAttachment,
-    DrawCommand, GraphicsDevice, GraphicsPass, LoadOp, Material, MaterialInstance, RenderTarget,
-    RenderTargetConfig, RingBuffer, ScissorRect, StoreOp, TextureCopyLocation, TextureDescriptor,
-    TextureFormat, TextureOrigin, TextureUsage, TransferConfig, TransferOperation, TransferPass,
+    DrawCommand, GraphicsDevice, GraphicsPass, LoadOp, Material, MaterialInstance, MeshDescriptor,
+    RenderTarget, RenderTargetConfig, RingBuffer, ScissorRect, StoreOp, TextureCopyLocation,
+    TextureDescriptor, TextureFormat, TextureOrigin, TextureUsage, TransferConfig,
+    TransferOperation, TransferPass, VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
     Viewport,
 };
+
+use crate::selection_outline::{SelectionOutlineUniforms, create_selection_outline_material};
+
+/// Selection outline color (the same orange as the AABB wireframe).
+const SELECTION_OUTLINE_COLOR: [f32; 4] = [1.0, 0.6, 0.0, 1.0];
+/// Selection outline width in pixels.
+const SELECTION_OUTLINE_THICKNESS: f32 = 2.0;
 
 /// Manages GPU resources and rendering for the editor's SceneView panel.
 pub struct SceneViewState {
@@ -34,11 +45,14 @@ pub struct SceneViewState {
     last_size: (u32, u32),
 
     // --- Picking ---
-    entity_index_material: Arc<Material>,
-    /// The picking group (group 0): binds the entity-index ring at offset 0, the
-    /// per-draw dynamic offset selecting the entity's slot. Built once (the ring
-    /// buffer and material layout are stable) and reused every frame.
-    entity_index_group: Arc<BindingGroup>,
+    /// Picking materials + their ring binding groups, one per distinct mesh
+    /// vertex layout, created on first use. The pipeline's vertex-input state
+    /// comes from the material's layout, so a single fixed-layout material
+    /// misreads any mesh with a different stride (a generated sphere used to
+    /// pick as a ~2x vertex soup). The group binds the entity-index ring at
+    /// offset 0, the per-draw dynamic offset selecting the entity's slot.
+    entity_index_materials:
+        std::collections::HashMap<VertexLayout, (Arc<Material>, Arc<BindingGroup>)>,
     entity_index_texture: Arc<redlilium_graphics::Texture>,
     readback_buffer: Arc<Buffer>,
     /// Pixel coordinates (physical) of a pending pick request, resolved next frame.
@@ -50,6 +64,22 @@ pub struct SceneViewState {
     /// async map to resolve (#33). Only a diagnostic — the map callback always
     /// clears the flag, so this can't wedge; a high value flags a stuck readback.
     pick_wait_frames: u32,
+
+    // --- Selection outline ---
+    /// R8 selection mask, the entity-index pass's second target (window-sized,
+    /// like `entity_index_texture`). Read by the outline pass.
+    selection_mask_texture: Arc<redlilium_graphics::Texture>,
+    outline_material: Arc<Material>,
+    /// Outline group (group 0): the params ring at binding 0 (per-draw dynamic
+    /// offset) plus the mask texture at binding 1. Rebuilt on mask resize.
+    outline_group: Arc<BindingGroup>,
+    /// Ring of `SelectionOutlineUniforms`, one slot per frame.
+    outline_ring: RingBuffer,
+    /// Fullscreen dummy triangle (3 vertices, positions from `SV_VertexID`).
+    outline_mesh: Arc<redlilium_graphics::Mesh>,
+    /// Whether `fill_picking_rings` flagged any selected renderer this frame;
+    /// gates the outline pass.
+    has_selection: bool,
 
     // --- Rect selection readback ---
     pending_rect_pick: Option<[u32; 4]>,
@@ -83,11 +113,9 @@ pub struct SceneViewState {
 impl SceneViewState {
     /// Create scene view resources.
     pub fn new(device: Arc<GraphicsDevice>, surface_format: TextureFormat) -> Self {
-        let entity_index_material =
-            shaders::create_entity_index_material(&device, TextureFormat::Depth32Float);
-
         let depth_texture = Self::create_depth_texture(&device, 256, 256);
         let entity_index_texture = Self::create_entity_index_texture(&device, 256, 256);
+        let selection_mask_texture = Self::create_selection_mask_texture(&device, 256, 256);
 
         let readback_buffer = device
             .create_buffer(&BufferDescriptor::new(
@@ -116,18 +144,47 @@ impl SceneViewState {
         )
         .expect("Failed to create entity-index transform ring");
 
-        // Picking group 0: eager, built once against the stable ring buffer.
-        let entity_index_group = device
-            .create_binding_group(
-                entity_index_material.binding_layouts()[0].clone(),
-                BindingGroupDescriptor::new().with_buffer_range(
-                    0,
-                    entity_index_ring.buffer().clone(),
-                    0,
-                    std::mem::size_of::<shaders::EntityIndexUniforms>() as u64,
-                ),
+        // Selection outline: fullscreen contour material over the mask the
+        // entity-index pass writes; the params ring holds one slot per frame.
+        let outline_material = create_selection_outline_material(&device, surface_format);
+        let outline_ring = RingBuffer::new(
+            &device,
+            16 << 10,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "scene_view_outline_params",
+        )
+        .expect("Failed to create selection outline params ring");
+        let outline_group = Self::create_outline_group(
+            &device,
+            &outline_material,
+            &outline_ring,
+            &selection_mask_texture,
+        );
+
+        // The fullscreen triangle is generated from SV_VertexID; the mesh only
+        // supplies a vertex count (plus a minimal dummy buffer so every
+        // backend has something to bind) — same shape as the present blit.
+        let outline_layout = Arc::new(
+            VertexLayout::new()
+                .with_buffer(VertexBufferLayout::new(4))
+                .with_label("selection_outline_layout"),
+        );
+        let outline_mesh = device
+            .create_mesh(
+                &MeshDescriptor::new(outline_layout)
+                    .with_vertex_count(3)
+                    .with_label("selection_outline_triangle"),
             )
-            .expect("Failed to create entity-index binding group");
+            .expect("Failed to create selection outline mesh");
+        let mut pending_uploads = Vec::new();
+        if let Some(vb) = outline_mesh.vertex_buffer(0) {
+            let dummy: [f32; 3] = [0.0; 3];
+            pending_uploads.push(TransferOperation::write_buffer(
+                vb.clone(),
+                0,
+                Arc::from(bytemuck::cast_slice(&dummy)),
+            ));
+        }
 
         Self {
             device,
@@ -136,9 +193,14 @@ impl SceneViewState {
             viewport: None,
             scissor: None,
             last_size: (256, 256),
-            entity_index_material,
-            entity_index_group,
+            entity_index_materials: std::collections::HashMap::new(),
             entity_index_texture,
+            selection_mask_texture,
+            outline_material,
+            outline_group,
+            outline_ring,
+            outline_mesh,
+            has_selection: false,
             readback_buffer,
             pending_pick: None,
             pick_result: Arc::new(Mutex::new(Vec::new())),
@@ -151,7 +213,7 @@ impl SceneViewState {
             frame_ring_buffer: None,
             entity_index_ring,
             picking_offsets: std::collections::HashMap::new(),
-            pending_uploads: Vec::new(),
+            pending_uploads,
         }
     }
 
@@ -171,6 +233,7 @@ impl SceneViewState {
     /// lives in `fill_transform_rings` (now the SceneDrawer).
     pub fn fill_picking_rings(&mut self, world: &World) {
         self.picking_offsets.clear();
+        self.has_selection = false;
 
         let Ok(cameras) = world.read_all::<Camera>() else {
             return;
@@ -188,16 +251,31 @@ impl SceneViewState {
             return;
         };
 
+        // Selected entity indices, flagged into the mask target (the outline).
+        let selected: std::collections::HashSet<u32> = if world.has_resource::<Selection>() {
+            world
+                .resource::<Selection>()
+                .entities()
+                .iter()
+                .map(|e| e.index())
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
         for (idx, _renderer) in renderers.iter() {
             let model = globals
                 .get(idx)
                 .map(|g| mat4_to_cols_array_2d(&g.0))
                 .unwrap_or_else(|| mat4_to_cols_array_2d(&redlilium_core::math::Mat4::identity()));
+            let is_selected = selected.contains(&idx);
+            self.has_selection |= is_selected;
             let ei = shaders::EntityIndexUniforms {
                 view_projection: vp,
                 model,
                 entity_index: idx,
-                _padding: [0; 3],
+                selected: u32::from(is_selected),
+                _padding: [0; 2],
             };
             let offset = Self::ring_push(&mut self.entity_index_ring, bytemuck::bytes_of(&ei));
             self.picking_offsets.insert(idx, offset);
@@ -230,7 +308,8 @@ impl SceneViewState {
         self.scissor = Some(ScissorRect::new(x as i32, y as i32, w as u32, h as u32));
     }
 
-    /// Recreate the depth and entity-index textures if the window size changed.
+    /// Recreate the depth, entity-index, and selection-mask textures if the
+    /// window size changed.
     pub fn resize_if_needed(&mut self, width: u32, height: u32) -> bool {
         let width = width.max(1);
         let height = height.max(1);
@@ -241,6 +320,15 @@ impl SceneViewState {
 
         self.depth_texture = Self::create_depth_texture(&self.device, width, height);
         self.entity_index_texture = Self::create_entity_index_texture(&self.device, width, height);
+        self.selection_mask_texture =
+            Self::create_selection_mask_texture(&self.device, width, height);
+        // The outline group binds the mask texture — rebuild against the new one.
+        self.outline_group = Self::create_outline_group(
+            &self.device,
+            &self.outline_material,
+            &self.outline_ring,
+            &self.selection_mask_texture,
+        );
         self.last_size = (width, height);
         true
     }
@@ -263,9 +351,48 @@ impl SceneViewState {
         }
     }
 
+    /// The picking material + ring binding group for `layout`, created on
+    /// first use. Returns `None` for layouts the picking shader cannot
+    /// consume: shader location 0 maps to the layout's first attribute
+    /// (ADR-019), so it must be the position — skinned layouts that lead
+    /// with texcoords are not pickable (pre-existing limitation).
+    fn entity_index_material_for(
+        &mut self,
+        layout: &Arc<VertexLayout>,
+    ) -> Option<(Arc<Material>, Arc<BindingGroup>)> {
+        if layout.attributes.first().map(|a| a.semantic) != Some(VertexAttributeSemantic::Position)
+        {
+            return None;
+        }
+        if let Some(entry) = self.entity_index_materials.get(layout.as_ref()) {
+            return Some(entry.clone());
+        }
+        let material = shaders::create_entity_index_material(
+            &self.device,
+            layout,
+            TextureFormat::Depth32Float,
+        );
+        let group = self
+            .device
+            .create_binding_group(
+                material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new().with_buffer_range(
+                    0,
+                    self.entity_index_ring.buffer().clone(),
+                    0,
+                    std::mem::size_of::<shaders::EntityIndexUniforms>() as u64,
+                ),
+            )
+            .expect("Failed to create entity-index binding group");
+        let entry = (material, group);
+        self.entity_index_materials
+            .insert(layout.as_ref().clone(), entry.clone());
+        Some(entry)
+    }
+
     /// Build a graphics pass that renders entity indices to the entity-index
     /// texture (R32Uint). Uses the same depth buffer as the scene pass.
-    pub fn build_entity_index_pass(&self, world: &World) -> Option<GraphicsPass> {
+    pub fn build_entity_index_pass(&mut self, world: &World) -> Option<GraphicsPass> {
         let renderers = world.read::<MeshRenderer>().ok()?;
         let visibilities = world.read::<Visibility>().ok()?;
 
@@ -276,6 +403,14 @@ impl SceneViewState {
                 .with_color(
                     ColorAttachment::new(RenderTarget::from_texture(
                         self.entity_index_texture.clone(),
+                    ))
+                    .with_load_op(LoadOp::clear_color(0.0, 0.0, 0.0, 0.0))
+                    .with_store_op(StoreOp::Store),
+                )
+                // Second target: the selection mask the outline pass reads.
+                .with_color(
+                    ColorAttachment::new(RenderTarget::from_texture(
+                        self.selection_mask_texture.clone(),
                     ))
                     .with_load_op(LoadOp::clear_color(0.0, 0.0, 0.0, 0.0))
                     .with_store_op(StoreOp::Store),
@@ -296,12 +431,9 @@ impl SceneViewState {
             pass.set_scissor_rect(*scissor);
         }
 
-        // The picking pipeline is a single global material (fixed layout); group 0
-        // binds the shared entity-index ring, the per-draw offset selecting the
-        // entity's slot. The group is created once (see `entity_index_group`);
-        // here we just reuse it per draw.
-        let ei_group = self.entity_index_group.clone();
-
+        // The picking pipeline is specialized per mesh vertex layout (see
+        // `entity_index_material_for`); group 0 binds the shared entity-index
+        // ring, the per-draw offset selecting the entity's slot.
         for (entity_idx, renderer) in renderers.iter() {
             if let Some(vis) = visibilities.get(entity_idx)
                 && !vis.is_visible()
@@ -315,16 +447,67 @@ impl SceneViewState {
                 let Some(mesh) = primitive.mesh() else {
                     continue;
                 };
-                let instance = Arc::new(
-                    MaterialInstance::new(Arc::clone(&self.entity_index_material))
-                        .with_binding_group(Arc::clone(&ei_group)),
-                );
+                let Some((material, group)) = self.entity_index_material_for(mesh.layout()) else {
+                    continue;
+                };
+                let instance = Arc::new(MaterialInstance::new(material).with_binding_group(group));
                 pass.add_draw_command(
                     DrawCommand::new(mesh, instance).with_dynamic_offsets(vec![vec![ei_off]]),
                 );
             }
         }
 
+        Some(pass)
+    }
+
+    /// Build the selection-outline pass: a fullscreen triangle over the scene
+    /// camera's color target drawing a contour around the selection mask the
+    /// entity-index pass wrote this frame. Returns `None` when no selected
+    /// renderer was flagged (by [`fill_picking_rings`](Self::fill_picking_rings))
+    /// or the viewport/camera target is missing.
+    ///
+    /// Graph ordering is the caller's job: after the entity-index pass (mask
+    /// producer) and the CameraTarget's last writer, before the egui overlay
+    /// that samples the target.
+    pub fn build_selection_outline_pass(&mut self, world: &World) -> Option<GraphicsPass> {
+        if !self.has_selection {
+            return None;
+        }
+        // Panel origin inside the window-sized mask. Headless has no panel —
+        // the mask and the target are the same size, offset zero.
+        let (offset_x, offset_y) = self.viewport.as_ref().map_or((0.0, 0.0), |vp| (vp.x, vp.y));
+        // The scene camera's color target (panel-sized; the mask is
+        // window-sized, offset by the panel origin).
+        let color = world
+            .read_all::<CameraTarget>()
+            .ok()
+            .and_then(|t| t.iter().next().map(|(_, target)| target.color.clone()))?;
+
+        let (mask_w, mask_h) = self.last_size;
+        let params = SelectionOutlineUniforms {
+            mask_offset: [offset_x, offset_y],
+            mask_size: [mask_w as f32, mask_h as f32],
+            color: SELECTION_OUTLINE_COLOR,
+            thickness: SELECTION_OUTLINE_THICKNESS,
+            _padding: [0.0; 3],
+        };
+        let offset = Self::ring_push(&mut self.outline_ring, bytemuck::bytes_of(&params));
+
+        let mut pass = GraphicsPass::new("selection_outline".into());
+        // Load the scene contents; only outline pixels are written (the
+        // fragment shader discards everything else).
+        pass.set_render_targets(
+            RenderTargetConfig::new()
+                .with_color(ColorAttachment::new(RenderTarget::from_texture(color))),
+        );
+        let instance = Arc::new(
+            MaterialInstance::new(Arc::clone(&self.outline_material))
+                .with_binding_group(Arc::clone(&self.outline_group)),
+        );
+        pass.add_draw_command(
+            DrawCommand::new(self.outline_mesh.clone(), instance)
+                .with_dynamic_offsets(vec![vec![offset]]),
+        );
         Some(pass)
     }
 
@@ -643,5 +826,44 @@ impl SceneViewState {
                 .with_label("scene_view_entity_index"),
             )
             .expect("Failed to create scene view entity index texture")
+    }
+
+    fn create_selection_mask_texture(
+        device: &Arc<GraphicsDevice>,
+        width: u32,
+        height: u32,
+    ) -> Arc<redlilium_graphics::Texture> {
+        device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    width,
+                    height,
+                    TextureFormat::R8Unorm,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                )
+                .with_label("scene_view_selection_mask"),
+            )
+            .expect("Failed to create scene view selection mask texture")
+    }
+
+    fn create_outline_group(
+        device: &Arc<GraphicsDevice>,
+        material: &Arc<Material>,
+        ring: &RingBuffer,
+        mask: &Arc<redlilium_graphics::Texture>,
+    ) -> Arc<BindingGroup> {
+        device
+            .create_binding_group(
+                material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new()
+                    .with_buffer_range(
+                        0,
+                        ring.buffer().clone(),
+                        0,
+                        std::mem::size_of::<SelectionOutlineUniforms>() as u64,
+                    )
+                    .with_texture(1, mask.clone()),
+            )
+            .expect("Failed to create selection outline binding group")
     }
 }

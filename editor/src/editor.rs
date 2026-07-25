@@ -2216,6 +2216,44 @@ impl AppHandler for Editor {
             ctx.submit(play_graph);
         }
 
+        if render_active && let Some(ew) = self.world.as_ref() {
+            let scene_view = self.scene_view.as_mut().unwrap();
+
+            // Entity index pass (picking) — independent target + depth now.
+            if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
+                let ei_handle = graph.add_graphics_pass(ei_pass);
+                if let Some([px, py]) = pending_pick {
+                    let readback_pass = scene_view.build_pick_readback(px, py);
+                    let readback_handle = graph.add_transfer_pass(readback_pass);
+                    graph.add_dependency(readback_handle, ei_handle);
+                }
+                if let Some([rx, ry, rw, rh]) = pending_rect {
+                    let rect_readback_pass = scene_view.build_rect_readback(rx, ry, rw, rh);
+                    let rect_rb_handle = graph.add_transfer_pass(rect_readback_pass);
+                    graph.add_dependency(rect_rb_handle, ei_handle);
+                }
+
+                // Selection outline: fullscreen contour over the scene camera's
+                // target, reading the mask the entity-index pass just wrote.
+                // Ordered after the CameraTarget's last writer and before the
+                // egui overlay that samples the target; ScenePass moves to the
+                // outline so the screenshot injection below captures it too.
+                if let Some(outline_pass) = scene_view.build_selection_outline_pass(&ew.world) {
+                    let outline_handle = graph.add_graphics_pass(outline_pass);
+                    graph.add_dependency(outline_handle, ei_handle);
+                    let scene_handle = ew.world.resource::<redlilium_ecs::ScenePass>().0;
+                    if let Some(scene_handle) = scene_handle {
+                        graph.add_dependency(outline_handle, scene_handle);
+                    }
+                    let egui_handle = ew.world.resource::<redlilium_ecs::EguiPass>().0;
+                    if let Some(egui_handle) = egui_handle {
+                        graph.add_dependency(egui_handle, outline_handle);
+                    }
+                    ew.world.resource_mut::<redlilium_ecs::ScenePass>().0 = Some(outline_handle);
+                }
+            }
+        }
+
         // Remote screenshot: copy this frame's scene target through the graph.
         // While a session is live it captures the session's view camera (the
         // game camera during Play, the flyover during pause) — exactly what
@@ -2233,25 +2271,6 @@ impl AppHandler for Editor {
                 &mut graph,
                 source,
             );
-        }
-
-        if render_active && let Some(ew) = self.world.as_ref() {
-            let scene_view = self.scene_view.as_ref().unwrap();
-
-            // Entity index pass (picking) — independent target + depth now.
-            if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
-                let ei_handle = graph.add_graphics_pass(ei_pass);
-                if let Some([px, py]) = pending_pick {
-                    let readback_pass = scene_view.build_pick_readback(px, py);
-                    let readback_handle = graph.add_transfer_pass(readback_pass);
-                    graph.add_dependency(readback_handle, ei_handle);
-                }
-                if let Some([rx, ry, rw, rh]) = pending_rect {
-                    let rect_readback_pass = scene_view.build_rect_readback(rx, ry, rw, rh);
-                    let rect_rb_handle = graph.add_transfer_pass(rect_readback_pass);
-                    graph.add_dependency(rect_rb_handle, ei_handle);
-                }
-            }
         }
 
         // Record the rect readback layout (for decoding the async result) after

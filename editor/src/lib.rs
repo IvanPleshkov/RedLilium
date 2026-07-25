@@ -50,6 +50,7 @@ mod play;
 mod project;
 mod remote_commands;
 mod scene_view;
+mod selection_outline;
 mod session;
 mod status_bar;
 mod theme;
