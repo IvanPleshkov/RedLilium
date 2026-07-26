@@ -1284,7 +1284,7 @@ Implement single-flag activation model with run conditions to gate systems:
 3. **Run conditions gate individual systems**
    - `GameActiveCondition`: system runs only during Play/Pause (game active)
    - `NotGameActiveCondition`: system runs only during Stopped (editor active)
-   - Applied to editor-only systems: DrawGrid, DrawSelectionAabb, UpdateFreeFlyCamera
+   - Applied to editor-only systems: DrawGrid, UpdateFreeFlyCamera
    - Infrastructure (transforms, asset pipeline, render) always active
 
 4. **State transition semantics**

@@ -97,9 +97,6 @@ pub struct MeshDescriptor {
     pub index_count: u32,
     /// Optional label for debugging.
     pub label: Option<String>,
-    /// Local-space bounds (carried onto the created `Mesh`). `None` when created
-    /// from a descriptor without CPU data.
-    pub aabb: Option<crate::math::Aabb>,
     /// Opt-in: also make the vertex/index buffers usable as ray-tracing
     /// acceleration-structure build input (#110). The graphics backend ORs the
     /// `ACCELERATION_STRUCTURE_INPUT` usage bit into both buffers when set — the
@@ -121,15 +118,8 @@ impl MeshDescriptor {
             index_format: None,
             index_count: 0,
             label: None,
-            aabb: None,
             acceleration_structure_input: false,
         }
-    }
-
-    /// Set the local-space bounds.
-    pub fn with_aabb(mut self, aabb: Option<crate::math::Aabb>) -> Self {
-        self.aabb = aabb;
-        self
     }
 
     /// Opt in to acceleration-structure build input on the vertex/index buffers
@@ -395,85 +385,13 @@ impl CpuMesh {
         self.vertex_buffers.len()
     }
 
-    /// Compute the axis-aligned bounding box from vertex positions.
-    ///
-    /// Returns `None` if the mesh has no position attribute or no vertex data.
-    pub fn compute_aabb(&self) -> Option<crate::math::Aabb> {
-        use super::layout::VertexAttributeSemantic;
-
-        let pos_attr = self
-            .layout
-            .attributes
-            .iter()
-            .find(|a| a.semantic == VertexAttributeSemantic::Position)?;
-
-        let buffer_index = pos_attr.buffer_index as usize;
-        let vertex_data = self.vertex_buffers.get(buffer_index)?;
-        let stride = self.layout.buffers.get(buffer_index)?.stride as usize;
-        let offset = pos_attr.offset as usize;
-
-        if stride == 0 || vertex_data.is_empty() {
-            return None;
-        }
-
-        let vertex_count = vertex_data.len() / stride;
-        if vertex_count == 0 {
-            return None;
-        }
-
-        let mut min = [f32::MAX; 3];
-        let mut max = [f32::MIN; 3];
-        let mut any = false;
-
-        for i in 0..vertex_count {
-            let base = i * stride + offset;
-            if base + 12 > vertex_data.len() {
-                break;
-            }
-            let x = f32::from_le_bytes([
-                vertex_data[base],
-                vertex_data[base + 1],
-                vertex_data[base + 2],
-                vertex_data[base + 3],
-            ]);
-            let y = f32::from_le_bytes([
-                vertex_data[base + 4],
-                vertex_data[base + 5],
-                vertex_data[base + 6],
-                vertex_data[base + 7],
-            ]);
-            let z = f32::from_le_bytes([
-                vertex_data[base + 8],
-                vertex_data[base + 9],
-                vertex_data[base + 10],
-                vertex_data[base + 11],
-            ]);
-            min[0] = min[0].min(x);
-            min[1] = min[1].min(y);
-            min[2] = min[2].min(z);
-            max[0] = max[0].max(x);
-            max[1] = max[1].max(y);
-            max[2] = max[2].max(z);
-            any = true;
-        }
-
-        // If the position data was too short to read even one full vertex,
-        // return None rather than an inverted (MAX/MIN) bounding box.
-        if !any {
-            return None;
-        }
-
-        Some(crate::math::Aabb::new(min, max))
-    }
-
     /// Create a [`MeshDescriptor`] matching this CpuMesh.
     ///
     /// Useful when creating a GPU mesh from this CPU mesh.
     pub fn to_descriptor(&self) -> MeshDescriptor {
         let mut desc = MeshDescriptor::new(self.layout.clone())
             .with_topology(self.topology)
-            .with_vertex_count(self.vertex_count)
-            .with_aabb(self.compute_aabb());
+            .with_vertex_count(self.vertex_count);
         if let Some(format) = self.index_format {
             desc = desc.with_indices(format, self.index_count);
         }

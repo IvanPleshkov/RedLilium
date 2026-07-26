@@ -1,5 +1,6 @@
-//! Entity index material — renders entity ID to an R32Uint target for picking,
-//! plus an R8Unorm selection mask for the editor's selection outline (MRT).
+//! Entity index material — MRT: entity ID (R32Uint) for picking, the selection
+//! mask (R8Unorm) for the editor's selection outline, and the raw reversed-Z
+//! depth (R32Float) for reconstructing a pick's world-space hit point.
 //!
 //! The fragment shader outputs the raw entity index so a readback or copy from
 //! the picking texture can identify which entity was clicked, and writes the
@@ -70,6 +71,7 @@ pub fn create_entity_index_material(
                 .with_vertex_layout(vertex_layout.clone())
                 .with_color_format(TextureFormat::R32Uint)
                 .with_color_format(TextureFormat::R8Unorm)
+                .with_color_format(TextureFormat::R32Float)
                 .with_depth_format(depth_format)
                 // Group 0 binding 0 (per-entity transform) uses a per-draw offset.
                 .with_dynamic_uniform(0, 0)

@@ -128,15 +128,6 @@ pub trait Component: Clone + Send + Sync + 'static {
     /// The default implementation does nothing.
     fn register_required(_world: &mut crate::World) {}
 
-    /// Returns the axis-aligned bounding box for this component, if applicable.
-    ///
-    /// The default implementation returns `None`. Components with spatial
-    /// extent (e.g. meshes, colliders) should override this. The `world`
-    /// parameter allows looking up resources (e.g. mesh AABB caches).
-    fn aabb(&self, _world: &crate::World) -> Option<redlilium_core::math::Aabb> {
-        None
-    }
-
     /// Compute a deterministic schema hash for this component type.
     ///
     /// The name-keyed, cross-image schema identity: `#[derive(Component)]`

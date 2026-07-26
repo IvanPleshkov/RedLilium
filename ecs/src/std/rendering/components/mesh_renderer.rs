@@ -12,7 +12,6 @@
 //! re-resolves on hot reload; reads are a field access.
 
 use redlilium_assets::AssetRef;
-use redlilium_core::math::Aabb;
 use redlilium_graphics::Mesh;
 use std::sync::Arc;
 
@@ -29,8 +28,8 @@ use crate::std::rendering::loaders::{MaterialInstanceSource, MeshSource};
 /// entity's transform.
 ///
 /// Both refs resolve **asynchronously** (filled by the `MeshLoad` sync system);
-/// [`mesh`](Self::mesh) / [`material`](Self::material) / [`aabb`](Self::aabb)
-/// return `None` until then.
+/// [`mesh`](Self::mesh) / [`material`](Self::material) return `None` until
+/// then.
 #[derive(Debug, Clone)]
 pub struct Primitive {
     /// The mesh reference (source is serialized; resolution is runtime-only).
@@ -57,11 +56,6 @@ impl Primitive {
     /// The resolved material instance, if it has finished loading.
     pub fn material(&self) -> Option<Arc<ResolvedInstance>> {
         self.material.get().cloned()
-    }
-
-    /// The mesh's local-space AABB, once loaded (carried on the `Mesh`).
-    pub fn aabb(&self) -> Option<Aabb> {
-        self.mesh.get().and_then(|m| m.aabb())
     }
 }
 
@@ -125,10 +119,9 @@ impl MeshRenderer {
 }
 
 // NOTE: This is a manual `Component` impl rather than `#[derive(Component)]`.
-// The derive is all-or-nothing and can't express a custom `aabb()` (union over
-// primitives), a per-primitive inspector, and source-only serialization of the
-// `AssetRef` fields. This matches how GPU components have always been written in
-// this engine.
+// The derive is all-or-nothing and can't express a per-primitive inspector or
+// source-only serialization of the `AssetRef` fields. This matches how GPU
+// components have always been written in this engine.
 impl crate::Component for MeshRenderer {
     const NAME: &'static str = "MeshRenderer";
 
@@ -163,13 +156,6 @@ impl crate::Component for MeshRenderer {
         world.register_required::<Self, crate::Transform>();
         world.register_required::<Self, crate::GlobalTransform>();
         world.register_required::<Self, crate::Visibility>();
-    }
-
-    fn aabb(&self, _world: &crate::World) -> Option<Aabb> {
-        self.primitives
-            .iter()
-            .filter_map(|p| p.aabb())
-            .reduce(|acc, a| acc.union(&a))
     }
 
     fn serialize_component(

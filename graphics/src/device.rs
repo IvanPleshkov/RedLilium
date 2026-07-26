@@ -1390,7 +1390,7 @@ impl GraphicsDevice {
         };
 
         // Create the mesh
-        let mut mesh_data = Mesh::new(
+        let mesh_data = Mesh::new(
             Arc::clone(self),
             descriptor.layout.clone(),
             descriptor.topology,
@@ -1401,9 +1401,6 @@ impl GraphicsDevice {
             index_count,
             descriptor.label.clone(),
         );
-        // Set the local-space bounds before sharing (a tracking Weak would block
-        // a later Arc::get_mut, so it must be set here, pre-Arc).
-        mesh_data.set_aabb(descriptor.aabb);
         let mesh = Arc::new(mesh_data);
 
         // Track it
@@ -1426,9 +1423,6 @@ impl GraphicsDevice {
         self: &Arc<Self>,
         cpu_mesh: &CpuMesh,
     ) -> Result<(Arc<Mesh>, Vec<TransferOperation>), GraphicsError> {
-        // `to_descriptor` carries the local-space bounds, which `create_mesh`
-        // records on the mesh (before the tracking Weak, which would block a
-        // later Arc::get_mut).
         self.create_mesh_deferred_with(cpu_mesh, &cpu_mesh.to_descriptor())
     }
 

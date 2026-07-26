@@ -25,10 +25,59 @@ use redlilium_graphics::{
 
 use crate::selection_outline::{SelectionOutlineUniforms, create_selection_outline_material};
 
-/// Selection outline color (the same orange as the AABB wireframe).
+/// Selection outline color (editor orange).
 const SELECTION_OUTLINE_COLOR: [f32; 4] = [1.0, 0.6, 0.0, 1.0];
 /// Selection outline width in pixels.
 const SELECTION_OUTLINE_THICKNESS: f32 = 2.0;
+
+/// Byte offset of the pick-depth texel inside the pick readback buffer (the
+/// entity index occupies bytes 0..4; texture-copy destinations keep a safe
+/// 256-byte alignment).
+const PICK_DEPTH_OFFSET: u64 = 256;
+
+/// Resolved GPU pick: the hit entity index (`None` = empty space) and the
+/// exact world-space surface point under the cursor, reconstructed from the
+/// picking pass's depth output. `world_point` is `None` when the pick hit no
+/// rendered geometry (cleared reversed-Z background).
+pub struct PickHit {
+    pub entity: Option<u32>,
+    pub world_point: Option<redlilium_core::math::Vec3>,
+}
+
+/// Inputs to reconstruct a pick's world-space point from its depth readback:
+/// the picked pixel, the view-projection the picking pass rendered with, and
+/// the viewport mapping NDC to pick-texture pixels at that time.
+struct PickSnapshot {
+    px: u32,
+    py: u32,
+    view_projection: redlilium_core::math::Mat4,
+    /// (x, y, w, h) of the viewport in pick-texture pixels.
+    viewport: [f32; 4],
+}
+
+impl PickSnapshot {
+    /// Unproject the picked texel at the given [0,1] reversed-Z depth through
+    /// the inverse view-projection. NDC y is up while pixel y grows down;
+    /// sampling at the texel center.
+    fn unproject(&self, depth: f32) -> Option<redlilium_core::math::Vec3> {
+        let [vx, vy, vw, vh] = self.viewport;
+        if vw <= 0.0 || vh <= 0.0 {
+            return None;
+        }
+        let ndc_x = 2.0 * ((self.px as f32 + 0.5 - vx) / vw) - 1.0;
+        let ndc_y = 1.0 - 2.0 * ((self.py as f32 + 0.5 - vy) / vh);
+        let inv = self.view_projection.try_inverse()?;
+        let world = inv * redlilium_core::math::Vec4::new(ndc_x, ndc_y, depth, 1.0);
+        if world.w.abs() < 1e-9 {
+            return None;
+        }
+        Some(redlilium_core::math::Vec3::new(
+            world.x / world.w,
+            world.y / world.w,
+            world.z / world.w,
+        ))
+    }
+}
 
 /// Manages GPU resources and rendering for the editor's SceneView panel.
 pub struct SceneViewState {
@@ -54,6 +103,15 @@ pub struct SceneViewState {
     entity_index_materials:
         std::collections::HashMap<VertexLayout, (Arc<Material>, Arc<BindingGroup>)>,
     entity_index_texture: Arc<redlilium_graphics::Texture>,
+    /// R32Float pick-depth target, the entity-index pass's third MRT output
+    /// (raw reversed-Z `frag_coord.z`). Read back with the pick to
+    /// reconstruct the exact world-space hit point.
+    pick_depth_texture: Arc<redlilium_graphics::Texture>,
+    /// View-projection the last `fill_picking_rings` rendered with —
+    /// snapshotted per pick for the depth unprojection.
+    picking_view_projection: Option<redlilium_core::math::Mat4>,
+    /// Unprojection inputs captured when the pick readback was built.
+    pick_snapshot: Option<PickSnapshot>,
     readback_buffer: Arc<Buffer>,
     /// Pixel coordinates (physical) of a pending pick request, resolved next frame.
     pending_pick: Option<[u32; 2]>,
@@ -116,10 +174,13 @@ impl SceneViewState {
         let depth_texture = Self::create_depth_texture(&device, 256, 256);
         let entity_index_texture = Self::create_entity_index_texture(&device, 256, 256);
         let selection_mask_texture = Self::create_selection_mask_texture(&device, 256, 256);
+        let pick_depth_texture = Self::create_pick_depth_texture(&device, 256, 256);
 
+        // Holds the picked entity-index texel at 0..4 and the pick-depth
+        // texel at PICK_DEPTH_OFFSET.
         let readback_buffer = device
             .create_buffer(&BufferDescriptor::new(
-                4,
+                PICK_DEPTH_OFFSET + 4,
                 BufferUsage::COPY_DST | BufferUsage::MAP_READ,
             ))
             .expect("Failed to create picking readback buffer");
@@ -195,6 +256,9 @@ impl SceneViewState {
             last_size: (256, 256),
             entity_index_materials: std::collections::HashMap::new(),
             entity_index_texture,
+            pick_depth_texture,
+            picking_view_projection: None,
+            pick_snapshot: None,
             selection_mask_texture,
             outline_material,
             outline_group,
@@ -234,15 +298,18 @@ impl SceneViewState {
     pub fn fill_picking_rings(&mut self, world: &World) {
         self.picking_offsets.clear();
         self.has_selection = false;
+        self.picking_view_projection = None;
 
         let Ok(cameras) = world.read_all::<Camera>() else {
             return;
         };
-        let vp = match cameras.iter().next() {
-            Some((_, camera)) => mat4_to_cols_array_2d(&camera.view_projection()),
+        let vp_mat = match cameras.iter().next() {
+            Some((_, camera)) => camera.view_projection(),
             None => return,
         };
         drop(cameras);
+        self.picking_view_projection = Some(vp_mat);
+        let vp = mat4_to_cols_array_2d(&vp_mat);
 
         let Ok(renderers) = world.read::<MeshRenderer>() else {
             return;
@@ -322,6 +389,7 @@ impl SceneViewState {
         self.entity_index_texture = Self::create_entity_index_texture(&self.device, width, height);
         self.selection_mask_texture =
             Self::create_selection_mask_texture(&self.device, width, height);
+        self.pick_depth_texture = Self::create_pick_depth_texture(&self.device, width, height);
         // The outline group binds the mask texture — rebuild against the new one.
         self.outline_group = Self::create_outline_group(
             &self.device,
@@ -411,6 +479,15 @@ impl SceneViewState {
                 .with_color(
                     ColorAttachment::new(RenderTarget::from_texture(
                         self.selection_mask_texture.clone(),
+                    ))
+                    .with_load_op(LoadOp::clear_color(0.0, 0.0, 0.0, 0.0))
+                    .with_store_op(StoreOp::Store),
+                )
+                // Third target: raw reversed-Z depth for the pick's
+                // world-point readback (clear 0 = background).
+                .with_color(
+                    ColorAttachment::new(RenderTarget::from_texture(
+                        self.pick_depth_texture.clone(),
                     ))
                     .with_load_op(LoadOp::clear_color(0.0, 0.0, 0.0, 0.0))
                     .with_store_op(StoreOp::Store),
@@ -511,21 +588,39 @@ impl SceneViewState {
         Some(pass)
     }
 
-    /// Build a transfer pass that copies a single pixel from the entity-index
-    /// texture into the readback buffer.
-    pub fn build_pick_readback(&self, px: u32, py: u32) -> TransferPass {
+    /// Build a transfer pass that copies the picked pixel from the
+    /// entity-index texture (bytes 0..4) and the pick-depth texture (at
+    /// [`PICK_DEPTH_OFFSET`]) into the readback buffer, and snapshot the
+    /// unprojection inputs for [`resolve_pick`](Self::resolve_pick).
+    pub fn build_pick_readback(&mut self, px: u32, py: u32) -> TransferPass {
         let (w, h) = self.last_size;
         let px = px.min(w.saturating_sub(1));
         let py = py.min(h.saturating_sub(1));
 
-        let region = BufferTextureCopyRegion::new(
-            BufferTextureLayout::packed(),
-            TextureCopyLocation::new(0, TextureOrigin::new(px, py, 0)),
-            redlilium_graphics::Extent3d {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
+        self.pick_snapshot = self.picking_view_projection.map(|vp| PickSnapshot {
+            px,
+            py,
+            view_projection: vp,
+            viewport: self
+                .viewport
+                .as_ref()
+                .map_or([0.0, 0.0, w as f32, h as f32], |v| {
+                    [v.x, v.y, v.width, v.height]
+                }),
+        });
+
+        let origin = TextureCopyLocation::new(0, TextureOrigin::new(px, py, 0));
+        let one_texel = redlilium_graphics::Extent3d {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let index_region =
+            BufferTextureCopyRegion::new(BufferTextureLayout::packed(), origin, one_texel);
+        let depth_region = BufferTextureCopyRegion::new(
+            BufferTextureLayout::new(PICK_DEPTH_OFFSET, None, None),
+            origin,
+            one_texel,
         );
 
         // Clear any stale result so `resolve_pick` only sees this readback.
@@ -535,18 +630,23 @@ impl SceneViewState {
 
         let mut pass = TransferPass::new("pick_readback".into());
         pass.set_transfer_config(TransferConfig::new().with_operations(vec![
-            // 1. Copy the picked pixel from the entity-index texture into the
-            //    host-visible readback buffer.
+            // 1. Copy the picked texels from the entity-index and pick-depth
+            //    textures into the host-visible readback buffer.
             TransferOperation::readback_texture(
                 self.entity_index_texture.clone(),
                 self.readback_buffer.clone(),
-                vec![region],
+                vec![index_region],
+            ),
+            TransferOperation::readback_texture(
+                self.pick_depth_texture.clone(),
+                self.readback_buffer.clone(),
+                vec![depth_region],
             ),
             // 2. After the fence, the frame pipeline copies the buffer into
             //    `pick_result` for `resolve_pick` to poll.
             TransferOperation::readback_buffer(
                 self.readback_buffer.clone(),
-                0..4,
+                0..(PICK_DEPTH_OFFSET as usize + 4),
                 self.pick_result.clone(),
             ),
         ]));
@@ -596,23 +696,38 @@ impl SceneViewState {
     /// the GPU readback completes.
     ///
     /// The outer `Option` is readiness (`None` while the GPU readback is in
-    /// flight); the inner one is the hit — `Some(entity_index)` or `None` for
-    /// empty space. A miss is a completed result, not a pending one: remote
-    /// picks must answer it. The result is consumed once read.
-    pub fn resolve_pick(&mut self) -> Option<Option<u32>> {
+    /// flight); the [`PickHit`] carries the hit entity (`None` for empty
+    /// space) and the depth-derived world-space surface point. A miss is a
+    /// completed result, not a pending one: remote picks must answer it. The
+    /// result is consumed once read.
+    pub fn resolve_pick(&mut self) -> Option<PickHit> {
         let data = {
             let mut guard = self.pick_result.lock().ok()?;
-            if guard.len() < 4 {
+            if guard.len() < PICK_DEPTH_OFFSET as usize + 4 {
                 return None; // not ready yet
             }
             std::mem::take(&mut *guard)
         };
         let value = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if value == 0 {
-            Some(None) // cleared background — no entity
+        let d = PICK_DEPTH_OFFSET as usize;
+        let depth = f32::from_le_bytes([data[d], data[d + 1], data[d + 2], data[d + 3]]);
+
+        let snapshot = self.pick_snapshot.take();
+        // Depth 0 is the cleared reversed-Z background — no surface there.
+        let world_point = if depth > 0.0 {
+            snapshot.and_then(|s| s.unproject(depth))
         } else {
-            Some(Some(value - 1)) // shader wrote entity_index + 1
-        }
+            None
+        };
+        let entity = if value == 0 {
+            None // cleared background — no entity
+        } else {
+            Some(value - 1) // shader wrote entity_index + 1
+        };
+        Some(PickHit {
+            entity,
+            world_point,
+        })
     }
 
     // ---- Rect selection readback ----
@@ -826,6 +941,24 @@ impl SceneViewState {
                 .with_label("scene_view_entity_index"),
             )
             .expect("Failed to create scene view entity index texture")
+    }
+
+    fn create_pick_depth_texture(
+        device: &Arc<GraphicsDevice>,
+        width: u32,
+        height: u32,
+    ) -> Arc<redlilium_graphics::Texture> {
+        device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    width,
+                    height,
+                    TextureFormat::R32Float,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+                )
+                .with_label("scene_view_pick_depth"),
+            )
+            .expect("Failed to create scene view pick depth texture")
     }
 
     fn create_selection_mask_texture(

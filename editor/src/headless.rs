@@ -429,7 +429,7 @@ fn tick(
 
     // Resolve last tick's pick readback into its remote response.
     if let Some(hit) = scene_view.resolve_pick() {
-        remote_commands::complete_point_pick(rc, &ew.world, hit);
+        remote_commands::complete_point_pick(rc, &ew.world, &hit);
     }
     if let Some(indices) = scene_view.resolve_rect_pick() {
         remote_commands::complete_rect_pick(rc, &ew.world, &indices);

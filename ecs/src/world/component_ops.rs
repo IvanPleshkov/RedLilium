@@ -114,10 +114,6 @@ impl World {
                     Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
                 })
             }),
-            aabb_fn: |world, entity| {
-                let comp = world.get::<T>(entity)?;
-                comp.aabb(world)
-            },
             scan_asset_refs_fn: |world, since, f| {
                 if let Ok(storage) = world.read_all::<T>() {
                     for (idx, comp) in storage.iter() {
@@ -195,10 +191,6 @@ impl World {
                     Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
                 })
             }),
-            aabb_fn: |world, entity| {
-                let comp = world.get::<T>(entity)?;
-                comp.aabb(world)
-            },
             scan_asset_refs_fn: |world, since, f| {
                 if let Ok(storage) = world.read_all::<T>() {
                     for (idx, comp) in storage.iter() {

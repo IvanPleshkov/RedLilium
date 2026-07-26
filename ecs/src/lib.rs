@@ -158,8 +158,6 @@ pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;
 #[cfg(feature = "rendering")]
 pub use self::std::systems::DrawGrid;
-#[cfg(feature = "rendering")]
-pub use self::std::systems::{DrawSelectionAabb, SelectionAabbMode};
 pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms};
 pub use self::std::time::{GameTime, RealTime};
 

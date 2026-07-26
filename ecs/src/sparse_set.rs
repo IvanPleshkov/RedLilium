@@ -167,8 +167,6 @@ pub(crate) struct ComponentMeta {
     pub serialize_fn: SerializeComponentFn,
     /// Deserialize and insert this component on an entity.
     pub deserialize_fn: DeserializeComponentFn,
-    /// Get the axis-aligned bounding box contributed by this component on an entity.
-    pub aabb_fn: fn(&World, Entity) -> Option<redlilium_core::math::Aabb>,
     /// Scan all instances' asset references (read-only): the callback receives
     /// `(entity_index, &AssetRef<S> as &dyn Any)` for every ref of every
     /// instance. No-op for components without asset refs.

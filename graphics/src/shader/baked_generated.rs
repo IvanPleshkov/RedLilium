@@ -20,10 +20,6 @@ pub static BAKED_SLANG_TAG: &str = "2026.8";
 /// key -> compiled WGSL, sorted ascending by key.
 pub static BAKED_WGSL: &[(u64, &str)] = &[
     (
-        0x03d70dad15615cfc,
-        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_Uniforms_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) entity_index_0 : u32,\n    @align(4) selected_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> Uniforms_0 : SLANG_ParameterGroup_Uniforms_std140_0;\nstruct vertexOutput_0\n{\n    @builtin(position) output_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> vertexOutput_0\n{\n    var _S2 : vertexOutput_0 = vertexOutput_0( ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(Uniforms_0.model_0.data_0[i32(0)][i32(0)], Uniforms_0.model_0.data_0[i32(1)][i32(0)], Uniforms_0.model_0.data_0[i32(2)][i32(0)], Uniforms_0.model_0.data_0[i32(3)][i32(0)], Uniforms_0.model_0.data_0[i32(0)][i32(1)], Uniforms_0.model_0.data_0[i32(1)][i32(1)], Uniforms_0.model_0.data_0[i32(2)][i32(1)], Uniforms_0.model_0.data_0[i32(3)][i32(1)], Uniforms_0.model_0.data_0[i32(0)][i32(2)], Uniforms_0.model_0.data_0[i32(1)][i32(2)], Uniforms_0.model_0.data_0[i32(2)][i32(2)], Uniforms_0.model_0.data_0[i32(3)][i32(2)], Uniforms_0.model_0.data_0[i32(0)][i32(3)], Uniforms_0.model_0.data_0[i32(1)][i32(3)], Uniforms_0.model_0.data_0[i32(2)][i32(3)], Uniforms_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(Uniforms_0.view_projection_0.data_0[i32(0)][i32(0)], Uniforms_0.view_projection_0.data_0[i32(1)][i32(0)], Uniforms_0.view_projection_0.data_0[i32(2)][i32(0)], Uniforms_0.view_projection_0.data_0[i32(3)][i32(0)], Uniforms_0.view_projection_0.data_0[i32(0)][i32(1)], Uniforms_0.view_projection_0.data_0[i32(1)][i32(1)], Uniforms_0.view_projection_0.data_0[i32(2)][i32(1)], Uniforms_0.view_projection_0.data_0[i32(3)][i32(1)], Uniforms_0.view_projection_0.data_0[i32(0)][i32(2)], Uniforms_0.view_projection_0.data_0[i32(1)][i32(2)], Uniforms_0.view_projection_0.data_0[i32(2)][i32(2)], Uniforms_0.view_projection_0.data_0[i32(3)][i32(2)], Uniforms_0.view_projection_0.data_0[i32(0)][i32(3)], Uniforms_0.view_projection_0.data_0[i32(1)][i32(3)], Uniforms_0.view_projection_0.data_0[i32(2)][i32(3)], Uniforms_0.view_projection_0.data_0[i32(3)][i32(3)]))))) );\n    return _S2;\n}\n\n",
-    ),
-    (
         0x04cef34dff34f191,
         "@binding(1) @group(0) var color_0 : texture_2d<f32>;\n\n@binding(7) @group(0) var linear_sampler_0 : sampler;\n\n@binding(2) @group(0) var neighbor_max_0 : texture_2d<f32>;\n\n@binding(6) @group(0) var nearest_sampler_0 : sampler;\n\n@binding(3) @group(0) var gbuffer_velocity_0 : texture_2d<f32>;\n\nstruct SLANG_ParameterGroup_MbReconstructUniforms_std140_0\n{\n    @align(16) inv_resolution_0 : vec2<f32>,\n    @align(8) resolution_0 : vec2<f32>,\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) shutter_0 : f32,\n    @align(4) tile_size_0 : f32,\n    @align(8) samples_0 : f32,\n    @align(4) _pad_0 : f32,\n};\n\n@binding(0) @group(0) var<uniform> MbReconstructUniforms_0 : SLANG_ParameterGroup_MbReconstructUniforms_std140_0;\n@binding(5) @group(0) var gbuffer_albedo_0 : texture_2d<f32>;\n\n@binding(4) @group(0) var gbuffer_position_0 : texture_2d<f32>;\n\nfn velocity_px_0( uv_0 : vec2<f32>) -> vec2<f32>\n{\n    return (textureSample((gbuffer_velocity_0), (nearest_sampler_0), (uv_0))).xy * vec2<f32>(0.5f, -0.5f) * MbReconstructUniforms_0.resolution_0 * vec2<f32>(MbReconstructUniforms_0.shutter_0);\n}\n\nfn view_depth_0( uv_1 : vec2<f32>) -> f32\n{\n    if(((textureSample((gbuffer_albedo_0), (nearest_sampler_0), (uv_1))).w) < 0.0078125f)\n    {\n        return 1.0e+07f;\n    }\n    return length(MbReconstructUniforms_0.camera_pos_0.xyz - (textureSample((gbuffer_position_0), (nearest_sampler_0), (uv_1))).xyz);\n}\n\nfn ign_0( p_0 : vec2<f32>) -> f32\n{\n    return fract(52.98291778564453125f * fract(dot(p_0, vec2<f32>(0.06711056083440781f, 0.00583714991807938f))));\n}\n\nfn soft_z_0( a_0 : f32,  b_0 : f32) -> f32\n{\n    return saturate(1.0f - (a_0 - b_0) / max(0.05000000074505806f * max(a_0, b_0), 0.00000999999974738f));\n}\n\nfn cone_0( dist_0 : f32,  v_0 : f32) -> f32\n{\n    return saturate(1.0f - dist_0 / max(v_0, 0.00000999999974738f));\n}\n\nfn cylinder_0( dist_1 : f32,  v_1 : f32) -> f32\n{\n    return 1.0f - smoothstep(0.94999998807907104f * v_1, 1.04999995231628418f * v_1, dist_1);\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_2 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var center_color_0 : vec3<f32> = (textureSample((color_0), (linear_sampler_0), (_S1.uv_2))).xyz;\n    var v_max_0 : vec2<f32> = (textureSample((neighbor_max_0), (nearest_sampler_0), (_S1.uv_2))).xy;\n    if((length(v_max_0)) < 0.5f)\n    {\n        var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(center_color_0, 1.0f) );\n        return _S2;\n    }\n    var _S3 : f32 = max(length(velocity_px_0(_S1.uv_2)), 0.5f);\n    var _S4 : f32 = view_depth_0(_S1.uv_2);\n    var _S5 : i32 = max(i32(MbReconstructUniforms_0.samples_0), i32(1));\n    var _S6 : f32 = ign_0(position_0.xy) - 0.5f;\n    var weight_0 : f32 = 1.0f / _S3;\n    var _S7 : vec3<f32> = center_color_0 * vec3<f32>(weight_0);\n    var i_0 : i32 = i32(0);\n    var weight_1 : f32 = weight_0;\n    var sum_0 : vec3<f32> = _S7;\n    for(;;)\n    {\n        if(i_0 < _S5)\n        {\n        }\n        else\n        {\n            break;\n        }\n        var offset_0 : vec2<f32> = v_max_0 * vec2<f32>((0.5f * mix(-1.0f, 1.0f, (f32(i_0) + _S6 + 1.0f) / (f32(_S5) + 1.0f))));\n        var dist_2 : f32 = length(offset_0);\n        var s_uv_0 : vec2<f32> = _S1.uv_2 + offset_0 * MbReconstructUniforms_0.inv_resolution_0;\n        var _S8 : f32 = max(length(velocity_px_0(s_uv_0)), 0.5f);\n        var s_depth_0 : f32 = view_depth_0(s_uv_0);\n        var w_0 : f32 = soft_z_0(_S4, s_depth_0) * cone_0(dist_2, _S3) + soft_z_0(s_depth_0, _S4) * cone_0(dist_2, _S8) + cylinder_0(dist_2, _S8) * cylinder_0(dist_2, _S3) * 2.0f;\n        var weight_2 : f32 = weight_1 + w_0;\n        var sum_1 : vec3<f32> = sum_0 + (textureSample((color_0), (linear_sampler_0), (s_uv_0))).xyz * vec3<f32>(w_0);\n        i_0 = i_0 + i32(1);\n        weight_1 = weight_2;\n        sum_0 = sum_1;\n    }\n    var _S9 : pixelOutput_0 = pixelOutput_0( vec4<f32>(sum_0 / vec3<f32>(max(weight_1, 0.00000999999974738f)), 1.0f) );\n    return _S9;\n}\n\n",
     ),
@@ -152,10 +148,6 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct SLANG_ParameterGroup_ResolveUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n    @align(16) limits_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> ResolveUniforms_0 : SLANG_ParameterGroup_ResolveUniforms_std140_0;\n@binding(1) @group(0) var<storage, read> histogram_0 : array<u32>;\n\n@binding(2) @group(0) var<storage, read_write> exposure_0 : array<f32>;\n\n@compute\n@workgroup_size(1, 1, 1)\nfn cs_main(@builtin(global_invocation_id) tid_0 : vec3<u32>)\n{\n    var _S1 : f32 = ResolveUniforms_0.params_0.x;\n    var _S2 : f32 = ResolveUniforms_0.params_0.y;\n    var rate_up_0 : f32 = ResolveUniforms_0.params_0.z;\n    var key_0 : f32 = ResolveUniforms_0.params_0.w;\n    var min_mult_0 : f32 = ResolveUniforms_0.limits_0.x;\n    var max_mult_0 : f32 = ResolveUniforms_0.limits_0.y;\n    var rate_down_0 : f32 = ResolveUniforms_0.limits_0.z;\n    var i_0 : u32 = u32(1);\n    var weighted_0 : f32 = 0.0f;\n    var total_0 : f32 = 0.0f;\n    for(;;)\n    {\n        if(i_0 < u32(256))\n        {\n        }\n        else\n        {\n            break;\n        }\n        var count_0 : f32 = f32(histogram_0[i_0]);\n        var weighted_1 : f32 = weighted_0 + mix(_S1, _S2, (f32(i_0) - 0.5f) / 255.0f) * count_0;\n        var total_1 : f32 = total_0 + count_0;\n        i_0 = i_0 + u32(1);\n        weighted_0 = weighted_1;\n        total_0 = total_1;\n    }\n    var prev_0 : f32 = exposure_0[i32(0)];\n    if(total_0 < 1.0f)\n    {\n        return;\n    }\n    var target_0 : f32 = clamp(key_0 / max(exp2(weighted_0 / total_0), 0.00009999999747379f), min_mult_0, max_mult_0);\n    var rate_0 : f32;\n    if(target_0 > prev_0)\n    {\n        rate_0 = rate_up_0;\n    }\n    else\n    {\n        rate_0 = rate_down_0;\n    }\n    exposure_0[i32(0)] = prev_0 + (target_0 - prev_0) * rate_0;\n    return;\n}\n\n",
     ),
     (
-        0x87c188ee3f84ae6c,
-        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_Uniforms_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) entity_index_0 : u32,\n    @align(4) selected_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> Uniforms_0 : SLANG_ParameterGroup_Uniforms_std140_0;\nstruct FsOutput_0\n{\n    @location(0) index_0 : u32,\n    @location(1) mask_0 : f32,\n};\n\n@fragment\nfn fs_main() -> FsOutput_0\n{\n    var output_0 : FsOutput_0;\n    output_0.index_0 = Uniforms_0.entity_index_0 + u32(1);\n    var _S1 : f32;\n    if((Uniforms_0.selected_0) != u32(0))\n    {\n        _S1 = 1.0f;\n    }\n    else\n    {\n        _S1 = 0.0f;\n    }\n    output_0.mask_0 = _S1;\n    return output_0;\n}\n\n",
-    ),
-    (
         0x8d1c4a3c5b011219,
         "struct SLANG_ParameterGroup_EguiUniforms_std140_0\n{\n    @align(16) screen_size_0 : vec2<f32>,\n    @align(8) _padding_0 : vec2<f32>,\n};\n\n@binding(0) @group(0) var<uniform> EguiUniforms_0 : SLANG_ParameterGroup_EguiUniforms_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_1 : vec2<f32>,\n    @location(1) tex_coords_1 : vec2<f32>,\n    @location(2) color_1 : vec4<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(vec2<f32>(2.0f * _S1.position_1.x / EguiUniforms_0.screen_size_0.x - 1.0f, 1.0f - 2.0f * _S1.position_1.y / EguiUniforms_0.screen_size_0.y), 0.0f, 1.0f);\n    output_0.tex_coords_0 = _S1.tex_coords_1;\n    output_0.color_0 = _S1.color_1;\n    return output_0;\n}\n\n",
     ),
@@ -216,6 +208,10 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct MaterialParams_std140_0\n{\n    @align(16) base_color_0 : vec4<f32>,\n    @align(16) pbr_params_0 : vec4<f32>,\n};\n\n@binding(0) @group(2) var<uniform> gMaterial_0 : MaterialParams_std140_0;\nstruct FsOutput_0\n{\n    @location(0) albedo_0 : vec4<f32>,\n    @location(1) normal_metallic_0 : vec4<f32>,\n    @location(2) position_roughness_0 : vec4<f32>,\n    @location(3) velocity_0 : vec2<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) world_position_0 : vec3<f32>,\n    @location(3) world_normal_0 : vec3<f32>,\n    @location(1) curr_clip_0 : vec4<f32>,\n    @location(2) prev_clip_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) clip_position_0 : vec4<f32>) -> FsOutput_0\n{\n    var normal_0 : vec3<f32> = normalize(_S1.world_normal_0);\n    var metallic_0 : f32 = saturate(gMaterial_0.pbr_params_0.x);\n    var _S2 : f32 = max(gMaterial_0.pbr_params_0.y, 0.03999999910593033f);\n    var output_0 : FsOutput_0;\n    output_0.albedo_0 = vec4<f32>(gMaterial_0.base_color_0.xyz, 1.0f);\n    var _S3 : vec3<f32> = vec3<f32>(0.5f);\n    output_0.normal_metallic_0 = vec4<f32>(normal_0 * _S3 + _S3, metallic_0);\n    output_0.position_roughness_0 = vec4<f32>(_S1.world_position_0, _S2);\n    output_0.velocity_0 = _S1.curr_clip_0.xy / vec2<f32>(_S1.curr_clip_0.w) - _S1.prev_clip_0.xy / vec2<f32>(_S1.prev_clip_0.w);\n    return output_0;\n}\n\n",
     ),
     (
+        0xc719ad3370213cb5,
+        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_Uniforms_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) entity_index_0 : u32,\n    @align(4) selected_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> Uniforms_0 : SLANG_ParameterGroup_Uniforms_std140_0;\nstruct vertexOutput_0\n{\n    @builtin(position) output_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> vertexOutput_0\n{\n    var _S2 : vertexOutput_0 = vertexOutput_0( ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(Uniforms_0.model_0.data_0[i32(0)][i32(0)], Uniforms_0.model_0.data_0[i32(1)][i32(0)], Uniforms_0.model_0.data_0[i32(2)][i32(0)], Uniforms_0.model_0.data_0[i32(3)][i32(0)], Uniforms_0.model_0.data_0[i32(0)][i32(1)], Uniforms_0.model_0.data_0[i32(1)][i32(1)], Uniforms_0.model_0.data_0[i32(2)][i32(1)], Uniforms_0.model_0.data_0[i32(3)][i32(1)], Uniforms_0.model_0.data_0[i32(0)][i32(2)], Uniforms_0.model_0.data_0[i32(1)][i32(2)], Uniforms_0.model_0.data_0[i32(2)][i32(2)], Uniforms_0.model_0.data_0[i32(3)][i32(2)], Uniforms_0.model_0.data_0[i32(0)][i32(3)], Uniforms_0.model_0.data_0[i32(1)][i32(3)], Uniforms_0.model_0.data_0[i32(2)][i32(3)], Uniforms_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(Uniforms_0.view_projection_0.data_0[i32(0)][i32(0)], Uniforms_0.view_projection_0.data_0[i32(1)][i32(0)], Uniforms_0.view_projection_0.data_0[i32(2)][i32(0)], Uniforms_0.view_projection_0.data_0[i32(3)][i32(0)], Uniforms_0.view_projection_0.data_0[i32(0)][i32(1)], Uniforms_0.view_projection_0.data_0[i32(1)][i32(1)], Uniforms_0.view_projection_0.data_0[i32(2)][i32(1)], Uniforms_0.view_projection_0.data_0[i32(3)][i32(1)], Uniforms_0.view_projection_0.data_0[i32(0)][i32(2)], Uniforms_0.view_projection_0.data_0[i32(1)][i32(2)], Uniforms_0.view_projection_0.data_0[i32(2)][i32(2)], Uniforms_0.view_projection_0.data_0[i32(3)][i32(2)], Uniforms_0.view_projection_0.data_0[i32(0)][i32(3)], Uniforms_0.view_projection_0.data_0[i32(1)][i32(3)], Uniforms_0.view_projection_0.data_0[i32(2)][i32(3)], Uniforms_0.view_projection_0.data_0[i32(3)][i32(3)]))))) );\n    return _S2;\n}\n\n",
+    ),
+    (
         0xc97b5be8cd9a483c,
         "struct SLANG_ParameterGroup_BloomUniforms_std140_0\n{\n    @align(16) params_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> BloomUniforms_0 : SLANG_ParameterGroup_BloomUniforms_std140_0;\n@binding(1) @group(0) var source_0 : texture_2d<f32>;\n\n@binding(2) @group(0) var linear_sampler_0 : sampler;\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var t_0 : vec2<f32> = BloomUniforms_0.params_0.xy;\n    var _S2 : vec3<f32> = vec3<f32>(2.0f);\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(((textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, -1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, -1.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(1.0f, -1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, 0.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, 0.0f)))).xyz * vec3<f32>(4.0f) + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(1.0f, 0.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(-1.0f, 1.0f)))).xyz + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0 * vec2<f32>(0.0f, 1.0f)))).xyz * _S2 + (textureSample((source_0), (linear_sampler_0), (_S1.uv_0 + t_0))).xyz) * vec3<f32>(0.0625f), 0.5f) );\n    return _S3;\n}\n\n",
     ),
@@ -267,6 +263,10 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         0xf55155f65dbd9585,
         "struct SLANG_ParameterGroup_Uniforms_std140_0\n{\n    @align(16) mask_offset_0 : vec2<f32>,\n    @align(8) mask_size_0 : vec2<f32>,\n    @align(16) color_0 : vec4<f32>,\n    @align(16) thickness_0 : f32,\n};\n\n@binding(0) @group(0) var<uniform> Uniforms_0 : SLANG_ParameterGroup_Uniforms_std140_0;\n@binding(1) @group(0) var mask_texture_0 : texture_2d<f32>;\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main(@builtin(position) frag_coord_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S1 : vec2<i32> = vec2<i32>(frag_coord_0.xy + Uniforms_0.mask_offset_0);\n    var _S2 : vec3<i32> = vec3<i32>(_S1, i32(0));\n    if((textureLoad((mask_texture_0), ((_S2)).xy, ((_S2)).z).x) > 0.5f)\n    {\n        discard;\n    }\n    var radius_0 : i32 = i32(Uniforms_0.thickness_0);\n    var _S3 : vec2<i32> = vec2<i32>(Uniforms_0.mask_size_0) - vec2<i32>(i32(1), i32(1));\n    var _S4 : i32 = - radius_0;\n    var hit_0 : f32 = 0.0f;\n    var dy_0 : i32 = _S4;\n    for(;;)\n    {\n        if(dy_0 <= radius_0)\n        {\n        }\n        else\n        {\n            break;\n        }\n        var dx_0 : i32 = _S4;\n        for(;;)\n        {\n            if(dx_0 <= radius_0)\n            {\n            }\n            else\n            {\n                break;\n            }\n            var _S5 : vec3<i32> = vec3<i32>(clamp(_S1 + vec2<i32>(dx_0, dy_0), vec2<i32>(i32(0), i32(0)), _S3), i32(0));\n            var _S6 : f32 = max(hit_0, (textureLoad((mask_texture_0), ((_S5)).xy, ((_S5)).z).x));\n            var _S7 : i32 = dx_0 + i32(1);\n            hit_0 = _S6;\n            dx_0 = _S7;\n        }\n        dy_0 = dy_0 + i32(1);\n    }\n    if(hit_0 < 0.5f)\n    {\n        discard;\n    }\n    var _S8 : pixelOutput_0 = pixelOutput_0( Uniforms_0.color_0 );\n    return _S8;\n}\n\n",
     ),
+    (
+        0xf6d3658449941ac5,
+        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_Uniforms_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) entity_index_0 : u32,\n    @align(4) selected_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> Uniforms_0 : SLANG_ParameterGroup_Uniforms_std140_0;\nstruct FsOutput_0\n{\n    @location(0) index_0 : u32,\n    @location(1) mask_0 : f32,\n    @location(2) depth_0 : f32,\n};\n\n@fragment\nfn fs_main(@builtin(position) frag_coord_0 : vec4<f32>) -> FsOutput_0\n{\n    var output_0 : FsOutput_0;\n    output_0.index_0 = Uniforms_0.entity_index_0 + u32(1);\n    var _S1 : f32;\n    if((Uniforms_0.selected_0) != u32(0))\n    {\n        _S1 = 1.0f;\n    }\n    else\n    {\n        _S1 = 0.0f;\n    }\n    output_0.mask_0 = _S1;\n    output_0.depth_0 = frag_coord_0.z;\n    return output_0;\n}\n\n",
+    ),
 ];
 
 /// key -> compiled SPIR-V (LE bytes), sorted ascending by key. Task/mesh
@@ -282,7 +282,6 @@ pub static BAKED_SPIRV: &[(u64, &[u8])] = &[
 
 /// key -> human-readable `shader / entry / defines`, sorted ascending by key.
 pub static BAKED_NAMES: &[(u64, &str)] = &[
-    (0x03d70dad15615cfc, "entity_index / vs_main / []"),
     (0x04cef34dff34f191, "std_mb_reconstruct / fs_main / []"),
     (0x16f8ac0466375732, "std_deferred_gbuffer / vs_main / []"),
     (
@@ -340,7 +339,6 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     ),
     (0x81f6a3748775615b, "std_display_output / fs_main / []"),
     (0x873cdff3c78ccf3f, "std_histogram_resolve / cs_main / []"),
-    (0x87c188ee3f84ae6c, "entity_index / fs_main / []"),
     (0x8d1c4a3c5b011219, "egui / vs_main / []"),
     (0x8dac5871efa0030a, "opaque_color / fs_main / []"),
     (0x9181522c085ec361, "std_mb_reconstruct / vs_main / []"),
@@ -365,6 +363,7 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
         "std_deferred_gbuffer_textured / fs_main / []",
     ),
     (0xc702d339ddabd042, "std_deferred_gbuffer / fs_main / []"),
+    (0xc719ad3370213cb5, "entity_index / vs_main / []"),
     (0xc97b5be8cd9a483c, "std_bloom_up / fs_main / []"),
     (0xcd423f0cb0fd8973, "std_ssao_blur / vs_main / []"),
     (0xda322d2dbf33dcba, "opaque_color / vs_main / []"),
@@ -385,6 +384,7 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0xf070e635f5fcf9a6, "std_mb_neighbor_max / fs_main / []"),
     (0xf2365f489112e463, "std_velocity_complete / fs_main / []"),
     (0xf55155f65dbd9585, "selection_outline / fs_main / []"),
+    (0xf6d3658449941ac5, "entity_index / fs_main / []"),
     (0xff00a868f4c65b33, "bindless / vs_main / []"),
 ];
 
@@ -1157,6 +1157,19 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
         }],
     ),
     (
+        0x923e3fe379a0e414,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[crate::shader::baked::BakedEntry {
+                binding: 0,
+                ty: crate::materials::BindingType::UniformBuffer,
+                vis: 3,
+                label: Some("Uniforms"),
+            }],
+        }],
+    ),
+    (
         0xae0b726e36ace4e2,
         &[crate::shader::baked::BakedGroup {
             rate: None,
@@ -1388,19 +1401,6 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                     label: Some("linear_sampler"),
                 },
             ],
-        }],
-    ),
-    (
-        0xc194638bbe44f501,
-        &[crate::shader::baked::BakedGroup {
-            rate: None,
-            label: None,
-            entries: &[crate::shader::baked::BakedEntry {
-                binding: 0,
-                ty: crate::materials::BindingType::UniformBuffer,
-                vis: 3,
-                label: Some("Uniforms"),
-            }],
         }],
     ),
     (

@@ -261,14 +261,14 @@ impl ViewportTools {
 
 /// What the editor resolved under a select click, handed to the plugins'
 /// pickers: the cursor ray, the scene entity the GPU entity-index pass
-/// found (a mesh), and an approximate world-space point of that hit (ray ∩
-/// the entity's bounds) so a picker can compare depth.
+/// found (a mesh), and the exact world-space point of that hit (the picking
+/// pass's depth, unprojected) so a picker can compare depth.
 pub struct ViewportPickQuery {
     pub ray: ViewportRay,
     /// The scene entity under the cursor per the GPU pass, if any.
     pub scene_entity: Option<Entity>,
-    /// Approximate world-space hit point on `scene_entity`; `None` when
-    /// nothing was hit or the entity has no bounds.
+    /// World-space surface point under the pick, from the picking pass's
+    /// depth output; `None` when the pick hit no rendered geometry.
     pub scene_point: Option<Vec3>,
 }
 

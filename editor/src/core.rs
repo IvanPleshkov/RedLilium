@@ -16,13 +16,12 @@ use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionH
 use redlilium_core::math::Vec3;
 use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
-    AssetGpuFlush, AssetPump, Camera, CameraRender, DebugRender, DrawGrid, DrawSelectionAabb,
-    EguiRender, Entity, FlushUploads, FrameRing, FreeFlyCamera, GameTime, GlobalTransform,
-    GridConfig, HotReload, MaterialInstanceLoad, MaterialInstanceSource, MeshGenerator, MeshLoad,
-    MeshRenderer, MeshSource, Name, PipelineRegistry, PostUpdate, Primitive, RealTime, Render,
-    RenderSchedule, ScenePass, Schedules, Transform, Update, UpdateCameraMatrices,
-    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
-    register_std_components,
+    AssetGpuFlush, AssetPump, Camera, CameraRender, DebugRender, DrawGrid, EguiRender, Entity,
+    FlushUploads, FrameRing, FreeFlyCamera, GameTime, GlobalTransform, GridConfig, HotReload,
+    MaterialInstanceLoad, MaterialInstanceSource, MeshGenerator, MeshLoad, MeshRenderer,
+    MeshSource, Name, PipelineRegistry, PostUpdate, Primitive, RealTime, Render, RenderSchedule,
+    ScenePass, Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -478,9 +477,6 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
     // (#67 is moot): Play boots a wholly separate game world (editor/src/play.rs),
     // so these editor-only systems always run against the editing world.
     schedules.get_mut::<Update>().add(DrawGrid);
-    schedules
-        .get_mut::<Update>()
-        .add(DrawSelectionAabb::default());
     schedules.get_mut::<Update>().set_read_only(true);
 
     // Render schedule: flush uploads -> render the forward scene -> overlay

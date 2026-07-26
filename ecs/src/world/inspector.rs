@@ -270,38 +270,6 @@ impl World {
         }
     }
 
-    /// Computes the combined AABB for an entity by unioning AABBs from all its components.
-    ///
-    /// Iterates every registered component type and unions any
-    /// AABBs returned by their [`Component::aabb`] implementations.
-    /// Returns `None` if no component contributes an AABB.
-    pub fn entity_aabb(&self, entity: Entity) -> Option<redlilium_core::math::Aabb> {
-        let mut result: Option<redlilium_core::math::Aabb> = None;
-        for meta in self.iter_meta() {
-            if let Some(aabb) = (meta.aabb_fn)(self, entity) {
-                result = Some(match result {
-                    Some(current) => current.union(&aabb),
-                    None => aabb,
-                });
-            }
-        }
-        result
-    }
-
-    /// Returns individual AABBs from each component on an entity.
-    ///
-    /// Unlike [`entity_aabb`](Self::entity_aabb) which unions all AABBs,
-    /// this returns each component's AABB separately.
-    pub fn entity_aabbs(&self, entity: Entity) -> Vec<redlilium_core::math::Aabb> {
-        let mut result = Vec::new();
-        for meta in self.iter_meta() {
-            if let Some(aabb) = (meta.aabb_fn)(self, entity) {
-                result.push(aabb);
-            }
-        }
-        result
-    }
-
     /// Collects all entity references from all registered components on an entity.
     ///
     /// Iterates every registered component type and appends any

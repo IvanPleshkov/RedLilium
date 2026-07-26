@@ -169,7 +169,7 @@
             guid: ("9bb48e6a-9664-51cb-841f-40c1362100fe"),
             path: "shaders/entity_index.slang",
             kind: "shader",
-            source_hash: 15972804528344224305,
+            source_hash: 7683826447138985406,
             settings: None,
             references: {},
         ),

@@ -211,14 +211,21 @@ fn pick_index_to_entity(world: &World, index: u32) -> Option<Entity> {
     }
 }
 
-/// Complete a point pick with the readback's hit (`None` = empty space).
-pub fn complete_point_pick(rc: &mut RemoteCommands, world: &World, hit: Option<u32>) {
+/// Complete a point pick with the readback's hit (`entity: None` = empty
+/// space). `point` is the depth-derived world-space surface point under the
+/// pick, when it hit rendered geometry.
+pub fn complete_point_pick(
+    rc: &mut RemoteCommands,
+    world: &World,
+    hit: &crate::scene_view::PickHit,
+) {
     let Some(job) = rc.pick.take() else { return };
     #[derive(Serialize)]
     struct PickResp {
         id: i64,
         ok: bool,
         entity: Option<String>,
+        point: Option<[f32; 3]>,
     }
     send(
         world,
@@ -227,8 +234,10 @@ pub fn complete_point_pick(rc: &mut RemoteCommands, world: &World, hit: Option<u
             id: job.id,
             ok: true,
             entity: hit
+                .entity
                 .and_then(|index| pick_index_to_entity(world, index))
                 .map(entity_spec),
+            point: hit.world_point.map(|p| [p.x, p.y, p.z]),
         },
     );
 }

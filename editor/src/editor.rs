@@ -268,53 +268,6 @@ impl Editor {
         }
     }
 
-    /// Distance along `ray` to the entry point of `entity`'s world-space
-    /// AABB — the pick query's approximate scene hit for depth comparison.
-    /// Conservative: the AABB face is at or in front of the mesh surface.
-    fn ray_entity_bounds_entry(
-        world: &World,
-        entity: Entity,
-        ray: &redlilium_ecs::ui::ViewportRay,
-    ) -> Option<f32> {
-        let aabb = world.entity_aabb(entity)?;
-        let gt = world.get::<redlilium_ecs::GlobalTransform>(entity)?;
-        let mut min = [f32::MAX; 3];
-        let mut max = [f32::MIN; 3];
-        for i in 0..8 {
-            let corner = redlilium_core::math::Vec4::new(
-                if i & 1 == 0 { aabb.min[0] } else { aabb.max[0] },
-                if i & 2 == 0 { aabb.min[1] } else { aabb.max[1] },
-                if i & 4 == 0 { aabb.min[2] } else { aabb.max[2] },
-                1.0,
-            );
-            let p = gt.0 * corner;
-            for (k, v) in [p.x, p.y, p.z].into_iter().enumerate() {
-                min[k] = min[k].min(v);
-                max[k] = max[k].max(v);
-            }
-        }
-        let origin = [ray.origin.x, ray.origin.y, ray.origin.z];
-        let dir = [ray.dir.x, ray.dir.y, ray.dir.z];
-        let (mut t_near, mut t_far) = (0.0f32, f32::MAX);
-        for k in 0..3 {
-            if dir[k].abs() < 1e-9 {
-                if origin[k] < min[k] || origin[k] > max[k] {
-                    return None;
-                }
-                continue;
-            }
-            let a = (min[k] - origin[k]) / dir[k];
-            let b = (max[k] - origin[k]) / dir[k];
-            let (near, far) = if a < b { (a, b) } else { (b, a) };
-            t_near = t_near.max(near);
-            t_far = t_far.min(far);
-            if t_near > t_far {
-                return None;
-            }
-        }
-        Some(t_near)
-    }
-
     /// Resolve last frame's GPU pick / rect-pick readbacks into the entity
     /// selection (or into a pending remote pick response).
     fn resolve_pick_readbacks(&mut self) {
@@ -332,10 +285,10 @@ impl Editor {
                 .is_some_and(crate::remote_commands::pick_in_flight)
             {
                 let rc = self.remote.as_mut().unwrap();
-                crate::remote_commands::complete_point_pick(rc, &ew.world, hit);
+                crate::remote_commands::complete_point_pick(rc, &ew.world, &hit);
             } else {
                 // Find entity whose sparse-set index matches the picked index
-                let target = hit.filter(|&entity_index| {
+                let target = hit.entity.filter(|&entity_index| {
                     ew.world
                         .read::<MeshRenderer>()
                         .ok()
@@ -345,9 +298,10 @@ impl Editor {
                 let target_entity =
                     target.and_then(|entity_index| ew.world.entity_at_index(entity_index));
                 // Plugin pickers may override the click: each one sees the
-                // editor's resolution — the scene entity and an approximate
-                // world-space hit point on it — and decides whether its
-                // overlay control (in front? behind?) wins the click.
+                // editor's resolution — the scene entity and the exact
+                // world-space hit point on it (unprojected from the picking
+                // pass's depth) — and decides whether its overlay control
+                // (in front? behind?) wins the click.
                 let target_entity = (|| {
                     let pos = cpu_pos?;
                     let [rx, ry, rw, rh] = rect?;
@@ -357,14 +311,10 @@ impl Editor {
                         origin: ray.origin,
                         dir: ray.dir,
                     };
-                    let scene_point = target_entity.and_then(|entity| {
-                        let t = Self::ray_entity_bounds_entry(&ew.world, entity, &ray)?;
-                        Some(ray.origin + ray.dir * t)
-                    });
                     let query = redlilium_ecs::ui::ViewportPickQuery {
                         ray,
                         scene_entity: target_entity,
-                        scene_point,
+                        scene_point: hit.world_point,
                     };
                     Some(
                         ew.world
