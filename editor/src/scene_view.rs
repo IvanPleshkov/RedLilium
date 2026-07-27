@@ -918,7 +918,9 @@ impl SceneViewState {
                     width,
                     height,
                     TextureFormat::Depth32Float,
-                    TextureUsage::RENDER_ATTACHMENT,
+                    // TEXTURE_BINDING: the deferred path reconstructs world
+                    // position from the depth buffer (resolve/SSAO/TAA/MB).
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
                 )
                 .with_label("scene_view_depth"),
             )

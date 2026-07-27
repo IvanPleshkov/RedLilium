@@ -44,7 +44,6 @@ struct VsInput {
 
 struct VsOutput {
     float4 clip_position : SV_Position;
-    float3 world_position : TEXCOORD0;
     float3 world_normal : NORMAL;
     // Unjittered clip positions of this and the previous frame — the
     // fragment stage derives NDC velocity from the pair (#147).
@@ -57,8 +56,16 @@ VsOutput vs_main(VsInput input) {
     VsOutput output;
     float4 world_pos = mul(gModel.model, float4(input.position, 1.0));
     output.clip_position = mul(gCamera.view_projection, world_pos);
-    output.world_position = world_pos.xyz;
-    output.world_normal = mul(gModel.model, float4(input.normal, 0.0)).xyz;
+    // Normal via the cofactor of the model's upper 3x3 (rows m[i]): equal to
+    // the inverse-transpose up to a positive scale, so non-uniform scale bends
+    // normals correctly without a CPU-side inverse. Normalized in the fragment
+    // stage as before.
+    float3x3 m = (float3x3)gModel.model;
+    float3x3 cof = float3x3(
+        cross(m[1], m[2]),
+        cross(m[2], m[0]),
+        cross(m[0], m[1]));
+    output.world_normal = mul(cof, input.normal);
     output.curr_clip = mul(gCamera.view_projection_unjittered, world_pos);
     float4 prev_world = mul(gModel.prev_model, float4(input.position, 1.0));
     output.prev_clip = mul(gCamera.prev_view_projection, prev_world);
@@ -72,8 +79,10 @@ struct FsOutput {
     float4 albedo : SV_Target0;
     // RT1: world normal encoded to [0,1] (rgb) + metallic (a).
     float4 normal_metallic : SV_Target1;
-    // RT2: world position (rgb) + roughness (a).
-    float4 position_roughness : SV_Target2;
+    // RT2: roughness (R8Unorm). World position is NOT stored — consumers
+    // reconstruct it from the depth buffer (full 32-bit precision everywhere;
+    // an f16 position target loses ~0.5 units at |coord| ~ 1000).
+    float roughness : SV_Target2;
     // RT3: NDC motion current -> previous frame, both unjittered (#147).
     float2 velocity : SV_Target3;
 };
@@ -86,7 +95,7 @@ FsOutput fs_main(VsOutput input) {
     float roughness = max(gMaterial.pbr_params.y, 0.04);
     output.albedo = float4(gMaterial.base_color.rgb, 1.0);
     output.normal_metallic = float4(normal * 0.5 + 0.5, metallic);
-    output.position_roughness = float4(input.world_position, roughness);
+    output.roughness = roughness;
     output.velocity = input.curr_clip.xy / input.curr_clip.w
         - input.prev_clip.xy / input.prev_clip.w;
     return output;

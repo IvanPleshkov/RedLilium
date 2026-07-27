@@ -201,7 +201,10 @@ impl ExclusiveSystem for EnsureCameraTargets {
                             width,
                             height,
                             TextureFormat::Depth32Float,
-                            TextureUsage::RENDER_ATTACHMENT,
+                            // TEXTURE_BINDING: the deferred path reconstructs
+                            // world position from the depth buffer (resolve,
+                            // SSAO, TAA, motion blur sample it via Load).
+                            TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
                         )
                         .with_label("camera_depth"),
                     );
@@ -475,24 +478,44 @@ impl System for DebugRender {
         if vertices.is_empty() {
             return Ok(());
         }
-        let Some((color, depth)) = world.read_all::<CameraTarget>().ok().and_then(|t| {
-            t.iter()
-                .next()
-                .map(|(_, target)| (target.color.clone(), target.depth.clone()))
-        }) else {
+        // The PRIMARY camera's target and matching view-projection, from the
+        // same entity (the dispatcher's definition: a Screen spec, or no
+        // CameraOutput at all — the editor's scene view). Taking the first
+        // arbitrary CameraTarget would draw the lines into an offscreen
+        // camera's target with a mismatched matrix when several cameras exist.
+        let picked = world.read_all::<CameraTarget>().ok().and_then(|targets| {
+            let cams = world.read_all::<Camera>().ok()?;
+            let outputs = world.read_all::<CameraOutput>().ok();
+            let mut fallback = None;
+            for (idx, target) in targets.iter() {
+                let Some(cam) = cams.get(idx) else {
+                    continue;
+                };
+                let entry = (
+                    target.color.clone(),
+                    target.depth.clone(),
+                    mat4_to_cols_array_2d(&cam.view_projection()),
+                );
+                let primary = outputs
+                    .as_ref()
+                    .and_then(|o| o.get(idx))
+                    .is_none_or(|out| matches!(out.target, CameraTargetSpec::Screen));
+                if primary {
+                    return Some(entry);
+                }
+                if fallback.is_none() {
+                    fallback = Some(entry);
+                }
+            }
+            fallback
+        });
+        let Some((color, depth, vp)) = picked else {
             return Ok(());
         };
-        let vp = world.read_all::<Camera>().ok().and_then(|c| {
-            c.iter()
-                .next()
-                .map(|(_, cam)| mat4_to_cols_array_2d(&cam.view_projection()))
-        });
 
         let debug_handle = {
             let mut renderer = world.resource_mut::<DebugDrawerRenderer>();
-            if let Some(vp) = vp {
-                renderer.update_view_proj(vp);
-            }
+            renderer.update_view_proj(vp);
             let rt = RenderTarget::from_texture(color);
             let Some(pass) = renderer.create_graphics_pass(&vertices, &rt, Some(&depth)) else {
                 return Ok(());

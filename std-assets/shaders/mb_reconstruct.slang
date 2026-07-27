@@ -11,8 +11,15 @@
 // Runs full-resolution, after TAA; the colour input is whatever the display
 // pass would otherwise read (scene_color, or the TAA history just written).
 
+import math;   // load_texel_r
+import motion; // reconstruct_world
+
 [[vk::binding(0, 0)]]
 cbuffer MbReconstructUniforms {
+    // Inverse of the unjittered view-projection — the depth proxy's world
+    // position is reconstructed from the depth buffer (both compared samples
+    // reconstruct the same way, so the sub-pixel jitter bias cancels).
+    column_major float4x4 inv_view_proj;
     float2 inv_resolution;
     float2 resolution;
     // Camera world position (xyz) for a linear depth proxy.
@@ -31,8 +38,9 @@ Texture2D color;
 Texture2D neighbor_max;
 [[vk::binding(3, 0)]]
 Texture2D gbuffer_velocity;
+// Camera depth (reversed-Z), unfilterable-float, read via Load.
 [[vk::binding(4, 0)]]
-Texture2D gbuffer_position;
+Texture2D<float> depth_texture;
 [[vk::binding(5, 0)]]
 Texture2D gbuffer_albedo;
 [[vk::binding(6, 0)]]
@@ -72,7 +80,7 @@ float view_depth(float2 uv) {
     if (gbuffer_albedo.Sample(nearest_sampler, uv).a < 1.0 / 128.0) {
         return FAR_DEPTH;
     }
-    float3 world = gbuffer_position.Sample(nearest_sampler, uv).xyz;
+    float3 world = reconstruct_world(inv_view_proj, uv, load_texel_r(depth_texture, uv));
     return length(camera_pos.xyz - world);
 }
 

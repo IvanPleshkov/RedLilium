@@ -771,6 +771,15 @@ impl GraphicsDevice {
                 }
             }
         }
+        for &(group, binding) in &desc.unfilterable_textures {
+            if let Some(layout) = layouts.get_mut(group as usize) {
+                for entry in &mut layout.entries {
+                    if entry.binding == binding && entry.binding_type == BindingType::Texture {
+                        entry.binding_type = BindingType::UnfilterableTexture;
+                    }
+                }
+            }
+        }
         desc.binding_layouts = layouts.into_iter().map(std::sync::Arc::new).collect();
         desc.set_update_rates = update_rates;
     }
@@ -1655,6 +1664,7 @@ fn resource_matches_binding_type(
                 | BindingType::TextureCube
                 | BindingType::Texture2DArray
                 | BindingType::DepthTexture
+                | BindingType::UnfilterableTexture
         ),
         BoundResource::Sampler(_) => {
             matches!(

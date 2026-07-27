@@ -584,7 +584,8 @@ impl PipelineManager {
                     BindingType::Texture
                     | BindingType::TextureCube
                     | BindingType::Texture2DArray
-                    | BindingType::DepthTexture => vk::DescriptorType::SAMPLED_IMAGE,
+                    | BindingType::DepthTexture
+                    | BindingType::UnfilterableTexture => vk::DescriptorType::SAMPLED_IMAGE,
                     BindingType::CombinedTextureSampler => {
                         vk::DescriptorType::COMBINED_IMAGE_SAMPLER
                     }

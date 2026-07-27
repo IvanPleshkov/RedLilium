@@ -18,6 +18,7 @@
 // flicker-free.
 
 import math;
+import motion; // reconstruct_world (position from depth)
 
 struct VsOutput {
     float4 position : SV_Position;
@@ -46,6 +47,9 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 cbuffer SsaoUniforms {
     column_major float4x4 view; // world -> view (rigid: upper 3x3 rotates normals)
     column_major float4x4 proj; // view -> clip (for the screen-space radius)
+    // Inverse of the rasterizing view-projection (jittered under TAA) —
+    // world position is reconstructed from the depth buffer.
+    column_major float4x4 inv_view_proj;
     // x = world radius, y = intensity, z = power, w = per-frame rotation
     // (radians; 0 when no temporal resolver, so the pattern is static).
     float4 params;
@@ -56,8 +60,9 @@ cbuffer SsaoUniforms {
 Texture2D gbuffer_albedo; // RT0: .a < 1/128 marks background (ADR-039)
 [[vk::binding(2, 0)]]
 Texture2D gbuffer_normal_metallic; // RT1: .rgb = encoded world normal
+// Camera depth (reversed-Z), unfilterable-float, read via Load.
 [[vk::binding(3, 0)]]
-Texture2D gbuffer_position_roughness; // RT2: .rgb = world position
+Texture2D<float> depth_texture;
 [[vk::binding(4, 0)]]
 SamplerState point_sampler;
 
@@ -80,7 +85,7 @@ float4 fs_main(VsOutput input) : SV_Target {
         return float4(1.0, 0.0, 0.0, 1.0);
     }
 
-    float3 pw = gbuffer_position_roughness.Sample(point_sampler, uv).rgb;
+    float3 pw = reconstruct_world(inv_view_proj, uv, load_texel_r(depth_texture, uv));
     float3 nw = normalize(gbuffer_normal_metallic.Sample(point_sampler, uv).rgb * 2.0 - 1.0);
     float3 pv = mul(view, float4(pw, 1.0)).xyz;
     float3 nv = normalize(mul((float3x3)view, nw));
@@ -121,7 +126,7 @@ float4 fs_main(VsOutput input) : SV_Target {
             if (is_background(suv)) {
                 continue; // sky is not an occluder
             }
-            float3 spw = gbuffer_position_roughness.Sample(point_sampler, suv).rgb;
+            float3 spw = reconstruct_world(inv_view_proj, suv, load_texel_r(depth_texture, suv));
             float3 dv = mul(view, float4(spw, 1.0)).xyz - pv;
             float dist = length(dv);
             if (dist < 1e-4) {

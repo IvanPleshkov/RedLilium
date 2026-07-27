@@ -5,8 +5,12 @@
 //
 // Direct lights arrive per frame in the uniforms, gathered from the ECS
 // light components (#146) — fixed-capacity arrays, counts in
-// `light_counts`. Without lights the image is IBL-only. Shadows arrive
-// with #130; spot lights are not consumed yet.
+// `light_counts` (x directional, y point, z spot). Without lights the image
+// is IBL-only. Shadows arrive with #130.
+//
+// World position is reconstructed from the depth buffer (full 32-bit
+// precision) instead of a G-buffer position target — see reconstruct_world
+// in the motion module.
 //
 // Output is scene-referred linear radiance (1.0 = SDR white) into the
 // `scene_color` intermediate (#142) — exposure, tonemap, and display
@@ -14,6 +18,7 @@
 
 import math;
 import brdf;
+import motion; // reconstruct_world (position from depth)
 
 // =============================================================================
 // Vertex Shader
@@ -54,6 +59,7 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 // (MAX_*_LIGHTS in ecs/src/std/rendering/deferred.rs must match).
 static const uint MAX_DIRECTIONAL_LIGHTS = 4;
 static const uint MAX_POINT_LIGHTS = 16;
+static const uint MAX_SPOT_LIGHTS = 8;
 
 struct DirectionalLightData {
     float4 dir_to_light; // xyz = normalized direction toward the light
@@ -65,14 +71,24 @@ struct PointLightData {
     float4 color;          // rgb = linear color premultiplied by intensity
 };
 
+struct SpotLightData {
+    float4 position_range; // xyz = world position, w = range (0 = unbounded)
+    float4 direction_cos;  // xyz = direction the light travels, w = cos(outer)
+    float4 color_cos;      // rgb = premultiplied color, a = cos(inner)
+};
+
 [[vk::binding(0, 0)]]
 cbuffer ResolveUniforms {
+    // Inverse of the view-projection the G-buffer was rasterized with (the
+    // jittered one under TAA) — reconstructs world position from depth.
+    column_major float4x4 inv_view_proj;
     // xyz = camera world position; w = max reflection LOD (highest prefilter
     // mip index of the bound environment, #145 — 0 for the fallback).
     float4 camera_pos;
-    uint4 light_counts;  // x = directional count, y = point count
+    uint4 light_counts;  // x = directional, y = point, z = spot count
     DirectionalLightData dir_lights[MAX_DIRECTIONAL_LIGHTS];
     PointLightData point_lights[MAX_POINT_LIGHTS];
+    SpotLightData spot_lights[MAX_SPOT_LIGHTS];
 };
 
 // G-buffer textures
@@ -81,9 +97,13 @@ Texture2D gbuffer_albedo;
 [[vk::binding(1, 1)]]
 Texture2D gbuffer_normal_metallic;
 [[vk::binding(2, 1)]]
-Texture2D gbuffer_position_roughness;
+Texture2D gbuffer_roughness;
 [[vk::binding(3, 1)]]
 SamplerState gbuffer_sampler;
+// The camera depth buffer (reversed-Z), an unfilterable-float binding read
+// via Load — see load_texel_r. World position = reconstruct_world(depth).
+[[vk::binding(4, 1)]]
+Texture2D<float> depth_texture;
 
 // IBL textures
 [[vk::binding(0, 2)]]
@@ -109,7 +129,6 @@ float4 fs_main(VsOutput input) : SV_Target {
     // Sample G-buffer
     float4 albedo_sample = gbuffer_albedo.Sample(gbuffer_sampler, input.uv);
     float4 normal_metallic_sample = gbuffer_normal_metallic.Sample(gbuffer_sampler, input.uv);
-    float4 position_roughness_sample = gbuffer_position_roughness.Sample(gbuffer_sampler, input.uv);
 
     // RT0 alpha is the AO-as-geometry-marker (ADR-039): 0 = background (the
     // clear value — keep whatever the skybox pass wrote), otherwise
@@ -122,12 +141,13 @@ float4 fs_main(VsOutput input) : SV_Target {
     // no-op there.
     float ao = albedo_sample.a * ssao_texture.Sample(ssao_sampler, input.uv).r;
 
-    // Decode G-buffer
+    // Decode G-buffer; world position reconstructed from the depth buffer.
     float3 albedo = albedo_sample.rgb;
     float3 normal = normalize(normal_metallic_sample.rgb * 2.0 - 1.0);
     float metallic = normal_metallic_sample.a;
-    float3 world_position = position_roughness_sample.rgb;
-    float roughness = max(position_roughness_sample.a, 0.04);
+    float depth = load_texel_r(depth_texture, input.uv);
+    float3 world_position = reconstruct_world(inv_view_proj, input.uv, depth);
+    float roughness = max(gbuffer_roughness.Sample(gbuffer_sampler, input.uv).r, 0.04);
 
     float3 v = normalize(camera_pos.xyz - world_position);
     float3 r = reflect(-v, normal);
@@ -161,6 +181,32 @@ float4 fs_main(VsOutput input) : SV_Target {
         lo += pbr_direct_lighting(
             normal, v, l, albedo, metallic, roughness,
             point_lights[i].color.rgb * attenuation);
+    }
+    for (uint i = 0; i < light_counts.z; i++) {
+        float3 to_light = spot_lights[i].position_range.xyz - world_position;
+        float dist_sq = max(dot(to_light, to_light), 1e-6);
+        float dist = sqrt(dist_sq);
+        float3 l = to_light / dist;
+        // Same inverse-square + range window as point lights.
+        float attenuation = 1.0 / dist_sq;
+        float range = spot_lights[i].position_range.w;
+        if (range > 0.0) {
+            float q = dist / range;
+            q *= q;
+            q *= q;
+            float window = saturate(1.0 - q);
+            attenuation *= window * window;
+        }
+        // Cone falloff (KHR_lights_punctual): linear ramp in the cosine of
+        // the angle between the spot direction and the fragment, from zero at
+        // the outer cone to full inside the inner cone.
+        float cos_outer = spot_lights[i].direction_cos.w;
+        float cos_inner = spot_lights[i].color_cos.a;
+        float cd = dot(-l, spot_lights[i].direction_cos.xyz);
+        attenuation *= saturate((cd - cos_outer) / max(cos_inner - cos_outer, 1e-4));
+        lo += pbr_direct_lighting(
+            normal, v, l, albedo, metallic, roughness,
+            spot_lights[i].color_cos.rgb * attenuation);
     }
 
     // === IBL ambient lighting ===

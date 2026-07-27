@@ -178,6 +178,20 @@ impl CameraRenderPipeline for ForwardPipeline {
         graph: &mut RenderGraph,
     ) -> Option<PassHandle> {
         let world = ctx.world;
+        // The forward path has no TAA resolve: a TemporalJitter camera would
+        // rasterize the jittered matrix with nothing downstream to accumulate
+        // it — a permanently shimmering image. Warn once (footgun, not a
+        // crash).
+        if world.get::<super::TemporalJitter>(view.entity).is_some() {
+            static JITTER_WARNED: std::sync::Once = std::sync::Once::new();
+            JITTER_WARNED.call_once(|| {
+                log::warn!(
+                    "forward pipeline: camera has TemporalJitter but the forward path \
+                     has no TAA resolve — the image will shimmer; use the deferred path \
+                     or remove the component"
+                );
+            });
+        }
         // The camera set is `external` (a dynamic uniform): bound at offset 0,
         // this view's ring offset supplied per draw.
         let (camera_offset, ring_buffer) = {

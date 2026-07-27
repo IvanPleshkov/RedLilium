@@ -45,8 +45,10 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
     float total = 0.0;
     for (uint i = 1; i < BINS; ++i) {
         float count = float(histogram[i]);
-        // Bin i's center in [log_min, log_max] (bins 1..255 span the range).
-        float t = (float(i) - 0.5) / float(BINS - 1);
+        // Invert the build pass's mapping exactly: it bins at
+        // `1 + round(t * (BINS - 2))`, so bin i sits at t = (i - 1)/(BINS - 2)
+        // (bin 1 = log_min, bin 255 = log_max).
+        float t = (float(i) - 1.0) / float(BINS - 2);
         float log_lum = lerp(log_min, log_max, t);
         weighted += log_lum * count;
         total += count;

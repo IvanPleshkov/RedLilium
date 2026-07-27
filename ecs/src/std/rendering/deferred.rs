@@ -4,9 +4,10 @@
 //! [`CameraRenderPipeline`], registered under
 //! [`DEFERRED_PIPELINE`](super::DEFERRED_PIPELINE). Per camera it records:
 //!
-//! 1. `gbuffer` — MRT (albedo, normal+metallic, position+roughness,
-//!    velocity #147) + the camera's depth, drawing every visible
-//!    `pbr`-model primitive via the shared [`SceneDrawer`];
+//! 1. `gbuffer` — MRT (albedo, normal+metallic, roughness, velocity #147) +
+//!    the camera's depth, drawing every visible `pbr`-model primitive via the
+//!    shared [`SceneDrawer`]; world position is reconstructed from the depth
+//!    buffer by every consumer (full 32-bit precision — no f16 position RT);
 //! 2. `ssao` + `ssao_blur` (#150, only for cameras with a
 //!    [`CameraAmbientOcclusion`](super::CameraAmbientOcclusion)) — a GTAO-lite
 //!    horizon pass over the G-buffer and its bilateral denoise; the result
@@ -112,7 +113,11 @@ const BRDF_LUT_KTX2: &[u8] = include_bytes!("../../../../std-assets/textures/ibl
 /// [`PipelineTargets`] keys of the G-buffer textures.
 pub const GBUFFER_ALBEDO: &str = "gbuffer_albedo";
 pub const GBUFFER_NORMAL_METALLIC: &str = "gbuffer_normal_metallic";
-pub const GBUFFER_POSITION_ROUGHNESS: &str = "gbuffer_position_roughness";
+/// Single-channel roughness. World position is NOT stored in the G-buffer —
+/// consumers reconstruct it from the camera depth buffer (full 32-bit
+/// precision everywhere; the old f16 position target lost ~0.5 units of
+/// precision at |coord| ~ 1000).
+pub const GBUFFER_ROUGHNESS: &str = "gbuffer_roughness";
 /// NDC-space motion current→previous frame, both unjittered (#147). Cleared
 /// to zero; background pixels keep it (camera-only reprojection is the TAA
 /// resolve's job, #148). `COPY_SRC` so tests can read the contract back.
@@ -209,7 +214,7 @@ const GOLDEN_ANGLE: f32 = 2.399_963_2;
 const GBUFFER_FORMATS: [TextureFormat; 4] = [
     TextureFormat::Rgba8UnormSrgb,
     TextureFormat::Rgba16Float,
-    TextureFormat::Rgba16Float,
+    TextureFormat::R8Unorm,
     TextureFormat::Rg16Float,
 ];
 
@@ -218,6 +223,7 @@ const GBUFFER_FORMATS: [TextureFormat; 4] = [
 /// capacity are dropped for the frame (warned once).
 const MAX_DIRECTIONAL_LIGHTS: usize = 4;
 const MAX_POINT_LIGHTS: usize = 16;
+const MAX_SPOT_LIGHTS: usize = 8;
 
 /// One directional light as the resolve shader consumes it.
 #[repr(C)]
@@ -239,27 +245,47 @@ struct GpuPointLight {
     color: [f32; 4],
 }
 
+/// One spot light as the resolve shader consumes it (#146; KHR-style cone).
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuSpotLight {
+    /// xyz = world position, w = range (0 = unbounded).
+    position_range: [f32; 4],
+    /// xyz = normalized direction the light travels, w = cos(outer cone).
+    direction_cos: [f32; 4],
+    /// rgb = linear color premultiplied by intensity, a = cos(inner cone).
+    color_cos: [f32; 4],
+}
+
 /// Uniforms of the resolve pass (must match `deferred_resolve.slang`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ResolveUniforms {
+    /// Inverse of the view-projection the G-buffer was rasterized with (the
+    /// jittered one under TAA) — reconstructs world position from depth.
+    inv_view_proj: [[f32; 4]; 4],
     camera_pos: [f32; 4],
-    /// x = directional count, y = point count.
+    /// x = directional count, y = point count, z = spot count.
     light_counts: [u32; 4],
     dir_lights: [GpuDirectionalLight; MAX_DIRECTIONAL_LIGHTS],
     point_lights: [GpuPointLight; MAX_POINT_LIGHTS],
+    spot_lights: [GpuSpotLight; MAX_SPOT_LIGHTS],
 }
 
 /// Snapshot the world's visible light components into the resolve uniforms
 /// (#146). Direction/position come from [`GlobalTransform`] (forward = the
 /// direction the light travels); [`Visibility`] off drops the light.
 fn gather_lights(world: &World) -> ResolveUniforms {
-    use crate::std::components::{DirectionalLight, GlobalTransform, PointLight, Visibility};
+    use crate::std::components::{
+        DirectionalLight, GlobalTransform, PointLight, SpotLight, Visibility,
+    };
     let mut uniforms = ResolveUniforms {
+        inv_view_proj: [[0.0; 4]; 4],
         camera_pos: [0.0; 4],
         light_counts: [0; 4],
         dir_lights: [GpuDirectionalLight::default(); MAX_DIRECTIONAL_LIGHTS],
         point_lights: [GpuPointLight::default(); MAX_POINT_LIGHTS],
+        spot_lights: [GpuSpotLight::default(); MAX_SPOT_LIGHTS],
     };
     let (Ok(globals), Ok(visibilities)) =
         (world.read::<GlobalTransform>(), world.read::<Visibility>())
@@ -326,12 +352,44 @@ fn gather_lights(world: &World) -> ResolveUniforms {
             uniforms.light_counts[1] += 1;
         }
     }
+    if let Ok(lights) = world.read::<SpotLight>() {
+        for (idx, light) in lights.iter() {
+            if !visible(idx) {
+                continue;
+            }
+            let count = uniforms.light_counts[2] as usize;
+            if count == MAX_SPOT_LIGHTS {
+                dropped += 1;
+                continue;
+            }
+            let (position, forward) = globals.get(idx).map_or_else(
+                || (Vec3::zeros(), GlobalTransform::IDENTITY.forward()),
+                |g| (g.translation(), g.forward()),
+            );
+            // Inner must not exceed outer, and the cosines must differ so the
+            // shader's ramp denominator stays finite.
+            let outer = light.outer_cone_angle.max(1e-3);
+            let inner = light.inner_cone_angle.clamp(0.0, outer);
+            uniforms.spot_lights[count] = GpuSpotLight {
+                position_range: [position.x, position.y, position.z, light.range],
+                direction_cos: [forward.x, forward.y, forward.z, outer.cos()],
+                color_cos: [
+                    light.color.x * light.intensity,
+                    light.color.y * light.intensity,
+                    light.color.z * light.intensity,
+                    inner.cos(),
+                ],
+            };
+            uniforms.light_counts[2] += 1;
+        }
+    }
     if dropped > 0 {
         static OVERFLOW_WARNED: std::sync::Once = std::sync::Once::new();
         OVERFLOW_WARNED.call_once(|| {
             log::warn!(
                 "deferred: {dropped} light(s) beyond the uniform capacity \
-                 ({MAX_DIRECTIONAL_LIGHTS} directional / {MAX_POINT_LIGHTS} point) are dropped"
+                 ({MAX_DIRECTIONAL_LIGHTS} directional / {MAX_POINT_LIGHTS} point / \
+                 {MAX_SPOT_LIGHTS} spot) are dropped"
             );
         });
     }
@@ -427,6 +485,9 @@ struct MbNeighborUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct MbReconstructUniforms {
+    /// Inverse of the unjittered view-projection — the depth proxy's world
+    /// position is reconstructed from the depth buffer.
+    inv_view_proj: [[f32; 4]; 4],
     inv_resolution: [f32; 2],
     resolution: [f32; 2],
     camera_pos: [f32; 4],
@@ -459,6 +520,9 @@ struct SsaoUniforms {
     view: [[f32; 4]; 4],
     /// View → clip (for the depth-dependent screen-space search radius).
     proj: [[f32; 4]; 4],
+    /// Inverse of the rasterizing view-projection (jittered under TAA) —
+    /// world position is reconstructed from the depth buffer.
+    inv_view_proj: [[f32; 4]; 4],
     /// x = world radius, y = intensity, z = power, w = per-frame rotation
     /// (radians; 0 unless a temporal resolver is downstream, so a non-temporal
     /// camera's noise pattern is static — no flicker).
@@ -471,6 +535,9 @@ struct SsaoUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SsaoBlurUniforms {
+    /// Inverse of the rasterizing view-projection (jittered under TAA) —
+    /// edge-stop positions are reconstructed from the depth buffer.
+    inv_view_proj: [[f32; 4]; 4],
     /// xy = texel size; z = world-space edge-stop sigma; w unused.
     params: [f32; 4],
 }
@@ -495,14 +562,21 @@ struct AeBuildUniforms {
 
 /// Uniforms of the auto-exposure histogram resolve (must match
 /// `histogram_resolve.slang`).
+///
+/// Rate-slot semantics: the shader applies `params.z` when the metered
+/// multiplier RISES (the image brightens because the scene darkened — the
+/// eye's slow dark adaptation, [`CameraAutoExposure::speed_down`]) and
+/// `limits.z` when it FALLS (the scene brightened — the fast stop-down,
+/// [`CameraAutoExposure::speed_up`]). Getting this pairing backwards inverts
+/// the eye-like asymmetry.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct AeResolveUniforms {
-    /// x = [`AE_LOG_MIN`], y = [`AE_LOG_MAX`], z = brighten rate (this frame),
-    /// w = [`AE_KEY`].
+    /// x = [`AE_LOG_MIN`], y = [`AE_LOG_MAX`], z = rate when the multiplier
+    /// rises (scene darkened — dark adaptation), w = [`AE_KEY`].
     params: [f32; 4],
-    /// x = min multiplier (`2^min_ev`), y = max (`2^max_ev`), z = darken rate,
-    /// w unused.
+    /// x = min multiplier (`2^min_ev`), y = max (`2^max_ev`), z = rate when
+    /// the multiplier falls (scene brightened — stop-down), w unused.
     limits: [f32; 4],
 }
 
@@ -559,9 +633,10 @@ struct MotionBlurResources {
     /// TileMax → 3×3 directional neighbour max.
     neighbor_max: Arc<MaterialInstance>,
     /// Reconstruction, one instance per colour source: `scene_color` (TAA off)
-    /// or either TAA history (the one TAA just wrote).
+    /// or either TAA history (the one TAA just wrote). The history pair exists
+    /// only when the camera has TAA history targets (#148 lazy allocation).
     reconstruct_scene: Arc<MaterialInstance>,
-    reconstruct_history: [Arc<MaterialInstance>; 2],
+    reconstruct_history: Option<[Arc<MaterialInstance>; 2]>,
     /// Display-output instance reading the blurred `MB_OUTPUT`.
     display: Arc<MaterialInstance>,
 }
@@ -603,11 +678,14 @@ struct CameraResources {
     /// TAA-off path.
     display_scene: Arc<MaterialInstance>,
     /// Display-output instances reading each TAA history texture — the
-    /// TAA-on path reads the one the TAA pass just wrote.
-    display_history: [Arc<MaterialInstance>; 2],
+    /// TAA-on path reads the one the TAA pass just wrote. `None` when the
+    /// camera has no [`TemporalJitter`](super::TemporalJitter) (the history
+    /// targets are not allocated — #148 lazy allocation).
+    display_history: Option<[Arc<MaterialInstance>; 2]>,
     /// TAA resolve instances (#148): instance `i` reads history `i` (and
-    /// writes the other one — frame parity picks).
-    taa: [Arc<MaterialInstance>; 2],
+    /// writes the other one — frame parity picks). `None` without
+    /// [`TemporalJitter`](super::TemporalJitter).
+    taa: Option<[Arc<MaterialInstance>; 2]>,
     /// Motion-blur materials (#149), `Some` only while the camera carries a
     /// [`MotionBlur`](super::MotionBlur) component and the MB targets exist.
     motion_blur: Option<MotionBlurResources>,
@@ -626,10 +704,17 @@ struct CameraResources {
     ao_enabled: bool,
     /// Bloom passes (#151), present only when the camera has a
     /// [`CameraBloom`](super::CameraBloom). `bloom_down[i]` writes `bloom_i`
-    /// (instance 0 Karis-samples `scene_color`, the rest sample the previous
-    /// mip); `bloom_up[i]` additively upsamples `bloom_{i+1}` into `bloom_i`.
-    /// Empty ⇒ the display binds the shared black bloom and no bloom pass runs.
+    /// (instance 0 Karis-samples the motion-blurred image when MB is on, else
+    /// `scene_color`; the rest sample the previous mip); `bloom_up[i]`
+    /// additively upsamples `bloom_{i+1}` into `bloom_i`. Empty ⇒ the display
+    /// binds the shared black bloom and no bloom pass runs.
     bloom_down: Vec<Arc<MaterialInstance>>,
+    /// TAA-on variants of `bloom_down[0]` reading each history texture, so the
+    /// glow comes off the SAME anti-aliased image the display shows instead of
+    /// the raw jittered `scene_color` (which would shimmer at edges). Built
+    /// only when bloom + TAA history exist and MB is off (with MB on,
+    /// `bloom_down[0]` already reads the post-TAA `MB_OUTPUT`).
+    bloom_down0_history: Option<[Arc<MaterialInstance>; 2]>,
     bloom_up: Vec<Arc<MaterialInstance>>,
     /// Whether bloom is on — part of the fresh-check (toggling rebuilds the
     /// display's bloom binding and the bloom materials).
@@ -649,6 +734,10 @@ struct CameraResources {
     /// resize re-derives the G-buffer (and `scene_color` with it),
     /// invalidating these materials.
     albedo_ptr: usize,
+    /// `Arc::as_ptr` of the camera depth attachment the position-from-depth
+    /// bindings reference — a host recreating the depth at the same size
+    /// (editor scene view) must also rebuild these materials.
+    depth_ptr: usize,
     /// `Arc::as_ptr` of the resolved environment the IBL/skybox groups bind
     /// (`None` = the black fallback, #145). A changed environment (resolved,
     /// swapped, or hot-reloaded) rebuilds these materials. `is_some()` also
@@ -884,8 +973,14 @@ impl CameraResources {
         device: &Arc<GraphicsDevice>,
         shared: &SharedResources,
         gbuffer: [&Arc<Texture>; 4],
+        // The camera's Depth32Float attachment: the resolve/SSAO/TAA/MB passes
+        // reconstruct world position from it (unfilterable binding, Load).
+        camera_depth: &Arc<Texture>,
         scene_color: &Arc<Texture>,
-        history: [&Arc<Texture>; 2],
+        // The TAA history ping-pong, present iff the camera has a
+        // `TemporalJitter` (#148 lazy allocation): `None` skips the TAA and
+        // history-display materials entirely.
+        history: Option<[&Arc<Texture>; 2]>,
         // [tile_max, neighbor_max, output], present iff the camera has MotionBlur.
         mb_targets: Option<[&Arc<Texture>; 3]>,
         env: Option<&Arc<super::ResolvedEnvironment>>,
@@ -901,6 +996,10 @@ impl CameraResources {
         // compute passes and binds the metered exposure buffer to the display;
         // `false` binds the shared neutral (1.0) exposure and records nothing.
         auto_exposure_on: bool,
+        // The previous resources' persistent exposure buffer + primed flag,
+        // carried across a rebuild (resize/env change) so the eye adaptation
+        // does not visibly reset to 1.0 on every window resize.
+        prev_auto_exposure: Option<(Arc<Buffer>, bool)>,
         color_format: TextureFormat,
         ring_buffer: &Arc<Buffer>,
     ) -> Option<Self> {
@@ -941,6 +1040,8 @@ impl CameraResources {
                     ))
                     .with_color_format(SCENE_COLOR_FORMAT)
                     .with_dynamic_uniform(0, 0)
+                    // Depth buffer read via Load (position reconstruction).
+                    .with_unfilterable_texture(1, 4)
                     .with_label("deferred_resolve"),
             )
             .inspect_err(|e| log::error!("deferred: resolve material failed: {e}"))
@@ -964,7 +1065,8 @@ impl CameraResources {
                     .with_texture(0, gbuffer[0].clone())
                     .with_texture(1, gbuffer[1].clone())
                     .with_texture(2, gbuffer[2].clone())
-                    .with_sampler(3, shared.gbuffer_sampler.clone()),
+                    .with_sampler(3, shared.gbuffer_sampler.clone())
+                    .with_texture(4, camera_depth.clone()),
             )
             .ok()?;
         let ibl_group = device
@@ -1097,7 +1199,16 @@ impl CameraResources {
                     .ok()
             };
             let histogram = make_buf((AE_BINS * 4) as u64, storage, "ae_histogram")?;
-            let exposure = make_buf(std::mem::size_of::<f32>() as u64, storage, "ae_exposure")?;
+            // Reuse the previous resources' persistent exposure slot (and its
+            // primed state) across a rebuild — the adapted value survives a
+            // window resize instead of visibly popping back to neutral.
+            let (exposure, primed) = match prev_auto_exposure {
+                Some((buffer, primed)) => (buffer, primed),
+                None => (
+                    make_buf(std::mem::size_of::<f32>() as u64, storage, "ae_exposure")?,
+                    false,
+                ),
+            };
             let build_uniform = make_buf(
                 std::mem::size_of::<AeBuildUniforms>() as u64,
                 uniform,
@@ -1163,7 +1274,7 @@ impl CameraResources {
                     resolve_uniform,
                     build,
                     resolve,
-                    primed: false,
+                    primed,
                 }),
                 display_buf,
             )
@@ -1228,83 +1339,99 @@ impl CameraResources {
             ))
         };
         let display_scene = display_instance(scene_color)?;
-        let display_history = [display_instance(history[0])?, display_instance(history[1])?];
-
-        // --- TAA resolve material (#148): scene-referred in and out ---
-        let taa_material = device
-            .create_material(
-                &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::slang(
-                        ShaderStage::Vertex,
-                        TAA_SHADER_SLANG.as_bytes().to_vec(),
-                        "vs_main",
-                        vec![],
-                    ))
-                    .with_shader(ShaderSource::slang(
-                        ShaderStage::Fragment,
-                        TAA_SHADER_SLANG.as_bytes().to_vec(),
-                        "fs_main",
-                        vec![],
-                    ))
-                    .with_color_format(SCENE_COLOR_FORMAT)
-                    .with_dynamic_uniform(0, 0)
-                    .with_label("deferred_taa_resolve"),
-            )
-            .inspect_err(|e| log::error!("deferred: TAA material failed: {e}"))
-            .ok()?;
-        // Instance i reads history[i]; frame parity writes the other one.
-        // History reprojection samples bilinearly (sub-pixel motion), the
-        // rest nearest.
-        let taa_instance = |read: &Arc<Texture>| -> Option<Arc<MaterialInstance>> {
-            let group = device
-                .create_binding_group(
-                    taa_material.binding_layouts()[0].clone(),
-                    BindingGroupDescriptor::new()
-                        .with_buffer_range(
-                            0,
-                            ring_buffer.clone(),
-                            0,
-                            std::mem::size_of::<TaaUniforms>() as u64,
-                        )
-                        .with_texture(1, scene_color.clone())
-                        .with_texture(2, read.clone())
-                        .with_texture(3, gbuffer[3].clone())
-                        .with_texture(4, gbuffer[0].clone())
-                        .with_sampler(5, shared.gbuffer_sampler.clone())
-                        .with_sampler(6, shared.ibl_sampler.clone())
-                        // Camera-only velocity (adaptive blend) reprojects
-                        // world position from the position G-buffer (RT2).
-                        .with_texture(7, gbuffer[2].clone()),
-                )
-                .ok()?;
-            Some(Arc::new(
-                MaterialInstance::new(taa_material.clone()).with_binding_group(group),
-            ))
+        let display_history = match history {
+            Some([a, b]) => Some([display_instance(a)?, display_instance(b)?]),
+            None => None,
         };
-        let taa = [taa_instance(history[0])?, taa_instance(history[1])?];
 
-        // --- Motion-blur materials (#149): built only when MB targets exist ---
-        let motion_blur = if let Some([mb_tile, mb_neighbor, mb_output]) = mb_targets {
-            let mb_material = |src: &str, fmt: TextureFormat, label: &'static str| {
-                device
+        // --- TAA resolve material (#148): scene-referred in and out. Built
+        // (with its history targets) only for TemporalJitter cameras.
+        let taa = match history {
+            Some(history) => {
+                let taa_material = device
                     .create_material(
                         &MaterialDescriptor::new()
                             .with_shader(ShaderSource::slang(
                                 ShaderStage::Vertex,
-                                src.as_bytes().to_vec(),
+                                TAA_SHADER_SLANG.as_bytes().to_vec(),
                                 "vs_main",
                                 vec![],
                             ))
                             .with_shader(ShaderSource::slang(
                                 ShaderStage::Fragment,
-                                src.as_bytes().to_vec(),
+                                TAA_SHADER_SLANG.as_bytes().to_vec(),
                                 "fs_main",
                                 vec![],
                             ))
-                            .with_color_format(fmt)
+                            .with_color_format(SCENE_COLOR_FORMAT)
                             .with_dynamic_uniform(0, 0)
-                            .with_label(label),
+                            // Depth buffer read via Load (position
+                            // reconstruction for the camera-only reprojection
+                            // and the disocclusion proxy).
+                            .with_unfilterable_texture(0, 7)
+                            .with_label("deferred_taa_resolve"),
                     )
+                    .inspect_err(|e| log::error!("deferred: TAA material failed: {e}"))
+                    .ok()?;
+                // Instance i reads history[i]; frame parity writes the other
+                // one. History reprojection samples bilinearly (sub-pixel
+                // motion), the rest nearest.
+                let taa_instance = |read: &Arc<Texture>| -> Option<Arc<MaterialInstance>> {
+                    let group = device
+                        .create_binding_group(
+                            taa_material.binding_layouts()[0].clone(),
+                            BindingGroupDescriptor::new()
+                                .with_buffer_range(
+                                    0,
+                                    ring_buffer.clone(),
+                                    0,
+                                    std::mem::size_of::<TaaUniforms>() as u64,
+                                )
+                                .with_texture(1, scene_color.clone())
+                                .with_texture(2, read.clone())
+                                .with_texture(3, gbuffer[3].clone())
+                                .with_texture(4, gbuffer[0].clone())
+                                .with_sampler(5, shared.gbuffer_sampler.clone())
+                                .with_sampler(6, shared.ibl_sampler.clone())
+                                // Camera depth: the camera-only reprojection
+                                // reconstructs world position from it.
+                                .with_texture(7, camera_depth.clone()),
+                        )
+                        .ok()?;
+                    Some(Arc::new(
+                        MaterialInstance::new(taa_material.clone()).with_binding_group(group),
+                    ))
+                };
+                Some([taa_instance(history[0])?, taa_instance(history[1])?])
+            }
+            None => None,
+        };
+
+        // --- Motion-blur materials (#149): built only when MB targets exist ---
+        let motion_blur = if let Some([mb_tile, mb_neighbor, mb_output]) = mb_targets {
+            // `depth_read`: the reconstruction pass reads the camera depth via
+            // Load (unfilterable binding 4); the tile passes do not.
+            let mb_material = |src: &str, fmt: TextureFormat, label: &'static str, depth_read| {
+                let mut desc = MaterialDescriptor::new()
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Vertex,
+                        src.as_bytes().to_vec(),
+                        "vs_main",
+                        vec![],
+                    ))
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Fragment,
+                        src.as_bytes().to_vec(),
+                        "fs_main",
+                        vec![],
+                    ))
+                    .with_color_format(fmt)
+                    .with_dynamic_uniform(0, 0);
+                if depth_read {
+                    desc = desc.with_unfilterable_texture(0, 4);
+                }
+                device
+                    .create_material(&desc.with_label(label))
                     .inspect_err(|e| log::error!("deferred: {label} material failed: {e}"))
                     .ok()
             };
@@ -1314,6 +1441,7 @@ impl CameraResources {
                 MB_TILE_MAX_SHADER_SLANG,
                 GBUFFER_FORMATS[3],
                 "deferred_mb_tile_max",
+                false,
             )?;
             let tile_group = device
                 .create_binding_group(
@@ -1337,6 +1465,7 @@ impl CameraResources {
                 MB_NEIGHBOR_MAX_SHADER_SLANG,
                 GBUFFER_FORMATS[3],
                 "deferred_mb_neighbor_max",
+                false,
             )?;
             let neighbor_group = device
                 .create_binding_group(
@@ -1362,6 +1491,7 @@ impl CameraResources {
                 MB_RECONSTRUCT_SHADER_SLANG,
                 SCENE_COLOR_FORMAT,
                 "deferred_mb_reconstruct",
+                true,
             )?;
             let reconstruct_instance = |color: &Arc<Texture>| -> Option<Arc<MaterialInstance>> {
                 let group = device
@@ -1377,7 +1507,9 @@ impl CameraResources {
                             .with_texture(1, color.clone())
                             .with_texture(2, mb_neighbor.clone())
                             .with_texture(3, gbuffer[3].clone())
-                            .with_texture(4, gbuffer[2].clone())
+                            // Camera depth (unfilterable, Load): the depth
+                            // proxy reconstructs world position from it.
+                            .with_texture(4, camera_depth.clone())
                             .with_texture(5, gbuffer[0].clone())
                             .with_sampler(6, shared.gbuffer_sampler.clone())
                             .with_sampler(7, shared.ibl_sampler.clone()),
@@ -1388,10 +1520,10 @@ impl CameraResources {
                 ))
             };
             let reconstruct_scene = reconstruct_instance(scene_color)?;
-            let reconstruct_history = [
-                reconstruct_instance(history[0])?,
-                reconstruct_instance(history[1])?,
-            ];
+            let reconstruct_history = match history {
+                Some([a, b]) => Some([reconstruct_instance(a)?, reconstruct_instance(b)?]),
+                None => None,
+            };
 
             // Display reads the blurred output instead of scene_color/history.
             let display = display_instance(mb_output)?;
@@ -1411,7 +1543,7 @@ impl CameraResources {
         // --- SSAO passes (#150), only when the camera opted in ---
         // A tiny fullscreen material builder shared by the horizon and blur
         // passes (both target R8, dynamic uniform in group 0).
-        let fullscreen_ssao_material = |source: &str, label: &str| {
+        let fullscreen_ssao_material = |source: &str, label: &str, depth_binding: u32| {
             device
                 .create_material(
                     &MaterialDescriptor::new()
@@ -1429,6 +1561,9 @@ impl CameraResources {
                         ))
                         .with_color_format(SSAO_FORMAT)
                         .with_dynamic_uniform(0, 0)
+                        // Both passes read the camera depth via Load
+                        // (position reconstruction / edge stop).
+                        .with_unfilterable_texture(0, depth_binding)
                         .with_label(label),
                 )
                 .inspect_err(|e| log::error!("deferred: {label} material failed: {e}"))
@@ -1436,8 +1571,9 @@ impl CameraResources {
         };
         let (ssao, ssao_blur) = match ssao_targets {
             Some([raw, _ao]) => {
-                let ssao_material = fullscreen_ssao_material(SSAO_SHADER_SLANG, "deferred_ssao")?;
-                // Horizon pass: albedo (marker), normal, position + sampler.
+                let ssao_material =
+                    fullscreen_ssao_material(SSAO_SHADER_SLANG, "deferred_ssao", 3)?;
+                // Horizon pass: albedo (marker), normal, depth + sampler.
                 let ssao_group = device
                     .create_binding_group(
                         ssao_material.binding_layouts()[0].clone(),
@@ -1450,7 +1586,7 @@ impl CameraResources {
                             )
                             .with_texture(1, gbuffer[0].clone())
                             .with_texture(2, gbuffer[1].clone())
-                            .with_texture(3, gbuffer[2].clone())
+                            .with_texture(3, camera_depth.clone())
                             .with_sampler(4, shared.gbuffer_sampler.clone()),
                     )
                     .ok()?;
@@ -1458,8 +1594,8 @@ impl CameraResources {
                     Arc::new(MaterialInstance::new(ssao_material).with_binding_group(ssao_group));
 
                 let blur_material =
-                    fullscreen_ssao_material(SSAO_BLUR_SHADER_SLANG, "deferred_ssao_blur")?;
-                // Denoise pass: raw AO + position (edge stop) + sampler.
+                    fullscreen_ssao_material(SSAO_BLUR_SHADER_SLANG, "deferred_ssao_blur", 2)?;
+                // Denoise pass: raw AO + depth (edge stop) + sampler.
                 let blur_group = device
                     .create_binding_group(
                         blur_material.binding_layouts()[0].clone(),
@@ -1471,7 +1607,7 @@ impl CameraResources {
                                 std::mem::size_of::<SsaoBlurUniforms>() as u64,
                             )
                             .with_texture(1, raw.clone())
-                            .with_texture(2, gbuffer[2].clone())
+                            .with_texture(2, camera_depth.clone())
                             .with_sampler(3, shared.gbuffer_sampler.clone()),
                     )
                     .ok()?;
@@ -1483,7 +1619,7 @@ impl CameraResources {
         };
 
         // --- Bloom passes (#151), only when the camera opted in ---
-        let (bloom_down, bloom_up) = match bloom_targets {
+        let (bloom_down, bloom_down0_history, bloom_up) = match bloom_targets {
             Some(mips) if !mips.is_empty() => {
                 let n = mips.len();
                 // Downsample material with the KARIS system variant selected.
@@ -1581,14 +1717,26 @@ impl CameraResources {
                 for i in 1..n {
                     down.push(bloom_instance(&down_plain, mips[i - 1])?);
                 }
+                // TAA-on, MB-off variants of down[0] reading each history: the
+                // display shows the TAA history, so the glow must come off the
+                // same anti-aliased image, not the raw jittered scene_color
+                // (edge shimmer). With MB on the MB_OUTPUT source above is
+                // already post-TAA, so no variants are needed.
+                let down0_history = match (mb_targets.is_none(), history) {
+                    (true, Some([a, b])) => Some([
+                        bloom_instance(&down_karis, a)?,
+                        bloom_instance(&down_karis, b)?,
+                    ]),
+                    _ => None,
+                };
                 // up[i] upsamples mip i+1 into mip i (additive), for i in 0..n-1.
                 let mut up = Vec::with_capacity(n.saturating_sub(1));
                 for i in 0..n.saturating_sub(1) {
                     up.push(bloom_instance(&up_material, mips[i + 1])?);
                 }
-                (down, up)
+                (down, down0_history, up)
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => (Vec::new(), None, Vec::new()),
         };
 
         Some(Self {
@@ -1604,12 +1752,14 @@ impl CameraResources {
             ssao_blur,
             ao_enabled: ssao_targets.is_some(),
             bloom_down,
+            bloom_down0_history,
             bloom_up,
             bloom_enabled: bloom_targets.is_some_and(|m| !m.is_empty()),
             auto_enabled: auto_exposure.is_some(),
             auto_exposure,
             history_primed: false,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
+            depth_ptr: Arc::as_ptr(camera_depth) as usize,
             env_ptr: env.map(|e| Arc::as_ptr(e) as usize),
             max_reflection_lod: env.map_or(0.0, |e| e.max_reflection_lod),
             color_format,
@@ -1658,19 +1808,15 @@ impl CameraRenderPipeline for DeferredPipeline {
             let names = [
                 GBUFFER_ALBEDO,
                 GBUFFER_NORMAL_METALLIC,
-                GBUFFER_POSITION_ROUGHNESS,
+                GBUFFER_ROUGHNESS,
                 GBUFFER_VELOCITY,
                 SCENE_COLOR,
-                TAA_HISTORY[0],
-                TAA_HISTORY[1],
             ];
             let formats = [
                 GBUFFER_FORMATS[0],
                 GBUFFER_FORMATS[1],
                 GBUFFER_FORMATS[2],
                 GBUFFER_FORMATS[3],
-                SCENE_COLOR_FORMAT,
-                SCENE_COLOR_FORMAT,
                 SCENE_COLOR_FORMAT,
             ];
             for (&name, format) in names.iter().zip(formats) {
@@ -1689,8 +1835,52 @@ impl CameraRenderPipeline for DeferredPipeline {
             let _ = world.insert(camera, targets.clone());
         }
 
+        // TAA history ping-pong (#148): two full-res Rgba16Float textures —
+        // allocated only for TemporalJitter cameras (they are the single
+        // biggest optional cost, ~33 MB at 1080p) and pruned when the
+        // component leaves, so toggling never blends against a stale history
+        // (the material rebuild below re-primes).
+        let taa_on = world.get::<super::TemporalJitter>(camera).is_some();
+        if taa_on {
+            let history_stale = TAA_HISTORY.iter().any(|&name| {
+                targets
+                    .get(name)
+                    .map(|t| t.size().width != width || t.size().height != height)
+                    .unwrap_or(true)
+            });
+            if history_stale {
+                let usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING;
+                for name in TAA_HISTORY {
+                    let texture = device
+                        .create_texture(
+                            &TextureDescriptor::new_2d(width, height, SCENE_COLOR_FORMAT, usage)
+                                .with_label(name),
+                        )
+                        .expect("create TAA history texture");
+                    targets.set(name, texture);
+                }
+                let _ = world.insert(camera, targets.clone());
+            }
+        } else if TAA_HISTORY.iter().any(|&name| targets.get(name).is_some()) {
+            for name in TAA_HISTORY {
+                targets.remove(name);
+            }
+            let _ = world.insert(camera, targets.clone());
+        }
+
         // Motion-blur intermediates (#149): two tile-resolution velocity
-        // reductions + a full-res output, allocated only when opted in.
+        // reductions + a full-res output, allocated only when opted in and
+        // pruned when the component leaves.
+        if !mb_on
+            && [MB_TILE_MAX, MB_NEIGHBOR_MAX, MB_OUTPUT]
+                .iter()
+                .any(|&name| targets.get(name).is_some())
+        {
+            for name in [MB_TILE_MAX, MB_NEIGHBOR_MAX, MB_OUTPUT] {
+                targets.remove(name);
+            }
+            let _ = world.insert(camera, targets.clone());
+        }
         if mb_on {
             let (tile_w, tile_h) = (width.div_ceil(MB_TILE_SIZE), height.div_ceil(MB_TILE_SIZE));
             let mb_stale = targets
@@ -1720,10 +1910,19 @@ impl CameraRenderPipeline for DeferredPipeline {
         }
 
         // SSAO targets (#150): derived only for cameras with the component, at
-        // the same size as the G-buffer (re-derived on resize). Left in place
-        // when the component is absent — the resolve binds the shared white AO
-        // regardless, so unused targets are harmless (memory is the only cost).
+        // the same size as the G-buffer (re-derived on resize), pruned when the
+        // component leaves (the resolve rebinds the shared white AO).
         let ao_enabled = world.get::<super::CameraAmbientOcclusion>(camera).is_some();
+        if !ao_enabled
+            && [SSAO_RAW, SSAO_AO]
+                .iter()
+                .any(|&name| targets.get(name).is_some())
+        {
+            for name in [SSAO_RAW, SSAO_AO] {
+                targets.remove(name);
+            }
+            let _ = world.insert(camera, targets.clone());
+        }
         if ao_enabled {
             // Half-res (#150 perf): SSAO is low-frequency and the bilateral
             // denoise + bilinear upsample in the resolve hide the lower
@@ -1762,6 +1961,14 @@ impl CameraRenderPipeline for DeferredPipeline {
         } else {
             0
         };
+        if !bloom_enabled && targets.get(&bloom_mip_key(0)).is_some() {
+            // Pruned when the component leaves (the display rebinds the shared
+            // black bloom).
+            for i in 0..MAX_BLOOM_MIPS {
+                targets.remove(&bloom_mip_key(i));
+            }
+            let _ = world.insert(camera, targets.clone());
+        }
         if bloom_enabled {
             let half = ((width >> 1).max(1), (height >> 1).max(1));
             let bloom_stale = bloom_mips == 0
@@ -1791,25 +1998,23 @@ impl CameraRenderPipeline for DeferredPipeline {
         }
         // (Re-)build the camera's materials when the targets or the color
         // format changed.
-        let (
-            Some(albedo),
-            Some(normal),
-            Some(position),
-            Some(velocity),
-            Some(scene_color),
-            Some(history_a),
-            Some(history_b),
-        ) = (
+        let (Some(albedo), Some(normal), Some(roughness), Some(velocity), Some(scene_color)) = (
             targets.get(GBUFFER_ALBEDO),
             targets.get(GBUFFER_NORMAL_METALLIC),
-            targets.get(GBUFFER_POSITION_ROUGHNESS),
+            targets.get(GBUFFER_ROUGHNESS),
             targets.get(GBUFFER_VELOCITY),
             targets.get(SCENE_COLOR),
-            targets.get(TAA_HISTORY[0]),
-            targets.get(TAA_HISTORY[1]),
-        )
-        else {
+        ) else {
             return;
+        };
+        // TAA history pair present iff opted in and derived above (#148).
+        let history = if taa_on {
+            match (targets.get(TAA_HISTORY[0]), targets.get(TAA_HISTORY[1])) {
+                (Some(a), Some(b)) => Some([a, b]),
+                _ => None,
+            }
+        } else {
+            None
         };
         // MB targets present iff opted in and derived above.
         let mb_targets = if mb_on {
@@ -1861,27 +2066,44 @@ impl CameraRenderPipeline for DeferredPipeline {
         // exposure binding and the compute materials.
         let auto_on = world.get::<super::CameraAutoExposure>(camera).is_some();
         let mut cameras = self.cameras.lock().expect("deferred camera map poisoned");
+        // Evict cameras whose entity died (scene reload, despawn) — their
+        // materials would otherwise pin GPU textures forever.
+        cameras.retain(|entity, _| world.is_alive(*entity));
+        let depth_ptr = Arc::as_ptr(&target.depth) as usize;
         let fresh = cameras.get(&camera).is_some_and(|c| {
             c.albedo_ptr == albedo_ptr
+                && c.depth_ptr == depth_ptr
                 && c.color_format == color_format
                 && c.mb_output_ptr == mb_output_ptr
                 && c.env_ptr == env_ptr
                 && c.ao_enabled == ao_on
+                // Toggling TemporalJitter reallocates the history pair, so the
+                // rebuild also resets `history_primed` — a re-enabled TAA never
+                // blends against a stale history.
+                && c.taa.is_some() == history.is_some()
                 && c.bloom_enabled == bloom_on
                 && c.auto_enabled == auto_on
         });
         if !fresh {
+            // Carry the adapted exposure across the rebuild (resize must not
+            // visibly reset the eye adaptation).
+            let prev_auto_exposure = cameras
+                .get(&camera)
+                .and_then(|c| c.auto_exposure.as_ref())
+                .map(|ae| (ae.exposure.clone(), ae.primed));
             match CameraResources::create(
                 &device,
                 shared,
-                [albedo, normal, position, velocity],
+                [albedo, normal, roughness, velocity],
+                &target.depth,
                 scene_color,
-                [history_a, history_b],
+                history,
                 mb_targets,
                 env.as_ref(),
                 ssao_targets,
                 bloom_chain.as_deref(),
                 auto_on,
+                prev_auto_exposure,
                 color_format,
                 &ring_buffer,
             ) {
@@ -1912,10 +2134,10 @@ impl CameraRenderPipeline for DeferredPipeline {
         let mut cameras = self.cameras.lock().expect("deferred camera map poisoned");
         let camera_resources = cameras.get_mut(&view.entity)?;
         let targets = world.get::<PipelineTargets>(view.entity)?;
-        let (Some(albedo), Some(normal), Some(position), Some(velocity), Some(scene_color)) = (
+        let (Some(albedo), Some(normal), Some(roughness), Some(velocity), Some(scene_color)) = (
             targets.get(GBUFFER_ALBEDO),
             targets.get(GBUFFER_NORMAL_METALLIC),
-            targets.get(GBUFFER_POSITION_ROUGHNESS),
+            targets.get(GBUFFER_ROUGHNESS),
             targets.get(GBUFFER_VELOCITY),
             targets.get(SCENE_COLOR),
         ) else {
@@ -1952,6 +2174,10 @@ impl CameraRenderPipeline for DeferredPipeline {
         // camera_pos.w carries the environment's reflection-LOD range (#145) —
         // the resolve shader reads only .xyz for position.
         let mut resolve_uniforms = gather_lights(world);
+        // The JITTERED inverse: the resolve reconstructs the raster sample's
+        // world position from depth, and the raster used the jittered matrix.
+        let inv_view_proj_cols = redlilium_core::math::mat4_to_cols_array_2d(&inv_view_proj);
+        resolve_uniforms.inv_view_proj = inv_view_proj_cols;
         resolve_uniforms.camera_pos = [
             camera_pos[0],
             camera_pos[1],
@@ -1999,10 +2225,12 @@ impl CameraRenderPipeline for DeferredPipeline {
             0.0
         };
 
-        // TAA (#148) runs for cameras that opted into the temporal contract;
-        // frame parity picks the history ping-pong direction (read this
-        // index, write the other).
+        // TAA (#148) runs for cameras that opted into the temporal contract
+        // (and whose TAA materials/history exist — lazy allocation); frame
+        // parity picks the history ping-pong direction (read this index,
+        // write the other).
         let taa_read_index = (world.get::<super::TemporalJitter>(view.entity).is_some()
+            && camera_resources.taa.is_some()
             && world.has_resource::<super::TemporalState>())
         .then(|| (world.resource::<super::TemporalState>().frame() % 2) as usize);
 
@@ -2056,10 +2284,14 @@ impl CameraRenderPipeline for DeferredPipeline {
                             proj: redlilium_core::math::mat4_to_cols_array_2d(
                                 &cam.projection_matrix,
                             ),
+                            // Jittered inverse: positions reconstruct the
+                            // raster samples exactly.
+                            inv_view_proj: inv_view_proj_cols,
                             params: [ao.radius, ao.intensity, ao.power, frame_rot],
                             params2: [texel[0], texel[1], 0.0, 0.0],
                         };
                         let blur = SsaoBlurUniforms {
+                            inv_view_proj: inv_view_proj_cols,
                             // Edge-stop sigma = the sampling radius: neighbors
                             // within a radius blur together, silhouettes stop it.
                             params: [texel[0], texel[1], ao.radius, 0.0],
@@ -2146,6 +2378,10 @@ impl CameraRenderPipeline for DeferredPipeline {
                     _pad: [0.0; 2],
                 }));
                 let reconstruct = ring.push(bytemuck::bytes_of(&MbReconstructUniforms {
+                    // Unjittered inverse (matches the pass's velocity
+                    // conventions; the jitter bias cancels in the depth
+                    // comparison — both samples reconstruct the same way).
+                    inv_view_proj: inv_unjittered_cols,
                     inv_resolution,
                     resolution,
                     camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
@@ -2215,7 +2451,9 @@ impl CameraRenderPipeline for DeferredPipeline {
                         .with_clear_color(0.0, 0.0, 0.0, 0.0),
                 )
                 .with_color(
-                    ColorAttachment::from_texture(position.clone())
+                    // Roughness clears to zero (background; the resolve
+                    // discards those pixels before reading it).
+                    ColorAttachment::from_texture(roughness.clone())
                         .with_clear_color(0.0, 0.0, 0.0, 0.0),
                 )
                 .with_color(
@@ -2367,111 +2605,171 @@ impl CameraRenderPipeline for DeferredPipeline {
         // --- 4. TAA resolve (#148), when the camera opted in: accumulate
         // scene_color into the history ping-pong. `color_writer` is the pass
         // whose output the display (or motion blur) then reads; `mb_color_index`
-        // picks the matching reconstruction instance.
-        let (taa_display, color_writer, taa_handle, mb_color_index) =
-            match (taa_read_index, taa_offset) {
-                (Some(read), Some(taa_offset)) => {
-                    let write = 1 - read;
-                    let history_write = targets.get(TAA_HISTORY[write])?;
-                    let mut taa_pass = GraphicsPass::new("taa_resolve".into());
-                    taa_pass.set_render_targets(
-                        RenderTargetConfig::new().with_color(
-                            ColorAttachment::from_texture(history_write.clone())
-                                .with_clear_color(0.0, 0.0, 0.0, 1.0),
-                        ),
-                    );
-                    taa_pass.add_draw_command(
-                        DrawCommand::new(
-                            shared.fullscreen_mesh.clone(),
-                            camera_resources.taa[read].clone(),
-                        )
-                        .with_dynamic_offsets(vec![vec![taa_offset]]),
-                    );
-                    let taa_handle = graph.add_graphics_pass(taa_pass);
-                    graph.add_dependency(taa_handle, resolve_handle);
-                    camera_resources.history_primed = true;
-                    (
-                        camera_resources.display_history[write].clone(),
-                        taa_handle,
-                        Some(taa_handle),
-                        Some(write),
-                    )
+        // picks the matching reconstruction instance. Resolved up front so a
+        // missing piece degrades to the TAA-off path instead of aborting the
+        // record mid-graph (orphan passes, no display).
+        let taa_setup = match (taa_read_index, taa_offset) {
+            (Some(read), Some(taa_offset)) => {
+                let write = 1 - read;
+                match (
+                    targets.get(TAA_HISTORY[write]),
+                    camera_resources.taa.as_ref(),
+                    camera_resources.display_history.as_ref(),
+                ) {
+                    (Some(history_write), Some(taa), Some(display_history)) => Some((
+                        write,
+                        taa_offset,
+                        history_write.clone(),
+                        taa[read].clone(),
+                        display_history[write].clone(),
+                    )),
+                    _ => None,
                 }
-                _ => (
-                    camera_resources.display_scene.clone(),
-                    resolve_handle,
-                    None,
-                    None,
-                ),
-            };
+            }
+            _ => None,
+        };
+        // A frame without a TAA pass leaves the history stale — un-prime it so
+        // the next TAA frame takes the current frame wholesale instead of
+        // blending against old content.
+        if taa_setup.is_none() {
+            camera_resources.history_primed = false;
+        }
+        let (taa_display, color_writer, taa_handle, mb_color_index) = match taa_setup {
+            Some((write, taa_offset, history_write, taa_instance, display_instance)) => {
+                let mut taa_pass = GraphicsPass::new("taa_resolve".into());
+                taa_pass.set_render_targets(
+                    RenderTargetConfig::new().with_color(
+                        ColorAttachment::from_texture(history_write)
+                            .with_clear_color(0.0, 0.0, 0.0, 1.0),
+                    ),
+                );
+                taa_pass.add_draw_command(
+                    DrawCommand::new(shared.fullscreen_mesh.clone(), taa_instance)
+                        .with_dynamic_offsets(vec![vec![taa_offset]]),
+                );
+                let taa_handle = graph.add_graphics_pass(taa_pass);
+                graph.add_dependency(taa_handle, resolve_handle);
+                camera_resources.history_primed = true;
+                (display_instance, taa_handle, Some(taa_handle), Some(write))
+            }
+            None => (
+                camera_resources.display_scene.clone(),
+                resolve_handle,
+                None,
+                None,
+            ),
+        };
 
         // --- 4b. Motion blur (#149): TileMax -> NeighborMax -> reconstruction
         // into MB_OUTPUT, which the display pass then reads. Opt-in only.
-        let (display_source, display_dep) =
-            match (mb_on, mb_offsets, camera_resources.motion_blur.as_ref()) {
-                (true, Some((tile_off, neighbor_off, recon_off)), Some(mb)) => {
-                    let mb_tile = targets.get(MB_TILE_MAX)?;
-                    let mb_neighbor = targets.get(MB_NEIGHBOR_MAX)?;
-                    let mb_output = targets.get(MB_OUTPUT)?;
-
-                    let mut tile_pass = GraphicsPass::new("mb_tile_max".into());
-                    tile_pass.set_render_targets(
-                        RenderTargetConfig::new()
-                            .with_color(ColorAttachment::from_texture(mb_tile.clone())),
-                    );
-                    tile_pass.add_draw_command(
-                        DrawCommand::new(shared.fullscreen_mesh.clone(), mb.tile_max.clone())
-                            .with_dynamic_offsets(vec![vec![tile_off]]),
-                    );
-                    let tile_handle = graph.add_graphics_pass(tile_pass);
-                    // Reads the completed velocity (background filled in).
-                    graph.add_dependency(tile_handle, velocity_complete_handle);
-
-                    let mut neighbor_pass = GraphicsPass::new("mb_neighbor_max".into());
-                    neighbor_pass.set_render_targets(
-                        RenderTargetConfig::new()
-                            .with_color(ColorAttachment::from_texture(mb_neighbor.clone())),
-                    );
-                    neighbor_pass.add_draw_command(
-                        DrawCommand::new(shared.fullscreen_mesh.clone(), mb.neighbor_max.clone())
-                            .with_dynamic_offsets(vec![vec![neighbor_off]]),
-                    );
-                    let neighbor_handle = graph.add_graphics_pass(neighbor_pass);
-                    graph.add_dependency(neighbor_handle, tile_handle);
-
-                    let reconstruct = match mb_color_index {
-                        Some(write) => mb.reconstruct_history[write].clone(),
-                        None => mb.reconstruct_scene.clone(),
-                    };
-                    let mut recon_pass = GraphicsPass::new("mb_reconstruct".into());
-                    recon_pass.set_render_targets(
-                        RenderTargetConfig::new()
-                            .with_color(ColorAttachment::from_texture(mb_output.clone())),
-                    );
-                    recon_pass.add_draw_command(
-                        DrawCommand::new(shared.fullscreen_mesh.clone(), reconstruct)
-                            .with_dynamic_offsets(vec![vec![recon_off]]),
-                    );
-                    let recon_handle = graph.add_graphics_pass(recon_pass);
-                    graph.add_dependency(recon_handle, neighbor_handle);
-                    // Reads the colour the display would otherwise show.
-                    graph.add_dependency(recon_handle, color_writer);
-
-                    (mb.display.clone(), recon_handle)
+        // Inputs resolved up front so a missing target/instance degrades to the
+        // MB-off path instead of aborting the record mid-graph.
+        let mb_setup = match (mb_on, mb_offsets, camera_resources.motion_blur.as_ref()) {
+            (true, Some(offsets), Some(mb)) => {
+                let reconstruct = match mb_color_index {
+                    Some(write) => mb.reconstruct_history.as_ref().map(|h| h[write].clone()),
+                    None => Some(mb.reconstruct_scene.clone()),
+                };
+                match (
+                    targets.get(MB_TILE_MAX),
+                    targets.get(MB_NEIGHBOR_MAX),
+                    targets.get(MB_OUTPUT),
+                    reconstruct,
+                ) {
+                    (Some(tile), Some(neighbor), Some(output), Some(reconstruct)) => Some((
+                        offsets,
+                        mb,
+                        tile.clone(),
+                        neighbor.clone(),
+                        output.clone(),
+                        reconstruct,
+                    )),
+                    _ => None,
                 }
-                _ => (taa_display, taa_handle.unwrap_or(resolve_handle)),
-            };
+            }
+            _ => None,
+        };
+        let mb_active = mb_setup.is_some();
+        let (display_source, display_dep) = match mb_setup {
+            Some((
+                (tile_off, neighbor_off, recon_off),
+                mb,
+                mb_tile,
+                mb_neighbor,
+                mb_output,
+                reconstruct,
+            )) => {
+                let mut tile_pass = GraphicsPass::new("mb_tile_max".into());
+                tile_pass.set_render_targets(
+                    RenderTargetConfig::new()
+                        .with_color(ColorAttachment::from_texture(mb_tile.clone())),
+                );
+                tile_pass.add_draw_command(
+                    DrawCommand::new(shared.fullscreen_mesh.clone(), mb.tile_max.clone())
+                        .with_dynamic_offsets(vec![vec![tile_off]]),
+                );
+                let tile_handle = graph.add_graphics_pass(tile_pass);
+                // Reads the completed velocity (background filled in).
+                graph.add_dependency(tile_handle, velocity_complete_handle);
+
+                let mut neighbor_pass = GraphicsPass::new("mb_neighbor_max".into());
+                neighbor_pass.set_render_targets(
+                    RenderTargetConfig::new()
+                        .with_color(ColorAttachment::from_texture(mb_neighbor.clone())),
+                );
+                neighbor_pass.add_draw_command(
+                    DrawCommand::new(shared.fullscreen_mesh.clone(), mb.neighbor_max.clone())
+                        .with_dynamic_offsets(vec![vec![neighbor_off]]),
+                );
+                let neighbor_handle = graph.add_graphics_pass(neighbor_pass);
+                graph.add_dependency(neighbor_handle, tile_handle);
+
+                let mut recon_pass = GraphicsPass::new("mb_reconstruct".into());
+                recon_pass.set_render_targets(
+                    RenderTargetConfig::new()
+                        .with_color(ColorAttachment::from_texture(mb_output.clone())),
+                );
+                recon_pass.add_draw_command(
+                    DrawCommand::new(shared.fullscreen_mesh.clone(), reconstruct)
+                        .with_dynamic_offsets(vec![vec![recon_off]]),
+                );
+                let recon_handle = graph.add_graphics_pass(recon_pass);
+                graph.add_dependency(recon_handle, neighbor_handle);
+                // Reads the colour the display would otherwise show.
+                graph.add_dependency(recon_handle, color_writer);
+
+                (mb.display.clone(), recon_handle)
+            }
+            None => (taa_display, taa_handle.unwrap_or(resolve_handle)),
+        };
 
         // --- 4c. Bloom (#151): down/up mip chain, when the camera opted in.
-        // Sources the motion-blurred image when MB is on (#149) so the glow
-        // comes off the blurred frame, else scene_color (post-resolve); the
-        // display composites the accumulated top mip (bloom_0).
+        // The glow sources the SAME image the display shows: the motion-blurred
+        // MB_OUTPUT when MB is on (#149), else the TAA history just written
+        // (#148 — the raw jittered scene_color would shimmer at edges), else
+        // scene_color (post-resolve); the display composites the accumulated
+        // top mip (bloom_0).
         let bloom_final: Option<PassHandle> = if camera_resources.bloom_down.is_empty() {
             None
         } else {
             let n = camera_resources.bloom_down.len();
             let mips: Option<Vec<&Arc<Texture>>> =
                 (0..n).map(|i| targets.get(&bloom_mip_key(i))).collect();
+            // down[0]'s instance + the pass that wrote its source.
+            let (down0_instance, down0_dep) = if mb_active {
+                (camera_resources.bloom_down[0].clone(), display_dep)
+            } else {
+                match (
+                    mb_color_index,
+                    taa_handle,
+                    camera_resources.bloom_down0_history.as_ref(),
+                ) {
+                    (Some(write), Some(taa_handle), Some(down0_history)) => {
+                        (down0_history[write].clone(), taa_handle)
+                    }
+                    _ => (camera_resources.bloom_down[0].clone(), resolve_handle),
+                }
+            };
             mips.map(|mips| {
                 // Downsample chain: down[i] writes mip i (replace).
                 let mut down_handles = Vec::with_capacity(n);
@@ -2483,22 +2781,22 @@ impl CameraRenderPipeline for DeferredPipeline {
                                 .with_clear_color(0.0, 0.0, 0.0, 1.0),
                         ),
                     );
+                    let instance = if i == 0 {
+                        down0_instance.clone()
+                    } else {
+                        camera_resources.bloom_down[i].clone()
+                    };
                     pass.add_draw_command(
-                        DrawCommand::new(
-                            shared.fullscreen_mesh.clone(),
-                            camera_resources.bloom_down[i].clone(),
-                        )
-                        .with_dynamic_offsets(vec![vec![bloom_down_offsets[i]]]),
+                        DrawCommand::new(shared.fullscreen_mesh.clone(), instance)
+                            .with_dynamic_offsets(vec![vec![bloom_down_offsets[i]]]),
                     );
                     let h = graph.add_graphics_pass(pass);
-                    // down[0] reads the motion-blurred image when MB is on — and
-                    // `display_dep` is then the reconstruction pass that wrote
-                    // it — else scene_color from the resolve. down[i] reads mip
-                    // i-1.
+                    // down[0] reads its source's writer (MB reconstruction, TAA
+                    // resolve, or the deferred resolve); down[i] reads mip i-1.
                     graph.add_dependency(
                         h,
                         if i == 0 {
-                            if mb_on { display_dep } else { resolve_handle }
+                            down0_dep
                         } else {
                             down_handles[i - 1]
                         },
@@ -2552,13 +2850,17 @@ impl CameraRenderPipeline for DeferredPipeline {
                     )
                 });
             match (camera_resources.auto_exposure.as_mut(), ae_params) {
-                (Some(ae), Some((rate_up, rate_down, min_mult, max_mult))) => {
+                (Some(ae), Some((rate_scene_brighten, rate_scene_darken, min_mult, max_mult))) => {
                     let build_u = AeBuildUniforms {
                         params: [AE_LOG_MIN, AE_LOG_MAX, AE_SAMPLE_DIM as f32, 0.0],
                     };
+                    // Slot pairing (see AeResolveUniforms): a rising multiplier
+                    // means the scene DARKENED, so params.z carries speed_down;
+                    // a falling one means it brightened — limits.z carries
+                    // speed_up (the fast, eye-like stop-down).
                     let resolve_u = AeResolveUniforms {
-                        params: [AE_LOG_MIN, AE_LOG_MAX, rate_up, AE_KEY],
-                        limits: [min_mult, max_mult, rate_down, 0.0],
+                        params: [AE_LOG_MIN, AE_LOG_MAX, rate_scene_darken, AE_KEY],
+                        limits: [min_mult, max_mult, rate_scene_brighten, 0.0],
                     };
                     // Uniforms + histogram clear ride a transfer the build waits
                     // on (the dispatch has no dynamic offset, so uniforms can't

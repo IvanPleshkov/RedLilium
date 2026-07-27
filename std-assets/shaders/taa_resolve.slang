@@ -97,11 +97,13 @@ Texture2D gbuffer_albedo;
 SamplerState nearest_sampler;
 [[vk::binding(6, 0)]]
 SamplerState linear_sampler;
-// World position (G-buffer RT2, xyz). Reprojected through the camera pair to
-// recover the *camera-only* screen motion at each pixel (below), independent
-// of any object's own motion.
+// Camera depth (reversed-Z), unfilterable-float, read via Load. World
+// position is reconstructed from it (unjittered inverse — sub-pixel error
+// only) and reprojected through the camera pair to recover the *camera-only*
+// screen motion at each pixel (below), independent of any object's own
+// motion; it also feeds the view-depth disocclusion proxy.
 [[vk::binding(7, 0)]]
-Texture2D gbuffer_position;
+Texture2D<float> depth_texture;
 
 // History-rejection box width in standard deviations: the
 // ghosting-vs-flicker knob (narrow clips history aggressively and flickers
@@ -252,7 +254,8 @@ float4 fs_main(VsOutput input) : SV_Target {
         // Camera-only reprojection of this pixel's world position — unlike
         // `velocity` (which folds in the object's own motion) it depends solely
         // on the camera, so a moving object does not inflate the blend itself.
-        float3 world = gbuffer_position.Sample(nearest_sampler, input.uv).xyz;
+        float3 world = reconstruct_world(
+            inv_view_proj, input.uv, load_texel_r(depth_texture, input.uv));
         cam_uv = project_uv(prev_view_proj, world);
         depth = min(length(camera_pos.xyz - world), TAA_FAR_DEPTH);
     }

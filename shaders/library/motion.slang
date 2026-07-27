@@ -17,12 +17,23 @@ float2 ndc_to_uv(float2 ndc) {
     return ndc * float2(0.5, -0.5) + 0.5;
 }
 
+// World-space position of the sample at `uv` with raster depth `depth`
+// (reversed-Z), through the inverse of the view-projection that rasterized it
+// (the jittered inverse reconstructs the raster sample exactly; the unjittered
+// one is off by the sub-pixel jitter — fine for reprojection/depth proxies).
+// This replaces storing world position in the G-buffer: the Depth32Float
+// buffer holds full precision everywhere, where an f16 position target loses
+// ~0.5 units of precision at |coord| ~ 1000.
+float3 reconstruct_world(float4x4 inv_view_proj, float2 uv, float depth) {
+    float4 w = mul(inv_view_proj, float4(uv_to_ndc(uv), depth, 1.0));
+    return w.xyz / w.w;
+}
+
 // World-space point on the far plane along the ray through `uv`
 // (reversed-Z: far = depth 0). Used to reproject background/sky pixels, which
 // have no geometry of their own.
 float3 far_plane_world(float4x4 inv_view_proj, float2 uv) {
-    float4 w = mul(inv_view_proj, float4(uv_to_ndc(uv), 0.0, 1.0));
-    return w.xyz / w.w;
+    return reconstruct_world(inv_view_proj, uv, 0.0);
 }
 
 // NDC of a world-space point under `view_proj` (w guarded against 0).

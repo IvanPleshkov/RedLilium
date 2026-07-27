@@ -141,3 +141,17 @@ bool any_nan2(float2 v) {
 bool any_nan3(float3 v) {
     return is_nan(v.x) || is_nan(v.y) || is_nan(v.z);
 }
+
+// Read a single-channel texture at `uv` via `Load` — the sampler-free path
+// required for depth-format textures (an unfilterable-float binding must not
+// pair with a filtering sampler on WebGPU). Equivalent to a nearest,
+// clamp-to-edge sample: floor to the texel, clamped inside the extent.
+float load_texel_r(Texture2D<float> tex, float2 uv) {
+    uint w, h;
+    tex.GetDimensions(w, h);
+    int2 px = clamp(
+        int2(uv * float2(float(w), float(h))),
+        int2(0, 0),
+        int2(int(w) - 1, int(h) - 1));
+    return tex.Load(int3(px, 0));
+}

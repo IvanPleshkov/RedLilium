@@ -47,10 +47,15 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
     // value is depth-convention independent (#125/ADR-038).
     output.position = float4(x, y, 0.9999, 1.0);
 
-    // Compute view direction from clip space
+    // Compute view direction from clip space. Deliberately UNNORMALIZED: the
+    // unprojected plane point is an affine function of NDC, so its linear
+    // interpolation across the triangle is exact per pixel. Normalizing here
+    // would weight the vertex blend by ray length and warp the whole sky
+    // (>20 degrees off at screen center for a 90-degree FOV); cube sampling
+    // does not need a unit vector.
     float4 clip_pos = float4(x, y, 1.0, 1.0);
     float4 world_pos = mul(inv_view_proj, clip_pos);
-    output.view_dir = normalize(world_pos.xyz / world_pos.w - camera_pos.xyz);
+    output.view_dir = world_pos.xyz / world_pos.w - camera_pos.xyz;
     return output;
 }
 

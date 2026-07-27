@@ -396,6 +396,14 @@ pub struct MaterialDescriptor {
     /// with a per-draw offset). Applied after reflection in `create_material`.
     pub dynamic_uniforms: Vec<(u32, u32)>,
 
+    /// `(group, binding)` pairs whose reflected `Texture` should be declared
+    /// [`UnfilterableTexture`](crate::BindingType::UnfilterableTexture) — a
+    /// depth-format (or otherwise non-filterable) texture the shader reads via
+    /// `Load`. Reflection cannot infer this from a Slang `Texture2D<float>`;
+    /// applied after reflection in `create_material`, like
+    /// [`dynamic_uniforms`](Self::dynamic_uniforms).
+    pub unfilterable_textures: Vec<(u32, u32)>,
+
     /// Per-set update-frequency classes reflected from rate-classified
     /// `ParameterBlock`s (parallel to `binding_layouts`; empty for legacy
     /// shaders). Filled by reflection in `create_material`, read by render
@@ -427,6 +435,7 @@ impl Default for MaterialDescriptor {
             depth: None,
             sample_count: 1,
             dynamic_uniforms: Vec::new(),
+            unfilterable_textures: Vec::new(),
             set_update_rates: Vec::new(),
             variant: None,
             label: None,
@@ -605,6 +614,15 @@ impl MaterialDescriptor {
     /// (bound once, offset supplied per draw). Applied after reflection.
     pub fn with_dynamic_uniform(mut self, group: u32, binding: u32) -> Self {
         self.dynamic_uniforms.push((group, binding));
+        self
+    }
+
+    /// Mark a reflected texture binding `(group, binding)` as an
+    /// [`UnfilterableTexture`](crate::BindingType::UnfilterableTexture) — a
+    /// depth-format texture the shader reads via `Load` (no filtering
+    /// sampler). Applied after reflection.
+    pub fn with_unfilterable_texture(mut self, group: u32, binding: u32) -> Self {
+        self.unfilterable_textures.push((group, binding));
         self
     }
 

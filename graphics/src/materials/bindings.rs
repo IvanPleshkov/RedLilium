@@ -75,6 +75,19 @@ pub enum BindingType {
     /// image.
     DepthTexture,
 
+    /// Sampled texture whose format is not filterable-float — a depth format
+    /// read as raw values (`Texture2D<float>` + `Load`, no filtering sampler)
+    /// or a non-filterable float format like `R32Float`.
+    ///
+    /// On wgpu this declares `TextureSampleType::Float { filterable: false }`
+    /// (WebGPU's "unfilterable-float"), which is the sample type WebGPU
+    /// permits for depth-format views read as plain floats; the shader must
+    /// not pair the binding with a filtering sampler (use `Load`). On Vulkan
+    /// it is an ordinary sampled image. Reflection cannot infer this from a
+    /// Slang `Texture2D<float>` — mark the binding with
+    /// [`MaterialDescriptor::with_unfilterable_texture`](crate::MaterialDescriptor::with_unfilterable_texture).
+    UnfilterableTexture,
+
     /// Texture sampler.
     Sampler,
 

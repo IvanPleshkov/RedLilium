@@ -576,6 +576,14 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
+        crate::materials::BindingType::UnfilterableTexture => wgpu::BindingType::Texture {
+            // WebGPU's sample type for depth-format views read as plain floats
+            // (and for non-filterable formats like R32Float). The shader reads
+            // via Load — no filtering-sampler pairing to validate.
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         crate::materials::BindingType::Sampler => {
             wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
         }
