@@ -515,15 +515,33 @@ fn tick(
     // selection outline whenever something is selected (mirrors the windowed
     // shell's on_draw picking block — headless just has no egui pass to order
     // before). Runs BEFORE the screenshot injection so a capture shows the
-    // outline, exactly like the windowed scene view.
+    // outline, exactly like the windowed scene view. Editing only: while a
+    // play session is live the captured view is the play world's (game camera
+    // / pause flyover), so the editor-world picking pass is meaningless —
+    // remote picks are answered as misses instead of left hanging.
     let pending_pick = scene_view.take_pending_pick();
     let pending_rect = scene_view.take_pending_rect_pick();
+    let editing = play.is_none();
+    if !editing && (pending_pick.is_some() || pending_rect.is_some()) {
+        if pending_rect.is_some() {
+            remote_commands::complete_rect_pick(rc, &ew.world, &[]);
+        } else {
+            remote_commands::complete_point_pick(
+                rc,
+                &ew.world,
+                &crate::scene_view::PickHit {
+                    entity: None,
+                    world_point: None,
+                },
+            );
+        }
+    }
     let selection_active = ew.world.has_resource::<redlilium_ecs::ui::Selection>()
         && !ew
             .world
             .resource::<redlilium_ecs::ui::Selection>()
             .is_empty();
-    if pending_pick.is_some() || pending_rect.is_some() || selection_active {
+    if editing && (pending_pick.is_some() || pending_rect.is_some() || selection_active) {
         scene_view.fill_picking_rings(&ew.world);
         if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
             let ei_handle = graph.add_graphics_pass(ei_pass);

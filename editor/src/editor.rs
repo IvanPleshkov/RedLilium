@@ -2097,12 +2097,42 @@ impl AppHandler for Editor {
             .as_mut()
             .and_then(|sv| sv.take_pending_rect_pick());
 
+        // While a play session is live (Playing or Paused) the scene view
+        // shows the play world's texture (game camera / pause flyover), so the
+        // editor-world picking pass and selection outline are meaningless —
+        // and were burning a full extra scene render per frame. Editing only.
+        let editing = self.play.is_none();
+
+        // A pick that arrived during a play session would target the play
+        // view, not the editor world the picking pass renders — answer any
+        // remote job as a miss instead of leaving it hanging (a UI click
+        // simply drops).
+        if !editing && (pending_pick.is_some() || pending_rect.is_some()) {
+            self.pending_cpu_pick = None;
+            if let (Some(rc), Some(ew)) = (&mut self.remote, self.world.as_ref()) {
+                if pending_rect.is_some() {
+                    crate::remote_commands::complete_rect_pick(rc, &ew.world, &[]);
+                } else {
+                    crate::remote_commands::complete_point_pick(
+                        rc,
+                        &ew.world,
+                        &crate::scene_view::PickHit {
+                            entity: None,
+                            world_point: None,
+                        },
+                    );
+                }
+            }
+        }
+
         // The forward fill is done by the SceneDrawer; here we fill only
         // the picking ring and upload scene meshes (before the scene pass).
         if let (Some(scene_view), Some(ew)) = (&mut self.scene_view, self.world.as_ref())
             && scene_view.has_viewport()
         {
-            scene_view.fill_picking_rings(&ew.world);
+            if editing {
+                scene_view.fill_picking_rings(&ew.world);
+            }
             scene_view.flush_uploads(&mut graph);
         }
 
@@ -2166,7 +2196,10 @@ impl AppHandler for Editor {
             ctx.submit(play_graph);
         }
 
-        if render_active && let Some(ew) = self.world.as_ref() {
+        if render_active
+            && editing
+            && let Some(ew) = self.world.as_ref()
+        {
             let scene_view = self.scene_view.as_mut().unwrap();
 
             // Entity index pass (picking) — independent target + depth now.
