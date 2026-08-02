@@ -523,16 +523,25 @@ pub(crate) fn selection_pick(
             let Some(gt) = world.get::<GlobalTransform>(entity) else {
                 continue;
             };
-            // Buildings pick by their ground-floor footprint perimeter.
-            let ring = crate::building::footprint_corners(building);
-            let corner = |[x, z]: [f32; 2]| {
-                let p = gt.0 * redlilium_core::math::Vec4::new(x, 0.0, z, 1.0);
-                Vec3::new(p.x, p.y, p.z)
+            // Buildings pick by their envelope ring at the origin plane
+            // (tier 0 → the root); the contour vertices win on top
+            // (tier 1) so the pen handles stay draggable.
+            let Some(ring) = crate::building::envelope_ring_local(world, building) else {
+                continue;
             };
-            for i in 0..4 {
-                let (dist, _, t) =
-                    ray_segment_closest(ray, corner(ring[i]), corner(ring[(i + 1) % 4]));
+            let at = |p: &Vec3| {
+                let q = gt.0 * redlilium_core::math::Vec4::new(p.x, p.y, p.z, 1.0);
+                Vec3::new(q.x, q.y, q.z)
+            };
+            for pair in ring.windows(2) {
+                let (dist, _, t) = ray_segment_closest(ray, at(&pair[0]), at(&pair[1]));
                 consider(0, dist, PICK_RADIUS, t, entity);
+            }
+            if let Some(corners) = crate::stroke::corners_of(world, &building.points) {
+                for (vertex, p, _, _) in corners {
+                    let (dist, _, t) = ray_segment_closest(ray, p, p);
+                    consider(1, dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
+                }
             }
         }
     }

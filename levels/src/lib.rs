@@ -22,7 +22,7 @@ pub mod stroke;
 mod tool;
 
 pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_anchors};
-pub use building::{Building, PlaceBuildingAction};
+pub use building::{Building, Datum, PlaceBuildingAction};
 pub use cut::{AddCutAction, Cut, CutVertex, cut_paths};
 pub use draw::DrawLevelGraph;
 pub use junction::{CreateJunctionAction, Junction, StampJunctionAction};
@@ -109,6 +109,7 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<Cut>();
         world.register_inspector_default::<CutVertex>();
         world.register_inspector_default::<Building>();
+        world.register_inspector_default::<Datum>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
@@ -303,11 +304,8 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                     redlilium_core::math::quat_from_rotation_y(0.0),
                     redlilium_core::math::Vec3::new(1.0, 1.0, 1.0),
                 );
-                ctx.actions.push(Box::new(PlaceBuildingAction::new(
-                    parent,
-                    transform,
-                    Building::default(),
-                )));
+                ctx.actions
+                    .push(Box::new(PlaceBuildingAction::new(parent, transform)));
             },
         );
         // Junction stamps: an N-armed template at the click point; drag the

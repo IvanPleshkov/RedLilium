@@ -903,7 +903,7 @@ pub fn spawn_levels_playground(world: &mut World) {
         use redlilium_core::math::quat_from_rotation_y;
         use redlilium_ecs::Entity;
         use redlilium_levels::{
-            Building, Cut, CutVertex, EdgeAnchor, Gate, PlaceBuildingAction, Stroke, StrokeVertex,
+            Cut, CutVertex, EdgeAnchor, Gate, PlaceBuildingAction, Stroke, StrokeVertex,
         };
 
         let child = |world: &mut World, parent: Entity, local: Transform| -> Entity {
@@ -971,17 +971,28 @@ pub fn spawn_levels_playground(world: &mut World) {
                 .unwrap();
             gate
         };
-        let building_at =
-            |world: &mut World, parent: Option<Entity>, x: f32, z: f32, building: Building| {
-                let local = Transform::new(
-                    Vec3::new(x, 0.0, z),
-                    quat_from_rotation_y(0.0),
-                    Vec3::new(1.0, 1.0, 1.0),
-                );
-                PlaceBuildingAction::new(parent, local, building)
-                    .apply(world)
-                    .unwrap();
-            };
+        // Envelope contour = a `half`-extent square, ladder = the listed
+        // datum elevations (the topmost is the height).
+        let building_at = |world: &mut World,
+                           parent: Option<Entity>,
+                           x: f32,
+                           z: f32,
+                           half: f32,
+                           ladder: &[f32]| {
+            let local = Transform::new(
+                Vec3::new(x, 0.0, z),
+                quat_from_rotation_y(0.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            );
+            PlaceBuildingAction::shaped(
+                parent,
+                local,
+                vec![[-half, half], [half, half], [half, -half], [-half, -half]],
+                ladder.to_vec(),
+            )
+            .apply(world)
+            .unwrap();
+        };
 
         // Group A ("villa"), west of the first road: a plain root entity
         // whose subtree is the prefab — a fence stroke (open, one vertex
@@ -1037,19 +1048,8 @@ pub fn spawn_levels_playground(world: &mut World) {
                 )
                 .unwrap();
         }
-        building_at(world, Some(villa), -2.0, -4.5, Building::default());
-        building_at(
-            world,
-            Some(villa),
-            4.0,
-            -6.0,
-            Building {
-                floors: 1,
-                half_width: 2.0,
-                half_depth: 2.0,
-                ..Building::default()
-            },
-        );
+        building_at(world, Some(villa), -2.0, -4.5, 3.0, &[0.0, 3.0, 6.0]);
+        building_at(world, Some(villa), 4.0, -6.0, 2.0, &[0.0, 3.0]);
         // On the fence's second segment (the curved NE bend), mid-way,
         // facing east — the derived spot lands near the old (7, 0, −3).
         let gate_a = gate_at(world, fence, 1, 0.5, false);
@@ -1093,16 +1093,7 @@ pub fn spawn_levels_playground(world: &mut World) {
             ),
             &[[-5.0, 0.0, 0.0], [5.0, 0.0, 0.0], [5.0, 2.0, -9.0]],
         );
-        building_at(
-            world,
-            None,
-            48.0,
-            -5.0,
-            Building {
-                floors: 3,
-                ..Building::default()
-            },
-        );
+        building_at(world, None, 48.0, -5.0, 3.0, &[0.0, 3.0, 6.0, 9.0]);
         // Stroke C: glued to the east side of the cross's north road — the
         // inverted derivation showcase: the stroke's 8 m frontage dictates
         // the edge interval, only the center (u = 0.5) is authored; slide

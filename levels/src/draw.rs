@@ -2,7 +2,7 @@
 
 use redlilium_core::math::{Mat4, Vec3, Vec4};
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerContext};
-use redlilium_ecs::{GlobalTransform, Res, System, SystemContext, SystemError};
+use redlilium_ecs::{GlobalTransform, Res, System, SystemContext, SystemError, World};
 
 use crate::anchor::EdgeAnchor;
 use crate::bezier::{self, Patch};
@@ -138,7 +138,7 @@ impl System for DrawLevelGraph {
                     let Some(gt) = world.get::<GlobalTransform>(entity) else {
                         continue;
                     };
-                    draw_building(&mut draw, &gt.0, building);
+                    draw_building(&mut draw, world, &gt.0, building);
                 }
             }
 
@@ -199,40 +199,48 @@ fn draw_node(draw: &mut DebugDrawerContext<'_>, world: &Mat4, half_width: f32) {
     draw.draw_line(pt(&tip), pt(&(tip - fwd * 0.5 - side * 0.3)), NODE_COLOR);
 }
 
-/// Building box massing: the footprint extruded floor by floor — a ring
-/// per storey line plus the four corner verticals.
+/// Building envelope massing: the closed contour ring repeated at every
+/// datum elevation (the ladder is visible in the viewport), vertical
+/// edges at the authored vertices, plus the vertices' handle cubes and
+/// antennae for pen-model editing.
 fn draw_building(
     draw: &mut DebugDrawerContext<'_>,
-    world: &Mat4,
+    world: &World,
+    root: &Mat4,
     building: &crate::building::Building,
 ) {
-    if building.floors == 0 || building.floor_height <= 0.0 {
+    let Some(ring) = crate::building::envelope_ring_local(world, building) else {
         return;
-    }
-    let corner = |x: f32, y: f32, z: f32| {
-        let p = world * Vec4::new(x, y, z, 1.0);
-        Vec3::new(p.x, p.y, p.z)
     };
-    let ring = crate::building::footprint_corners(building);
-    for floor in 0..=building.floors {
-        let y = floor as f32 * building.floor_height;
-        for i in 0..4 {
-            let [ax, az] = ring[i];
-            let [bx, bz] = ring[(i + 1) % 4];
-            draw.draw_line(
-                pt(&corner(ax, y, az)),
-                pt(&corner(bx, y, bz)),
-                BUILDING_COLOR,
-            );
+    let at = |p: &Vec3, y: f32| {
+        let q = root * Vec4::new(p.x, p.y + y, p.z, 1.0);
+        Vec3::new(q.x, q.y, q.z)
+    };
+    let levels = crate::building::ladder_elevations(world, building);
+    for &e in &levels {
+        for pair in ring.windows(2) {
+            draw.draw_line(pt(&at(&pair[0], e)), pt(&at(&pair[1], e)), BUILDING_COLOR);
         }
     }
-    let height = building.floors as f32 * building.floor_height;
-    for [x, z] in ring {
-        draw.draw_line(
-            pt(&corner(x, 0.0, z)),
-            pt(&corner(x, height, z)),
-            BUILDING_COLOR,
-        );
+    let bottom = levels.first().copied().unwrap_or(0.0).min(0.0);
+    let top = crate::building::envelope_top(world, building);
+    for &v in &building.points {
+        let Some(t) = world.get::<redlilium_ecs::Transform>(v) else {
+            continue;
+        };
+        let p = t.translation;
+        draw.draw_line(pt(&at(&p, bottom)), pt(&at(&p, top)), BUILDING_COLOR);
+    }
+    // Vertex handles in world space — same editing affordance as strokes.
+    if let Some(corners) = crate::stroke::corners_of(world, &building.points) {
+        for (_, p, h_out, h_in) in corners {
+            draw_handle_cube(draw, p, HANDLE_HALF, BUILDING_COLOR);
+            for h in [h_out, h_in] {
+                if (h - p).norm() > 1e-3 {
+                    draw.draw_line(pt(&p), pt(&h), GRID_COLOR);
+                }
+            }
+        }
     }
 }
 

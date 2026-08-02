@@ -240,21 +240,55 @@ the entities mean.
   result. A validator flags *unsanctioned* crossings — two roads
   intersecting in projection with neither a shared node nor an edge anchor —
   as authoring errors; it never tries to auto-resolve them.
-- **Building** — free-standing architecture content: an **ordinary
-  entity** with its own transform and its own footprint
-  (`half_width × half_depth` local rectangle); group any number under a
-  root entity via plain hierarchy (a villa, or a factory full of
-  structures — the group subtree is the prefab). The component carries
-  flat box-massing recipe parameters (floors, floor height, footprint
-  extents, seed) — the P4 stub of the eventual **assembly graph asset**
-  (a reusable recipe: one "землянка" recipe, ten placements); the fields
-  are already the asset's fields, promotion is mechanical once AssetRef
-  inspector editing lands. Connections to the road network are gates on
-  strokes or edge anchors — never building fields. How terrain meets a
-  building footprint is the generator's decision later; there is no
-  footprint cut-out in the authoring layer. Interior/exterior volumes,
-  occluders and gameplay metadata still get their own design round
-  (phase 3, §7).
+- **Building** (design approved 2026-07-24) — free-standing architecture
+  content: an **ordinary entity**, grouped by plain hierarchy (a villa, a
+  factory full of structures — the group subtree is the prefab).
+  A building is **not a stack of storeys**: multi-storey voids (a factory
+  hall, an airport atrium, a theater) are first-class, so the floor-by-
+  floor partition is a *derived special case*, never the structure. The
+  model is **walls + plates + datum marks; spaces are derived**:
+  - **Envelope**: a closed contour of child vertices — the same pen-model
+    vertex machinery as strokes/cuts, so curved walls come free. The
+    minimal building (interior opt-in!) is envelope × height: no interior
+    walls, no plates, nothing to derive — the successor of the P4 box.
+  - **Datum ladder** (`Datum` child entities): named elevations (+0.000,
+    +3.300, …). Pure *guides*, not structure — plates and walls attach to
+    a datum entity, dragging one reflows everything attached; nothing is
+    required to sit on a datum (mezzanine at +4.100 is legal). The
+    topmost datum is the envelope height.
+  - **Walls** (later slice): centerline polylines + a vertical span
+    (datum-to-datum attachments). A shared wall is ONE entity — the plots
+    lesson. Rooms are never authored: the wall graph's planar faces are
+    derived, as with terrain regions between roads.
+  - **Plates** (later slice): closed contour + elevation attachment,
+    present only where floor exists. Plates cut a face's vertical column
+    into cells; cells separated by neither wall nor plate **merge** —
+    a hall with no plates over its main volume derives as ONE tall
+    space, a mezzanine plate carves its own sub-cell and its walkway
+    opens into the hall. A plate uncovered from above IS a terrace
+    (derived, like a cut's lower lip).
+  - **Portals** (later slice): the Gate concept on every separating
+    surface — a wall (door, arch), a plate (hatch, stair opening; the
+    stair connects two plates, its volume is the generator's), the
+    envelope (entrance; the "парадная" chain is road → parcel gate →
+    path → envelope portal → vestibule space). The labyrinth is the
+    derived cell graph + portals.
+  - **Facades** (later slice): envelope strips derived from exterior
+    walls; the rhythm/opening spec lives in the assembly-graph **asset**
+    (one recipe, ten placements) and aligns to datums as *hints* — a
+    full-height витраж is one strip, not three storey bands.
+  - **Basements** (later slice): cells below the terrain surface derive
+    an excavation contract through the Cut machinery; a walk-out on a
+    slope is an envelope strip turning exterior where terrain falls
+    below the cell.
+  Any derived part must accept an explicit override (a hand-modeled
+  block/prefab plugged into the same sockets) — the semantic model
+  degrades to "opaque volume with sockets" for one-off architecture.
+  Pitched/complex **roofs are an open design round** (a flat roof is
+  just a top plate). Connections to the road network are gates on
+  strokes or edge anchors — never building fields. How terrain meets the
+  footprint stays the generator's decision; occluders and gameplay
+  metadata ride the derived spaces in a later round (§7 phase 3).
 
 Graph edits go through the standard `EditAction`/`ActionQueue` path like any
 other entity/component edit — the plugin's editor tools produce actions, never
@@ -387,9 +421,17 @@ Everything below is domain-agnostic editor/ecs flexibility. This is the
 2. **Phase 2 — terrain + tools.** Region extraction between roads (planar
    graph faces), terrain fill + control points, intersection surfaces,
    viewport tools (§6.2), debug-draw (§6.4).
-3. **Phase 3 — buildings.** Assembly-graph asset, cut-driven terrain
-   seams (the `Cut` faces excavated/embanked by the generator),
-   interior/exterior + occluder metadata. Gets its own design doc/round.
+3. **Phase 3 — buildings** (model approved 2026-07-24, see the Building
+   bullet in §3). Slices, each live in the editor with tests:
+   1. datum ladder + envelope contour + derived height (replaces the box;
+      old scenes migrate trivially);
+   2. interior walls + derived planar faces on one datum;
+   3. plates + vertical cell cutting/merging (multi-storey halls appear
+      here);
+   4. portals on walls/plates + the labyrinth graph;
+   5. facade strips + rhythm from the assembly-graph asset;
+   6. basement cells + the excavation contract via `Cut`.
+   Roofs and occluder/gameplay metadata get their own rounds after.
 4. **Later** (explicitly deferred): tyroxine as the real generator, navmesh,
    LOD baking (LOD1 and below), incremental invalidation, streaming budgets.
 
