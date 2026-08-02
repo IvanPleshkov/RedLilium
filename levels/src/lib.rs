@@ -20,6 +20,7 @@ pub mod graph;
 pub mod junction;
 pub mod stroke;
 mod tool;
+pub mod wall;
 
 pub use anchor::{AnchorNodeAction, DeriveEdgeAnchors, EdgeAnchor, settle_edge_anchors};
 pub use building::{Building, Datum, PlaceBuildingAction};
@@ -31,6 +32,7 @@ pub use stroke::{
     StrokeVertex, stroke_path,
 };
 pub use tool::{AddNodeAction, AddRoadAction, CONNECT_TOOL, ConnectRoadsTool};
+pub use wall::{AddWallAction, Wall, floor_faces};
 
 use redlilium_ecs::{Component, Entity, PostUpdate, Update, UpdateGlobalTransforms, World};
 
@@ -110,6 +112,7 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
         world.register_inspector_default::<CutVertex>();
         world.register_inspector_default::<Building>();
         world.register_inspector_default::<Datum>();
+        world.register_inspector_default::<Wall>();
     }
 
     fn build(&self, _app: &mut redlilium_runtime::App) {}
@@ -306,6 +309,44 @@ impl redlilium_runtime::Plugin for LevelsPlugin {
                 );
                 ctx.actions
                     .push(Box::new(PlaceBuildingAction::new(parent, transform)));
+            },
+        );
+        // "Add wall": drop an interior wall into the selected building at
+        // the ground click point (building-local). The default wall
+        // dangles — drag its ends onto the envelope or another wall and
+        // the derived rooms split; narrow its datum span in the
+        // inspector for storey-bound partitions.
+        view.ops.add(
+            "Add wall",
+            |ctx| {
+                ctx.cursor_ray.as_ref().and_then(tool::ground_hit).is_some()
+                    && ctx
+                        .selection
+                        .iter()
+                        .any(|&e| ctx.world.get::<Building>(e).is_some())
+            },
+            |ctx| {
+                let Some(point) = ctx.cursor_ray.as_ref().and_then(tool::ground_hit) else {
+                    return;
+                };
+                let Some(&building) = ctx
+                    .selection
+                    .iter()
+                    .find(|&&e| ctx.world.get::<Building>(e).is_some())
+                else {
+                    return;
+                };
+                let Some(gt) = ctx.world.get::<redlilium_ecs::GlobalTransform>(building) else {
+                    return;
+                };
+                let Some(inv) = gt.0.try_inverse() else {
+                    return;
+                };
+                let local = inv * redlilium_core::math::Vec4::new(point.x, point.y, point.z, 1.0);
+                ctx.actions.push(Box::new(AddWallAction::at_point(
+                    building,
+                    redlilium_core::math::Vec3::new(local.x, 0.0, local.z),
+                )));
             },
         );
         // Junction stamps: an N-armed template at the click point; drag the

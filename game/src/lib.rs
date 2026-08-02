@@ -903,7 +903,8 @@ pub fn spawn_levels_playground(world: &mut World) {
         use redlilium_core::math::quat_from_rotation_y;
         use redlilium_ecs::Entity;
         use redlilium_levels::{
-            Cut, CutVertex, EdgeAnchor, Gate, PlaceBuildingAction, Stroke, StrokeVertex,
+            AddWallAction, Cut, CutVertex, EdgeAnchor, Gate, PlaceBuildingAction, Stroke,
+            StrokeVertex, Wall,
         };
 
         let child = |world: &mut World, parent: Entity, local: Transform| -> Entity {
@@ -972,13 +973,15 @@ pub fn spawn_levels_playground(world: &mut World) {
             gate
         };
         // Envelope contour = a `half`-extent square, ladder = the listed
-        // datum elevations (the topmost is the height).
+        // datum elevations (the topmost is the height). Returns the
+        // building root, found back by its authored local translation.
         let building_at = |world: &mut World,
                            parent: Option<Entity>,
                            x: f32,
                            z: f32,
                            half: f32,
-                           ladder: &[f32]| {
+                           ladder: &[f32]|
+         -> Entity {
             let local = Transform::new(
                 Vec3::new(x, 0.0, z),
                 quat_from_rotation_y(0.0),
@@ -992,7 +995,46 @@ pub fn spawn_levels_playground(world: &mut World) {
             )
             .apply(world)
             .unwrap();
+            world
+                .read_all::<redlilium_levels::Building>()
+                .unwrap()
+                .iter()
+                .filter_map(|(index, _)| world.entity_at_index(index))
+                .find(|&e| {
+                    world
+                        .get::<Transform>(e)
+                        .is_some_and(|t| (t.translation - Vec3::new(x, 0.0, z)).norm() < 1e-4)
+                })
+                .expect("the building just placed")
         };
+        // An interior wall between two building-local points (see the
+        // levels wall module: rooms derive from the wall graph's faces).
+        let wall_between =
+            |world: &mut World, building: Entity, a: [f32; 3], b: [f32; 3]| -> Entity {
+                AddWallAction::at_point(building, Vec3::zeros())
+                    .apply(world)
+                    .unwrap();
+                let wall = *world
+                    .get::<redlilium_levels::Building>(building)
+                    .unwrap()
+                    .walls
+                    .last()
+                    .unwrap();
+                let points = world.get::<Wall>(wall).unwrap().points.clone();
+                for (&v, p) in points.iter().zip([a, b]) {
+                    world
+                        .insert(
+                            v,
+                            Transform::new(
+                                Vec3::new(p[0], p[1], p[2]),
+                                quat_from_rotation_y(0.0),
+                                Vec3::new(1.0, 1.0, 1.0),
+                            ),
+                        )
+                        .unwrap();
+                }
+                wall
+            };
 
         // Group A ("villa"), west of the first road: a plain root entity
         // whose subtree is the prefab — a fence stroke (open, one vertex
@@ -1048,7 +1090,11 @@ pub fn spawn_levels_playground(world: &mut World) {
                 )
                 .unwrap();
         }
-        building_at(world, Some(villa), -2.0, -4.5, 3.0, &[0.0, 3.0, 6.0]);
+        // The main villa house gets a floor plan: one wall across, one
+        // T-ing into it — three derived rooms visible as face fans.
+        let house = building_at(world, Some(villa), -2.0, -4.5, 3.0, &[0.0, 3.0, 6.0]);
+        wall_between(world, house, [-3.0, 0.0, 0.8], [3.0, 0.0, 0.8]);
+        wall_between(world, house, [0.5, 0.0, 0.8], [0.5, 0.0, -3.0]);
         building_at(world, Some(villa), 4.0, -6.0, 2.0, &[0.0, 3.0]);
         // On the fence's second segment (the curved NE bend), mid-way,
         // facing east — the derived spot lands near the old (7, 0, −3).
@@ -1093,7 +1139,21 @@ pub fn spawn_levels_playground(world: &mut World) {
             ),
             &[[-5.0, 0.0, 0.0], [5.0, 0.0, 0.0], [5.0, 2.0, -9.0]],
         );
-        building_at(world, None, 48.0, -5.0, 3.0, &[0.0, 3.0, 6.0, 9.0]);
+        // The free-standing tower: an upstairs-only partition (its foot
+        // attached to the +3.000 datum) — the ground floor derives as
+        // one open hall, the gallery above splits in two.
+        let tower = building_at(world, None, 48.0, -5.0, 3.0, &[0.0, 3.0, 6.0, 9.0]);
+        let gallery = wall_between(world, tower, [-3.0, 0.0, 0.0], [3.0, 0.0, 0.0]);
+        {
+            let datums = world
+                .get::<redlilium_levels::Building>(tower)
+                .unwrap()
+                .datums
+                .clone();
+            let mut wall = world.get::<Wall>(gallery).unwrap().clone();
+            wall.bottom = Some(datums[1]);
+            world.insert(gallery, wall).unwrap();
+        }
         // Stroke C: glued to the east side of the cross's north road — the
         // inverted derivation showcase: the stroke's 8 m frontage dictates
         // the edge interval, only the center (u = 0.5) is authored; slide

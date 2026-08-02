@@ -545,6 +545,31 @@ pub(crate) fn selection_pick(
             }
         }
     }
+    if let Ok(walls) = world.read_all::<crate::wall::Wall>() {
+        for (index, wall) in walls.iter() {
+            let Some(entity) = world.entity_at_index(index) else {
+                continue;
+            };
+            // A wall picks by its world-space centerline; its vertex
+            // cubes take the point-handle tier on top.
+            let Some(raw) = crate::stroke::corners_of(world, &wall.points) else {
+                continue;
+            };
+            let corners: Vec<_> = raw
+                .iter()
+                .map(|&(_, p, h_out, h_in)| (p, h_out, h_in))
+                .collect();
+            let path = crate::stroke::tessellate(&corners);
+            for pair in path.windows(2) {
+                let (dist, _, t) = ray_segment_closest(ray, pair[0].2, pair[1].2);
+                consider(0, dist, PICK_RADIUS, t, entity);
+            }
+            for (vertex, p, _, _) in raw {
+                let (dist, _, t) = ray_segment_closest(ray, p, p);
+                consider(1, dist, ROAD_HANDLE_PICK_RADIUS, t, vertex);
+            }
+        }
+    }
     let (_, _, t, entity) = best?;
     if let Some(point) = query.scene_point {
         let t_scene = (point - ray.origin).dot(&ray.dir) / ray.dir.dot(&ray.dir).max(1e-8);

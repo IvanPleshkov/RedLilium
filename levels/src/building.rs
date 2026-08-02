@@ -47,6 +47,9 @@ pub struct Building {
     /// The datum ladder: child [`Datum`] entities. Order carries no
     /// meaning — elevations do.
     pub datums: Vec<Entity>,
+    /// Interior wall children ([`Wall`](crate::wall::Wall)) — the floor
+    /// plan whose planar faces derive the rooms (slice 2).
+    pub walls: Vec<Entity>,
     /// Generator seed — same seed + same params ⇒ same building (P3).
     pub seed: u32,
 }
@@ -266,6 +269,7 @@ impl EditAction<World> for PlaceBuildingAction {
             Building {
                 points,
                 datums,
+                walls: Vec::new(),
                 seed: 0,
             },
         ) {

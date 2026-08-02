@@ -19,8 +19,12 @@ const GRID_COLOR: [f32; 4] = [0.05, 0.4, 0.5, 1.0];
 const STROKE_COLOR: [f32; 4] = [0.35, 0.85, 0.35, 1.0];
 /// Cut lips + face rungs (terracotta — earthworks).
 const CUT_COLOR: [f32; 4] = [0.95, 0.55, 0.2, 1.0];
-/// Building box massing (violet).
+/// Building envelope massing (violet).
 const BUILDING_COLOR: [f32; 4] = [0.8, 0.5, 0.95, 1.0];
+/// Interior wall centerlines (periwinkle — kin of the envelope violet).
+const WALL_COLOR: [f32; 4] = [0.55, 0.6, 0.95, 1.0];
+/// Derived room fans (faint violet — read as surfaces, not edges).
+const FACE_COLOR: [f32; 4] = [0.45, 0.3, 0.6, 0.65];
 
 /// Longitudinal tessellation of the preview wireframe.
 const U_STEPS: usize = 16;
@@ -239,6 +243,57 @@ fn draw_building(
                 if (h - p).norm() > 1e-3 {
                     draw.draw_line(pt(&p), pt(&h), GRID_COLOR);
                 }
+            }
+        }
+    }
+
+    // Interior walls: rails at the span's bottom/top elevations, vertical
+    // edges at the vertices, handle cubes for pen editing.
+    for &w in &building.walls {
+        let Some(wall) = world.get::<crate::wall::Wall>(w) else {
+            continue;
+        };
+        let Some(corners) = crate::wall::wall_corners_local(world, w) else {
+            continue;
+        };
+        let (span_bottom, span_top) = crate::wall::wall_span(world, wall);
+        let lo = span_bottom.max(bottom);
+        let hi = span_top.min(top);
+        let path: Vec<Vec3> = crate::stroke::tessellate(&corners)
+            .into_iter()
+            .map(|(_, _, p)| p)
+            .collect();
+        for e in [lo, hi] {
+            for pair in path.windows(2) {
+                draw.draw_line(pt(&at(&pair[0], e)), pt(&at(&pair[1], e)), WALL_COLOR);
+            }
+        }
+        for (p, _, _) in &corners {
+            draw.draw_line(pt(&at(p, lo)), pt(&at(p, hi)), WALL_COLOR);
+        }
+        if let Some(world_corners) = crate::stroke::corners_of(world, &wall.points) {
+            for (_, p, h_out, h_in) in world_corners {
+                draw_handle_cube(draw, p, HANDLE_HALF, WALL_COLOR);
+                for h in [h_out, h_in] {
+                    if (h - p).norm() > 1e-3 {
+                        draw.draw_line(pt(&p), pt(&h), GRID_COLOR);
+                    }
+                }
+            }
+        }
+    }
+
+    // Derived rooms: a faint centroid fan per face at the base plane —
+    // the planar faces of the wall graph, recomputed live so every drag
+    // of a wall end re-partitions the floor before your eyes.
+    if !building.walls.is_empty() {
+        for face in
+            crate::wall::floor_faces(world, building, levels.first().copied().unwrap_or(0.0))
+        {
+            let n = face.len() as f32;
+            let centroid = face.iter().fold(Vec3::zeros(), |acc, p| acc + p) / n;
+            for p in &face {
+                draw.draw_line(pt(&at(&centroid, 0.05)), pt(&at(p, 0.05)), FACE_COLOR);
             }
         }
     }
