@@ -839,6 +839,9 @@ mod tests {
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(words[5] & 0xffff, OP_VARIABLE);
-        assert_eq!(words[7], 0x0c, "the initializer-bearing variable stays first");
+        assert_eq!(
+            words[7], 0x0c,
+            "the initializer-bearing variable stays first"
+        );
     }
 }

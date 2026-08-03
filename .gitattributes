@@ -7,3 +7,14 @@
 # The offline-baked WGSL table is written with LF and byte-compared by
 # `xtask bake-shaders --check`; a CRLF checkout would false-fail that gate.
 graphics/src/shader/baked_generated.rs text eol=lf
+
+# Text assets are content-hashed into assets.db by the mount scan; a CRLF
+# checkout flips every hash on Windows, so the databases ping-pong between
+# machines (level1/menu scene hashes did exactly that). Pin all text asset
+# kinds and the databases themselves to LF, like the shader sources above.
+*.scene text eol=lf
+*.prefab text eol=lf
+*.material text eol=lf
+*.matinst text eol=lf
+*.vlayout text eol=lf
+assets.db text eol=lf
