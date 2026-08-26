@@ -188,6 +188,12 @@ pub struct GameConfig {
     pub embedded_packs: Vec<(&'static str, EmbeddedPack)>,
     /// Clear color for the main camera target and the swapchain.
     pub clear_color: [f32; 4],
+    /// Prefer an HDR (`Rgba16Float`, extended linear) surface when the display
+    /// offers one — see `DefaultAppArgs::with_hdr`. Hosts whose render path
+    /// ends in the plain present blit (no tonemap/encode stage) must opt out:
+    /// on a float surface the blit's linear values reach the screen unencoded
+    /// (WebGPU canvases offer `rgba16float` and display it as-is).
+    pub prefer_hdr: bool,
     /// Host override of the start scene (mount-relative path): `Some(path)`
     /// supersedes whatever scene the game's `spawn_scene` requested (see
     /// [`App::boot`]). The game binary typically fills this from a CLI flag
@@ -202,6 +208,7 @@ impl Default for GameConfig {
             mounts: vec![("std", "std-assets"), ("project", "project-assets")],
             embedded_packs: Vec::new(),
             clear_color: [0.02, 0.02, 0.03, 1.0],
+            prefer_hdr: true,
             start_scene: None,
         }
     }
@@ -211,6 +218,8 @@ impl Default for GameConfig {
 /// plugin, then drive `Schedules::run_frame` + the `Render` schedule until
 /// the window closes.
 pub fn run<P: Plugin + 'static>(config: GameConfig, plugin: P) {
-    let args = redlilium_app::DefaultAppArgs::parse().with_title_str(config.title.clone());
+    let args = redlilium_app::DefaultAppArgs::parse()
+        .with_title_str(config.title.clone())
+        .with_hdr(config.prefer_hdr);
     redlilium_app::App::run(handler::RuntimeHandler::new(config, plugin), args);
 }
