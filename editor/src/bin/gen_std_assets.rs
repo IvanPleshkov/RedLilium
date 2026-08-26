@@ -153,6 +153,7 @@ fn main() {
         "entity_index",
         "opaque_textured",
         "depth_only",
+        "layered_decal",
     ] {
         let path = format!("shaders/{slang}.slang");
         add(
@@ -204,6 +205,20 @@ fn main() {
         },
     );
     instance(&mut db, "materials/textured.matinst", textured_guid);
+
+    // Baked-decal channel (procedural: design/decals-design.md). Instances are
+    // published programmatically by the preview with per-layer overrides; the record
+    // only needs to name the shading model so the defaults (strength 0 = no layers)
+    // make a decal-less instance render as the base.
+    material(
+        &mut db,
+        "materials/layered_decal.material",
+        &MaterialData {
+            shading_model: "layered_decal".to_owned(),
+            properties: Vec::new(),
+            features: Vec::new(),
+        },
+    );
 
     std::fs::write(
         "std-assets/assets.db",

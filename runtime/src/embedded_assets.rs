@@ -61,6 +61,10 @@ static STD_ASSETS: &[(&str, &[u8])] = &[
         "shaders/opaque_color.slang",
         include_bytes!("../../std-assets/shaders/opaque_color.slang"),
     ),
+    (
+        "shaders/layered_decal.slang",
+        include_bytes!("../../std-assets/shaders/layered_decal.slang"),
+    ),
 ];
 
 fn pack_for(dir: &str) -> Option<crate::EmbeddedPack> {

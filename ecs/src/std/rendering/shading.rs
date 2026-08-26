@@ -148,6 +148,7 @@ impl ShadingRegistry {
             Self::opaque_textured(),
             Self::pbr(),
             Self::pbr_textured(),
+            Self::layered_decal(),
         ] {
             models.insert(model.id.clone(), model);
         }
@@ -246,6 +247,51 @@ impl ShadingRegistry {
                 },
                 PropDef {
                     name: "orm_texture".to_owned(),
+                    default: PropValue::Texture(TextureSource::WHITE),
+                },
+            ],
+        }
+    }
+
+    /// The `layered_decal` model (procedural: design/decals-design.md, baked-decal
+    /// channel): `opaque_textured` plus up to 3 decal albedo layers composited over
+    /// the base albedo. Each layer has a surface-UV → decal-UV affine (`layerN_uv` =
+    /// offset.xy/scale.xy), a params slot (`layerN_params.x` = strength; 0 disables
+    /// the layer so a decal-less instance renders as the base), and its own texture
+    /// (white 1×1 default). Schema order MUST equal the shader's MaterialParams field
+    /// order — uniforms first (base_color, then each layer's uv+params), then the
+    /// textures in declaration order. Needs a UV-carrying vertex layout.
+    fn layered_decal() -> ShadingModel {
+        let uv_default = PropValue::Vec4([0.0, 0.0, 1.0, 1.0]);
+        let params_default = PropValue::Vec4([0.0, 0.0, 0.0, 0.0]);
+        ShadingModel {
+            id: "layered_decal".to_owned(),
+            shader: Guid::stable("shaders/layered_decal.slang"),
+            schema: vec![
+                PropDef {
+                    name: "base_color".to_owned(),
+                    default: PropValue::Vec4([1.0, 1.0, 1.0, 1.0]),
+                },
+                PropDef { name: "layer0_uv".to_owned(), default: uv_default.clone() },
+                PropDef { name: "layer0_params".to_owned(), default: params_default.clone() },
+                PropDef { name: "layer1_uv".to_owned(), default: uv_default.clone() },
+                PropDef { name: "layer1_params".to_owned(), default: params_default.clone() },
+                PropDef { name: "layer2_uv".to_owned(), default: uv_default.clone() },
+                PropDef { name: "layer2_params".to_owned(), default: params_default.clone() },
+                PropDef {
+                    name: "base_texture".to_owned(),
+                    default: PropValue::Texture(TextureSource::WHITE),
+                },
+                PropDef {
+                    name: "layer0_texture".to_owned(),
+                    default: PropValue::Texture(TextureSource::WHITE),
+                },
+                PropDef {
+                    name: "layer1_texture".to_owned(),
+                    default: PropValue::Texture(TextureSource::WHITE),
+                },
+                PropDef {
+                    name: "layer2_texture".to_owned(),
                     default: PropValue::Texture(TextureSource::WHITE),
                 },
             ],

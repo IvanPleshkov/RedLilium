@@ -97,6 +97,12 @@ const REGISTRY: &[ShaderSpec] = &[
         "opaque_textured",
         "std-assets/shaders/opaque_textured.slang",
     ),
+    // Baked-decal channel (procedural: design/decals-design.md) — base plus 3
+    // composited decal albedo layers.
+    vs_fs_spec(
+        "layered_decal",
+        "std-assets/shaders/layered_decal.slang",
+    ),
     // Depth-only pass shader (#129): vertex stage only — zero color
     // attachments make the fragment stage unnecessary. Reflection still
     // bakes (the draw path classifies its camera/model sets by rate).
