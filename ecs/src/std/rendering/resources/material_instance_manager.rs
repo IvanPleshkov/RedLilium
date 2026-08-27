@@ -20,12 +20,12 @@
 //! now, queue a `TransferOperation`, and flush it into the render graph via
 //! [`flush_uploads`](Self::flush_uploads).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use redlilium_assets::{AssetDb, AssetManager, AssetProcessor, Guid, ResidentCache};
 use redlilium_graphics::{
-    BindingGroup, BindingGroupDescriptor, BindingLayout, BufferDescriptor, BufferUsage,
+    BindingGroup, BindingGroupDescriptor, BindingLayout, Buffer, BufferDescriptor, BufferUsage,
     GraphicsDevice, GraphicsError, RenderGraph, TransferConfig, TransferOperation, TransferPass,
 };
 
@@ -33,7 +33,22 @@ use super::{MaterialAssetManager, ShaderManager, TextureManager};
 use crate::std::rendering::loaders::{
     MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource, Shader, TextureSource,
 };
-use crate::std::rendering::shading::{PropValue, pack_props, texture_props};
+use crate::std::rendering::shading::{
+    OpaqueBinding, PropValue, StorageBufferSource, opaque_bindings, pack_props,
+};
+
+/// A resolved opaque material-property binding, in schema order — what
+/// [`build_props_descriptor`](MaterialInstanceManager::build_props_descriptor)
+/// walks to assign descriptor slots after the packed uniform at binding 0. A
+/// texture takes two slots (texture, sampler); a buffer takes one.
+enum ResolvedBinding {
+    /// A resolved texture (plain or D2Array) + its sampler.
+    Texture(Arc<super::ResolvedTexture>),
+    /// Inline read-only bytes to upload into a fresh `STORAGE` buffer.
+    InlineBuffer(Arc<[u8]>),
+    /// A buffer published at runtime (a `StorageBufferSource::Ref`).
+    Buffer(Arc<Buffer>),
+}
 
 /// A fully resolved material instance: the shader to specialize a pipeline from
 /// (carried from the parent template) and the static property binding (group 1).
@@ -107,6 +122,11 @@ pub struct MaterialInstanceManager {
     /// Instances being (re)resolved by `drive` — demanded but not yet published
     /// (or republished after a parent change).
     demanded: HashSet<Guid>,
+    /// Externally-produced GPU buffers bound by `StorageBufferSource::Ref`
+    /// properties, published under a guid (a compute pass output, an ECS-owned
+    /// buffer). A `Ref` property whose buffer is not yet here keeps the instance
+    /// unresolved, exactly like a still-loading texture.
+    buffers: HashMap<Guid, Arc<Buffer>>,
     pending_uploads: Vec<TransferOperation>,
 }
 
@@ -118,6 +138,7 @@ impl MaterialInstanceManager {
             data: AssetManager::new(),
             cache: ResidentCache::new(),
             demanded: HashSet::new(),
+            buffers: HashMap::new(),
             pending_uploads: Vec::new(),
         }
     }
@@ -146,6 +167,18 @@ impl MaterialInstanceManager {
     pub fn publish_virtual(&mut self, guid: Guid, data: MaterialInstanceData) {
         self.data.publish(guid, Arc::new(data));
         self.demanded.insert(guid);
+    }
+
+    /// Publish an externally-produced GPU buffer under `guid`, to be bound by
+    /// `StorageBufferSource::Ref(guid)` material properties (a compute pass
+    /// output, an ECS-owned buffer). The buffer must be created with
+    /// [`BufferUsage::STORAGE`]. Instances waiting on this ref resolve on the
+    /// next [`drive`](Self::drive). Re-publishing swaps the buffer; already
+    /// resolved instances keep their old `Arc` until re-resolved — call
+    /// [`invalidate`](Self::invalidate) on them to rebind (external buffers
+    /// carry no version, so the swap is not auto-detected).
+    pub fn publish_buffer(&mut self, guid: Guid, buffer: Arc<Buffer>) {
+        self.buffers.insert(guid, buffer);
     }
 
     /// The resolved instance for `guid`, if resolved.
@@ -223,13 +256,16 @@ impl MaterialInstanceManager {
         }
 
         // Resolve the demanded instances; the static buffer (needs `&mut self`)
-        // is built after this pass, so collect the ready ones first.
+        // is built after this pass, so collect the ready ones first. Each ready
+        // entry carries the opaque bindings **in schema order** (the descriptor
+        // slot order) plus the texture subset for hot-reload pull-validation.
         #[allow(clippy::type_complexity)]
         let mut ready: Vec<(
             Guid,
             Vec<u8>,
             Guid,
             Arc<super::ResolvedMaterial>,
+            Vec<ResolvedBinding>,
             Vec<(TextureSource, Arc<super::ResolvedTexture>)>,
         )> = Vec::new();
         let mut failed_now: Vec<Guid> = Vec::new();
@@ -250,30 +286,65 @@ impl MaterialInstanceManager {
                 continue; // parent (or its shader) still loading
             };
 
-            // Phase 3: resolve the texture properties (schema order — the
-            // binding order). All must be resident before the group is built.
+            // Phase 3: resolve the opaque properties (schema order — the
+            // descriptor-slot order). All must be resident before the group is
+            // built: textures via the texture manager, `Ref` storage buffers via
+            // the published-buffer registry (both keep the instance unresolved
+            // while pending). Inline storage buffers need no resolution — their
+            // bytes upload at build time.
             let merged = merge_overrides(&parent.properties, &data.overrides);
+            let mut bindings = Vec::new();
             let mut textures = Vec::new();
-            for (name, source) in texture_props(&merged) {
-                if texture_mgr.is_failed(&source) {
-                    log::warn!("material instance {guid:?}: texture '{name}' failed to load");
-                    failed_now.push(guid);
-                    continue 'demanded;
-                }
-                match texture_mgr.get(&source) {
-                    Some(texture) => textures.push((source, texture.clone())),
-                    None => {
-                        texture_mgr.request(&source);
-                        continue 'demanded; // still loading
+            for (name, binding) in opaque_bindings(&merged) {
+                match binding {
+                    OpaqueBinding::Texture(source) => {
+                        if texture_mgr.is_failed(&source) {
+                            log::warn!(
+                                "material instance {guid:?}: texture '{name}' failed to load"
+                            );
+                            failed_now.push(guid);
+                            continue 'demanded;
+                        }
+                        match texture_mgr.get(&source) {
+                            Some(texture) => {
+                                bindings.push(ResolvedBinding::Texture(texture.clone()));
+                                textures.push((source, texture.clone()));
+                            }
+                            None => {
+                                texture_mgr.request(&source);
+                                continue 'demanded; // still loading
+                            }
+                        }
+                    }
+                    OpaqueBinding::StorageBuffer(StorageBufferSource::Inline(bytes)) => {
+                        bindings.push(ResolvedBinding::InlineBuffer(Arc::from(bytes)));
+                    }
+                    OpaqueBinding::StorageBuffer(StorageBufferSource::Ref(buffer_guid)) => {
+                        match self.buffers.get(&buffer_guid) {
+                            Some(buffer) => {
+                                bindings.push(ResolvedBinding::Buffer(buffer.clone()));
+                            }
+                            // Not published yet — wait (stay demanded), exactly
+                            // like a still-loading texture. `publish_buffer`
+                            // makes it resolve on a later drive.
+                            None => continue 'demanded,
+                        }
                     }
                 }
             }
-            ready.push((guid, pack_props(&merged), data.parent, parent, textures));
+            ready.push((
+                guid,
+                pack_props(&merged),
+                data.parent,
+                parent,
+                bindings,
+                textures,
+            ));
         }
 
         // Build static buffers + publish.
-        for (guid, bytes, parent_guid, parent, textures) in ready {
-            match self.build_props_descriptor(&bytes, &textures) {
+        for (guid, bytes, parent_guid, parent, bindings, textures) in ready {
+            match self.build_props_descriptor(&bytes, &bindings) {
                 Ok(props) => {
                     let resolved = Arc::new(ResolvedInstance {
                         parent_guid,
@@ -314,19 +385,24 @@ impl MaterialInstanceManager {
         graph.add_transfer_pass(pass);
     }
 
-    /// Build the static group-1 binding: a uniform buffer holding the packed
-    /// property bytes at binding 0 (allocated now, uploaded through the frame
-    /// graph on the next [`flush_uploads`](Self::flush_uploads)), then a
-    /// texture/sampler pair per texture property in schema order (texture at
-    /// `1 + 2*i`, sampler at `2 + 2*i` — the convention the model's shader
-    /// declares). The sampler is the texture's own resolved one (record
-    /// settings, interned by the texture manager).
+    /// Build the static material-set binding: a uniform buffer holding the
+    /// packed property bytes at binding 0 (allocated now, uploaded through the
+    /// frame graph on the next [`flush_uploads`](Self::flush_uploads)), then the
+    /// opaque bindings in schema order at consecutive slots. A texture takes a
+    /// texture + sampler pair (its own resolved sampler); a storage buffer takes
+    /// one buffer slot — an inline one allocated + uploaded here, a `Ref` one
+    /// bound directly. The slot order matches the shader's `MaterialParams`
+    /// field order (`opaque_slot_layout`).
     fn build_props_descriptor(
         &mut self,
         bytes: &[u8],
-        textures: &[(TextureSource, Arc<super::ResolvedTexture>)],
+        bindings: &[ResolvedBinding],
     ) -> Result<BindingGroupDescriptor, GraphicsError> {
         let mut group = BindingGroupDescriptor::new();
+        // Binding 0 is the packed uniform constant buffer when the model has
+        // uniform props; opaque slots follow. (Every built-in model has at least
+        // one uniform prop, so `next` starts at 1 in practice.)
+        let mut next = 0u32;
         if !bytes.is_empty() {
             let buffer = self.device.create_buffer(
                 &BufferDescriptor::new(
@@ -341,12 +417,37 @@ impl MaterialInstanceManager {
                 Arc::from(bytes),
             ));
             group = group.with_buffer(0, buffer);
+            next = 1;
         }
-        for (i, (_, resolved)) in textures.iter().enumerate() {
-            let base = 1 + 2 * i as u32;
-            group = group
-                .with_texture(base, resolved.texture.clone())
-                .with_sampler(base + 1, resolved.sampler.clone());
+        for binding in bindings {
+            match binding {
+                ResolvedBinding::Texture(resolved) => {
+                    group = group
+                        .with_texture(next, resolved.texture.clone())
+                        .with_sampler(next + 1, resolved.sampler.clone());
+                    next += 2;
+                }
+                ResolvedBinding::InlineBuffer(data) => {
+                    let buffer = self.device.create_buffer(
+                        &BufferDescriptor::new(
+                            data.len() as u64,
+                            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+                        )
+                        .with_label("material_storage"),
+                    )?;
+                    self.pending_uploads.push(TransferOperation::write_buffer(
+                        Arc::clone(&buffer),
+                        0,
+                        Arc::clone(data),
+                    ));
+                    group = group.with_buffer(next, buffer);
+                    next += 1;
+                }
+                ResolvedBinding::Buffer(buffer) => {
+                    group = group.with_buffer(next, buffer.clone());
+                    next += 1;
+                }
+            }
         }
         Ok(group)
     }

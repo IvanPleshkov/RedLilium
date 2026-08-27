@@ -100,6 +100,13 @@ const REGISTRY: &[ShaderSpec] = &[
     // Baked-decal channel (procedural: design/decals-design.md) — base plus 3
     // composited decal albedo layers.
     vs_fs_spec("layered_decal", "std-assets/shaders/layered_decal.slang"),
+    // Demo/reference surface for texture-array + storage-buffer material
+    // properties (the `array_storage_demo` shading model). Baked so the default
+    // Slang-off build can build its pipeline.
+    vs_fs_spec(
+        "array_storage_demo",
+        "std-assets/shaders/array_storage_demo.slang",
+    ),
     // Depth-only pass shader (#129): vertex stage only — zero color
     // attachments make the fragment stage unnecessary. Reflection still
     // bakes (the draw path classifies its camera/model sets by rate).

@@ -33,6 +33,13 @@ use std::sync::Arc;
 pub enum TextureSource {
     File(Guid),
     Solid([u8; 4]),
+    /// A 1×1 constant-color **2D array** texture with the given layer count
+    /// (always linear). The default for `TextureArray` material-property slots
+    /// (`Texture2DArray` in the shader): a `Solid` produces a plain 2D view,
+    /// which fails layout validation against a D2Array binding, so an array
+    /// slot needs a source that resolves to a D2Array texture even when
+    /// unassigned. `layers` must be ≥ 1.
+    SolidArray([u8; 4], u32),
     /// Provided via `TextureManager::publish_virtual`, never via the loader.
     /// Until the producing system publishes it, the source stays unresolved
     /// (consumers keep waiting exactly like for a still-loading file).
@@ -45,6 +52,9 @@ impl TextureSource {
     pub const WHITE: Self = Self::Solid([255, 255, 255, 255]);
     /// The 1×1 flat normal (+Z) texture — the default for normal-map slots.
     pub const FLAT_NORMAL: Self = Self::Solid([128, 128, 255, 255]);
+    /// A 1×1×1 white 2D array texture — the default for `TextureArray` slots
+    /// (a single white layer, so an unassigned array samples as a no-op factor).
+    pub const WHITE_ARRAY: Self = Self::SolidArray([255, 255, 255, 255], 1);
 }
 
 // A dropped/bare guid references the file-backed variant.
@@ -58,7 +68,7 @@ impl AssetSource for TextureSource {
     fn file_guid(&self) -> Option<Guid> {
         match self {
             Self::File(guid) => Some(*guid),
-            Self::Solid(_) | Self::Virtual(_) => None,
+            Self::Solid(_) | Self::SolidArray(..) | Self::Virtual(_) => None,
         }
     }
 }
@@ -167,6 +177,12 @@ impl AssetLoader for TextureLoader {
             TextureSource::Solid(rgba) => {
                 stages.push(Box::new(MakeSolidStage { rgba: *rgba }));
             }
+            TextureSource::SolidArray(rgba, layers) => {
+                stages.push(Box::new(MakeSolidArrayStage {
+                    rgba: *rgba,
+                    layers: (*layers).max(1),
+                }));
+            }
             // Virtual textures are published by their producing system, never
             // loaded; the manager filters them out before requesting. An empty
             // pipeline (below) fails the request loudly if one slips through.
@@ -260,6 +276,37 @@ impl AssetStage for MakeSolidStage {
         let rgba = self.rgba;
         Box::pin(async move {
             let cpu = CpuTexture::new(1, 1, TextureFormat::Rgba8Unorm, rgba.to_vec());
+            Ok(Box::new(cpu) as AnyAsset)
+        })
+    }
+}
+
+/// CPU stage: synthesize a 1×1 constant-color 2D **array** texture with
+/// `layers` layers (always linear) — the D2Array-shaped default for
+/// `TextureArray` material-property slots. Each layer is the same color, so
+/// sampling any layer of an unassigned slot is a no-op factor.
+struct MakeSolidArrayStage {
+    rgba: [u8; 4],
+    layers: u32,
+}
+
+impl AssetStage for MakeSolidArrayStage {
+    fn executor(&self) -> Executor {
+        Executor::Cpu
+    }
+    fn run_async(&self, _input: AnyAsset) -> StageFuture {
+        let rgba = self.rgba;
+        let layers = self.layers.max(1);
+        Box::pin(async move {
+            // One RGBA texel per layer, laid out layer-major (the upload stage's
+            // `byte_range` walks (mip, layer) in this order).
+            let mut data = Vec::with_capacity(layers as usize * 4);
+            for _ in 0..layers {
+                data.extend_from_slice(&rgba);
+            }
+            let cpu = CpuTexture::new(1, 1, TextureFormat::Rgba8Unorm, data)
+                .with_dimension(TextureDimension::D2Array)
+                .with_depth_or_array_layers(layers);
             Ok(Box::new(cpu) as AnyAsset)
         })
     }

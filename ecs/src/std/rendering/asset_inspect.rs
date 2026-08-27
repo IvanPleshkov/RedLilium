@@ -160,8 +160,8 @@ mod render_assets {
     use redlilium_core::mesh::VertexLayout;
 
     use super::super::{
-        MaterialData, MaterialInstanceData, PropValue, ShadingRegistry, TextureSettings,
-        TextureSource,
+        MaterialData, MaterialInstanceData, PropValue, ShadingRegistry, StorageBufferSource,
+        TextureSettings, TextureSource,
     };
     use crate::World;
 
@@ -448,6 +448,7 @@ mod render_assets {
                             }
                             "solid".to_owned()
                         }
+                        TextureSource::SolidArray(_, layers) => format!("solid array ×{layers}"),
                         TextureSource::File(guid) => format!("{guid:?}"),
                         TextureSource::Virtual(guid) => format!("virtual {guid:?}"),
                     };
@@ -461,6 +462,41 @@ mod render_assets {
                         changed = true;
                     }
                     changed
+                }
+                // A texture-array slot (`Texture2DArray` in the shader): a drop
+                // target for an array texture asset. The default is a solid
+                // white array; dropping a texture file sets the file source.
+                PropValue::TextureArray(source) => {
+                    let label = match source {
+                        TextureSource::SolidArray(_, layers) => format!("solid array ×{layers}"),
+                        TextureSource::Solid(_) => "solid".to_owned(),
+                        TextureSource::File(guid) => format!("{guid:?}"),
+                        TextureSource::Virtual(guid) => format!("virtual {guid:?}"),
+                    };
+                    if let Some(guid) = super::super::asset_drop_target(
+                        ui,
+                        &label,
+                        false,
+                        <TextureSource as redlilium_assets::AssetRefSource>::KIND,
+                    ) {
+                        *source = TextureSource::File(guid);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                // A storage-buffer slot: read-only in the inspector (its bytes
+                // are authored data or an externally published buffer, not a
+                // scalar the property editor drags).
+                PropValue::StorageBuffer(source) => {
+                    let label = match source {
+                        StorageBufferSource::Inline(bytes) => {
+                            format!("storage buffer: inline {} bytes", bytes.len())
+                        }
+                        StorageBufferSource::Ref(guid) => format!("storage buffer: ref {guid:?}"),
+                    };
+                    ui.label(label);
+                    false
                 }
             }
         })

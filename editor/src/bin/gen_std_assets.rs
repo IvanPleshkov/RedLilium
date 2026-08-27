@@ -154,6 +154,7 @@ fn main() {
         "opaque_textured",
         "depth_only",
         "layered_decal",
+        "array_storage_demo",
     ] {
         let path = format!("shaders/{slang}.slang");
         add(
@@ -215,6 +216,19 @@ fn main() {
         "materials/layered_decal.material",
         &MaterialData {
             shading_model: "layered_decal".to_owned(),
+            properties: Vec::new(),
+            features: Vec::new(),
+        },
+    );
+
+    // Demo/reference surface for the texture-array + storage-buffer material
+    // property kinds. Empty properties → the model defaults (white 1-layer
+    // array + a single white tint) render it as a flat base color.
+    material(
+        &mut db,
+        "materials/array_storage_demo.material",
+        &MaterialData {
+            shading_model: "array_storage_demo".to_owned(),
             properties: Vec::new(),
             features: Vec::new(),
         },

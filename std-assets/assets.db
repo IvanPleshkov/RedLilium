@@ -18,6 +18,14 @@
             references: {},
         ),
         (
+            guid: ("e06edb33-ecb9-51c3-ba6c-6997b23ba561"),
+            path: "materials/array_storage_demo.material",
+            kind: "material",
+            source_hash: 14695981039346656037,
+            settings: Some("(shading_model:\"array_storage_demo\",properties:[],features:[])"),
+            references: {},
+        ),
+        (
             guid: ("5232225d-f91b-5bb1-b975-d2d536eb9668"),
             path: "materials/default.matinst",
             kind: "material_instance",
@@ -116,6 +124,14 @@
             references: {
                 "layout": ("994670d7-d68d-5d80-8c4c-085610f8f6ad"),
             },
+        ),
+        (
+            guid: ("0826fd2a-26e0-59c2-94e7-083c86f1f6db"),
+            path: "shaders/array_storage_demo.slang",
+            kind: "shader",
+            source_hash: 11115498593876132606,
+            settings: None,
+            references: {},
         ),
         (
             guid: ("e2749de9-832d-4bd1-9a50-310ff631a419"),

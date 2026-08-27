@@ -106,3 +106,36 @@ fn opaque_textured_material_set_matches_instance_group_convention() {
     assert_eq!(material[2].binding, 2);
     assert_eq!(material[2].binding_type, BindingType::Sampler);
 }
+
+/// The demo shader's material set reflects the two newer property kinds at the
+/// slots the instance manager binds them to: packed uniform at 0, then the
+/// `Texture2DArray` (1) + sampler (2), then the read-only `StructuredBuffer`
+/// (3). This is the contract the `array_storage_demo` shading-model schema and
+/// `build_props_descriptor`'s interleaved slot walk build against.
+#[test]
+fn array_storage_demo_material_set_binds_array_and_storage_buffer() {
+    let source = std::fs::read_to_string("../std-assets/shaders/array_storage_demo.slang").unwrap();
+    let (layouts, rates) = reflect(&source);
+    assert_eq!(
+        rates,
+        vec![
+            Some(UpdateRate::External),
+            Some(UpdateRate::Dynamic),
+            Some(UpdateRate::Static),
+        ]
+    );
+    let material = &layouts[2].entries;
+    assert_eq!(material.len(), 4, "{material:?}");
+    assert_eq!(material[0].binding, 0);
+    assert_eq!(material[0].binding_type, BindingType::UniformBuffer);
+    assert_eq!(material[1].binding, 1);
+    assert_eq!(material[1].binding_type, BindingType::Texture2DArray);
+    assert_eq!(material[2].binding, 2);
+    assert_eq!(material[2].binding_type, BindingType::Sampler);
+    assert_eq!(material[3].binding, 3);
+    assert_eq!(
+        material[3].binding_type,
+        BindingType::StorageBufferReadOnly,
+        "a read-only StructuredBuffer reflects as a read-only storage buffer"
+    );
+}

@@ -85,7 +85,8 @@ pub use resources::{
 pub use scene_drawer::{DrawArgs, RenderPhase, SceneDrawer, VisibleScene};
 #[cfg(feature = "rendering")]
 pub use shading::{
-    FeatureValue, PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props, texture_props,
+    FeatureValue, OpaqueBinding, PropDef, PropValue, ShadingModel, ShadingRegistry,
+    StorageBufferSource, opaque_bindings, opaque_slot_layout, pack_props, texture_props,
 };
 #[cfg(feature = "rendering")]
 pub use systems::HotReload;

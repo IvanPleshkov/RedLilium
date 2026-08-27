@@ -436,6 +436,12 @@ impl SlangCompiler {
                     use slang::ResourceShape;
                     match shape {
                         ResourceShape::SlangTextureCube => BindingType::TextureCube,
+                        // A `Texture2DArray` is a sampled 2D texture with the
+                        // array flag — the layered-texture material-property
+                        // kind. Without this arm it fell through to a plain
+                        // `Texture`, so the reflected layout mismatched the
+                        // D2Array view the instance manager binds.
+                        ResourceShape::SlangTexture2dArray => BindingType::Texture2DArray,
                         // Structured / byte-address buffers are SSBOs, not textures.
                         // Distinguish RW (RWStructuredBuffer) from read-only
                         // (StructuredBuffer): wgpu validates the access mode exactly.
