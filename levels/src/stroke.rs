@@ -1967,6 +1967,7 @@ mod tests {
         world.register_inspector_default::<crate::RoadNode>();
         world.register_inspector_default::<crate::RoadSegment>();
         world.register_inspector_default::<crate::building::Building>();
+        world.register_inspector_default::<crate::building::Datum>();
 
         // A group in the making: the stroke root carries a gate, a
         // building and an internal road from an inner node to the gate —
@@ -1998,7 +1999,6 @@ mod tests {
                 quat_from_rotation_y(0.0),
                 Vec3::new(1.0, 1.0, 1.0),
             ),
-            crate::building::Building::default(),
         )
         .apply(&mut world)
         .unwrap();

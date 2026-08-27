@@ -99,10 +99,7 @@ const REGISTRY: &[ShaderSpec] = &[
     ),
     // Baked-decal channel (procedural: design/decals-design.md) — base plus 3
     // composited decal albedo layers.
-    vs_fs_spec(
-        "layered_decal",
-        "std-assets/shaders/layered_decal.slang",
-    ),
+    vs_fs_spec("layered_decal", "std-assets/shaders/layered_decal.slang"),
     // Depth-only pass shader (#129): vertex stage only — zero color
     // attachments make the fragment stage unnecessary. Reflection still
     // bakes (the draw path classifies its camera/model sets by rate).
@@ -476,21 +473,32 @@ fn baked_dest() -> PathBuf {
     workspace_root().join("graphics/src/shader/baked_generated.rs")
 }
 
-/// Canonicalize a SPIR-V module so bakes are byte-reproducible across
-/// platforms: Slang's platform builds emit annotation instructions
-/// (`OpDecorate` & friends) in differing orders — legal per spec
-/// (annotations are an unordered set) but fatal for the byte-exact
-/// staleness gate, which would ping-pong between two machines' bakes.
-/// Sorting each contiguous annotation run makes the blob canonical
-/// without changing semantics. Anything unparseable is returned
-/// untouched — the gate then compares exactly what Slang produced.
+/// Canonicalize a SPIR-V module so bakes are byte-reproducible: Slang
+/// emits several order-free instruction groups in an order that varies
+/// across platform builds AND across process runs (observed: adjacent
+/// `OpDecorate`s swapping between machines, adjacent module-scope
+/// `OpVariable`s swapping between runs) — legal per spec, but fatal for
+/// the byte-exact staleness gate, which then ping-pongs. Sorting each
+/// contiguous same-kind run (debug names, annotations, variables — the
+/// latter only when no member references another through an initializer)
+/// and the `OpEntryPoint` interface set makes the blob canonical without
+/// changing semantics. Type/constant ordering has not been seen to
+/// drift; if it ever does, that needs a real dependency-aware
+/// canonicalizer, not a bigger sort list. Anything unparseable is
+/// returned untouched — the gate then compares exactly what Slang made.
 fn canonicalize_spirv(bytes: Vec<u8>) -> Vec<u8> {
     const MAGIC: u32 = 0x0723_0203;
-    // OpDecorate, OpMemberDecorate, OpDecorateId, OpDecorateString,
-    // OpMemberDecorateString — plain annotations with no ordering
-    // semantics. The deprecated group decorations (73..=75) are
-    // order-sensitive, so they end a sortable run instead of joining it.
-    const SORTABLE: [u32; 5] = [71, 72, 332, 5632, 5633];
+    const OP_ENTRY_POINT: u32 = 15;
+    // Same-kind runs that may be sorted: OpName/OpMemberName (5, 6), plain
+    // annotations (71, 72, 332, 5632, 5633 — the deprecated group
+    // decorations 73..=75 are order-sensitive and end a run), and
+    // OpVariable (59). Kinds never mix within one run.
+    let kind_of = |opcode: u32| match opcode {
+        5 | 6 => Some(0u8),
+        71 | 72 | 332 | 5632 | 5633 => Some(1),
+        59 => Some(2),
+        _ => None,
+    };
     if bytes.len() < 20 || !bytes.len().is_multiple_of(4) {
         return bytes;
     }
@@ -503,8 +511,19 @@ fn canonicalize_spirv(bytes: Vec<u8>) -> Vec<u8> {
     }
     let mut out: Vec<u32> = words[..5].to_vec();
     let mut run: Vec<Vec<u32>> = Vec::new();
-    fn flush(out: &mut Vec<u32>, run: &mut Vec<Vec<u32>>) {
-        run.sort();
+    let mut run_kind: Option<u8> = None;
+    fn flush(out: &mut Vec<u32>, run: &mut Vec<Vec<u32>>, kind: Option<u8>) {
+        // An OpVariable initializer may reference another variable of the
+        // run; such a run keeps Slang's order — correctness over beauty.
+        let independent = kind != Some(2) || {
+            let ids: std::collections::HashSet<u32> =
+                run.iter().filter_map(|inst| inst.get(2).copied()).collect();
+            !run.iter()
+                .any(|inst| inst.get(4).is_some_and(|init| ids.contains(init)))
+        };
+        if independent {
+            run.sort();
+        }
         for inst in run.drain(..) {
             out.extend(inst);
         }
@@ -516,16 +535,34 @@ fn canonicalize_spirv(bytes: Vec<u8>) -> Vec<u8> {
             return bytes; // malformed — leave it to fail loudly downstream
         }
         let opcode = words[i] & 0xffff;
-        let inst = words[i..i + len].to_vec();
-        if SORTABLE.contains(&opcode) {
+        let mut inst = words[i..i + len].to_vec();
+        let kind = kind_of(opcode);
+        if kind != run_kind {
+            flush(&mut out, &mut run, run_kind);
+            run_kind = kind;
+        }
+        if kind.is_some() {
             run.push(inst);
         } else {
-            flush(&mut out, &mut run);
+            if opcode == OP_ENTRY_POINT && len > 3 {
+                // [header, exec model, entry id, name literal…, interface
+                // ids…] — the interface list is an unordered set; sort it.
+                // The name literal ends at its NUL-carrying word.
+                let mut idx = 3;
+                while idx < inst.len() {
+                    let terminated = inst[idx].to_le_bytes().contains(&0);
+                    idx += 1;
+                    if terminated {
+                        break;
+                    }
+                }
+                inst[idx..].sort_unstable();
+            }
             out.extend(inst);
         }
         i += len;
     }
-    flush(&mut out, &mut run);
+    flush(&mut out, &mut run, run_kind);
     out.into_iter().flat_map(u32::to_le_bytes).collect()
 }
 
@@ -770,5 +807,44 @@ mod tests {
         // Truncated instruction (word count runs past the end).
         let bad = module(&[&[(8u32 << 16) | OP_DECORATE, 1]]);
         assert_eq!(canonicalize_spirv(bad.clone()), bad);
+    }
+
+    const OP_VARIABLE: u32 = 59;
+
+    /// The cross-run repro case: adjacent module-scope `OpVariable`s
+    /// arrive in either order depending on the Slang process run — both
+    /// orders canonicalize identically. A run linked by an initializer
+    /// keeps its order; the `OpEntryPoint` interface set sorts.
+    #[test]
+    fn variable_runs_and_entry_interfaces_canonicalize() {
+        // OpVariable: [type id, result id, storage class].
+        let a = op(OP_VARIABLE, &[0x1c, 0x0b, 1]);
+        let b = op(OP_VARIABLE, &[0x1c, 0x0c, 1]);
+        // "main" packed little-endian with the NUL terminator, then two
+        // interface ids in reverse order.
+        let entry = op(OP_ENTRY_POINT, &[0, 2, 0x6e69616d, 0x0000_0000, 0x0c, 0x0b]);
+        let one = canonicalize_spirv(module(&[&entry, &a, &b]));
+        let two = canonicalize_spirv(module(&[&entry, &b, &a]));
+        assert_eq!(one, two);
+        // The interface list came out sorted ascending.
+        let words: Vec<u32> = one
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let e = 5; // entry point is the first instruction after the header
+        assert_eq!(&words[e + 5..e + 7], &[0x0b, 0x0c]);
+
+        // An initializer reference inside the run pins Slang's order.
+        let init_b = op(OP_VARIABLE, &[0x1c, 0x0c, 1, 0x0b]);
+        let pinned = canonicalize_spirv(module(&[&init_b, &a]));
+        let words: Vec<u32> = pinned
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(words[5] & 0xffff, OP_VARIABLE);
+        assert_eq!(
+            words[7], 0x0c,
+            "the initializer-bearing variable stays first"
+        );
     }
 }

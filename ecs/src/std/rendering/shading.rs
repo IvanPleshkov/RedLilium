@@ -272,12 +272,30 @@ impl ShadingRegistry {
                     name: "base_color".to_owned(),
                     default: PropValue::Vec4([1.0, 1.0, 1.0, 1.0]),
                 },
-                PropDef { name: "layer0_uv".to_owned(), default: uv_default.clone() },
-                PropDef { name: "layer0_params".to_owned(), default: params_default.clone() },
-                PropDef { name: "layer1_uv".to_owned(), default: uv_default.clone() },
-                PropDef { name: "layer1_params".to_owned(), default: params_default.clone() },
-                PropDef { name: "layer2_uv".to_owned(), default: uv_default.clone() },
-                PropDef { name: "layer2_params".to_owned(), default: params_default.clone() },
+                PropDef {
+                    name: "layer0_uv".to_owned(),
+                    default: uv_default.clone(),
+                },
+                PropDef {
+                    name: "layer0_params".to_owned(),
+                    default: params_default.clone(),
+                },
+                PropDef {
+                    name: "layer1_uv".to_owned(),
+                    default: uv_default.clone(),
+                },
+                PropDef {
+                    name: "layer1_params".to_owned(),
+                    default: params_default.clone(),
+                },
+                PropDef {
+                    name: "layer2_uv".to_owned(),
+                    default: uv_default.clone(),
+                },
+                PropDef {
+                    name: "layer2_params".to_owned(),
+                    default: params_default.clone(),
+                },
                 PropDef {
                     name: "base_texture".to_owned(),
                     default: PropValue::Texture(TextureSource::WHITE),
