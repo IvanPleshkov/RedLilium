@@ -271,7 +271,9 @@ pub struct VulkanBackend {
     /// to the pool in [`advance_frame`](Self::advance_frame) once the slot's
     /// fence has signalled, so the GPU is guaranteed to be done with them.
     staging_belt: Mutex<staging::StagingBelt>,
-    cube_mips: Mutex<mipmaps::CubeMipState>,
+    mip_resources: Mutex<mipmaps::MipState>,
+    /// MoltenVK normalizes 3D blit Z against the source at the destination mip.
+    volume_blit_same_level: bool,
     /// Timeline semaphore for the graphics queue: every `execute_graph`
     /// submit signals the next monotonically increasing value on it. Frame
     /// fences are (this semaphore, value) pairs — see [`GpuFence::Vulkan`].
@@ -981,6 +983,11 @@ impl VulkanBackend {
             validation_enabled
         );
 
+        let mut driver = vk::PhysicalDeviceDriverProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut driver);
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut properties) };
+        let volume_blit_same_level = driver.driver_id == vk::DriverId::MOLTENVK;
+
         Ok(Self {
             entry,
             instance,
@@ -1013,7 +1020,8 @@ impl VulkanBackend {
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
             submission_lock: Mutex::new(()),
             staging_belt: Mutex::new(staging_belt),
-            cube_mips: Mutex::new(mipmaps::CubeMipState::default()),
+            mip_resources: Mutex::new(mipmaps::MipState::default()),
+            volume_blit_same_level,
             queue_timeline,
             timeline_next: AtomicU64::new(1),
             async_compute,
@@ -1056,7 +1064,7 @@ impl VulkanBackend {
         self.memory_stats.lock().clone()
     }
 
-    /// Whether a color format supports both 2D blits and cross-face cubemap
+    /// Whether a color format supports 2D/3D blits and cross-face cubemap
     /// rendering. The public format-only query conservatively covers both paths.
     pub fn supports_mipgen(&self, format: crate::types::TextureFormat) -> bool {
         let vk_format = self.vk_texture_format(format);
@@ -1364,7 +1372,7 @@ impl VulkanBackend {
         self.staging_belt
             .lock()
             .retire_slot(&self.device, &mut self.allocator.lock(), oldest);
-        self.cube_mips.lock().retire_slot(oldest);
+        self.mip_resources.lock().retire_slot(oldest);
 
         // Read back the retiring slot's GPU timestamps (#95). The same fence
         // wait that lets the staging chunks retire guarantees these queries are
@@ -1693,7 +1701,7 @@ impl Drop for VulkanBackend {
 
             // Internal mip resources contain native handles and must retire
             // while their allocator, pipeline manager, and device still live.
-            self.cube_mips.lock().clear();
+            self.mip_resources.lock().clear();
 
             // Destroy pipeline manager resources BEFORE destroying the device.
             // PipelineManager holds Vulkan handles (descriptor pool, pipelines, etc.)
@@ -4573,6 +4581,18 @@ impl VulkanBackend {
                     return Ok(());
                 }
 
+                let scratch = self.volume_mip_scratch(texture)?;
+                if let Some(scratch) = scratch {
+                    self.mip_barrier(
+                        cmd,
+                        scratch,
+                        0,
+                        mip_count - 1,
+                        1,
+                        vk::ImageLayout::UNDEFINED,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    );
+                }
                 let aspect = image_aspect_mask(texture.format());
                 let extent = texture.size();
                 let layers = if texture.dimension() == crate::TextureDimension::D2Array {
@@ -4582,6 +4602,11 @@ impl VulkanBackend {
                 };
                 let mut mip_w = extent.width.max(1) as i32;
                 let mut mip_h = extent.height.max(1) as i32;
+                let mut mip_d = if texture.dimension() == crate::TextureDimension::D3 {
+                    extent.depth.max(1) as i32
+                } else {
+                    1
+                };
 
                 // The whole image arrives in TRANSFER_DST (the tracker-declared
                 // TransferWrite after the mip0 upload). Blit each mip i-1 → i
@@ -4614,6 +4639,7 @@ impl VulkanBackend {
 
                     let dst_w = (mip_w / 2).max(1);
                     let dst_h = (mip_h / 2).max(1);
+                    let dst_d = (mip_d / 2).max(1);
                     let blit = vk::ImageBlit::default()
                         .src_subresource(vk::ImageSubresourceLayers {
                             aspect_mask: aspect,
@@ -4626,12 +4652,12 @@ impl VulkanBackend {
                             vk::Offset3D {
                                 x: mip_w,
                                 y: mip_h,
-                                z: 1,
+                                z: mip_d,
                             },
                         ])
                         .dst_subresource(vk::ImageSubresourceLayers {
                             aspect_mask: aspect,
-                            mip_level: i,
+                            mip_level: if scratch.is_some() { src_level } else { i },
                             base_array_layer: 0,
                             layer_count: layers,
                         })
@@ -4640,7 +4666,7 @@ impl VulkanBackend {
                             vk::Offset3D {
                                 x: dst_w,
                                 y: dst_h,
-                                z: 1,
+                                z: dst_d,
                             },
                         ]);
                     unsafe {
@@ -4648,14 +4674,49 @@ impl VulkanBackend {
                             cmd,
                             image,
                             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                            image,
+                            scratch.unwrap_or(image),
                             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                             &[blit],
                             vk::Filter::LINEAR,
                         );
                     }
+                    if let Some(scratch) = scratch {
+                        self.mip_barrier(
+                            cmd,
+                            scratch,
+                            src_level,
+                            1,
+                            1,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        );
+                        let sub = |mip_level| vk::ImageSubresourceLayers {
+                            aspect_mask: aspect,
+                            mip_level,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        };
+                        unsafe {
+                            self.device.cmd_copy_image(
+                                cmd,
+                                scratch,
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                image,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                &[vk::ImageCopy::default()
+                                    .src_subresource(sub(src_level))
+                                    .dst_subresource(sub(i))
+                                    .extent(vk::Extent3D {
+                                        width: dst_w as u32,
+                                        height: dst_h as u32,
+                                        depth: dst_d as u32,
+                                    })],
+                            );
+                        }
+                    }
                     mip_w = dst_w;
                     mip_h = dst_h;
+                    mip_d = dst_d;
                 }
 
                 // CRITICAL (#96): the tracker models one layout per image, so the

@@ -1,4 +1,4 @@
-//! Cross-face cubemap reduction. All commands are lowered from a graph op.
+//! Private mip resources and cross-face cubemap reduction. All commands are lowered from a graph op.
 
 use super::{MAX_FRAMES_IN_FLIGHT, VulkanBackend};
 use crate::backend::{GpuPipeline, GpuTexture};
@@ -13,16 +13,21 @@ use std::{
 };
 
 #[derive(Default)]
-pub(super) struct CubeMipState {
+pub(super) struct MipState {
     pipelines: HashMap<TextureFormat, GpuPipeline>,
     slots: [Vec<Scratch>; MAX_FRAMES_IN_FLIGHT],
+    volumes: [Vec<GpuTexture>; MAX_FRAMES_IN_FLIGHT],
 }
-impl CubeMipState {
+impl MipState {
     pub(super) fn retire_slot(&mut self, slot: usize) {
         self.slots[slot].clear();
+        self.volumes[slot].clear();
     }
     pub(super) fn clear(&mut self) {
         for slot in &mut self.slots {
+            slot.clear();
+        }
+        for slot in &mut self.volumes {
             slot.clear();
         }
         self.pipelines.clear();
@@ -51,6 +56,38 @@ fn creation(error: vk::Result) -> GraphicsError {
 }
 
 impl VulkanBackend {
+    /// MoltenVK's 3D blit reads the source extent at dstSubresource.mipLevel
+    /// when normalizing Z. Keep blit mip indices equal using a half-size scratch
+    /// chain, then copy its mip i-1 into target mip i. Native Vulkan uses direct
+    /// blits. Scratch contains only the generated levels, without the base.
+    /// https://github.com/KhronosGroup/MoltenVK/blob/main/MoltenVK/MoltenVK/Commands/MVKCmdTransfer.mm
+    pub(super) fn volume_mip_scratch(
+        &self,
+        texture: &Texture,
+    ) -> Result<Option<vk::Image>, GraphicsError> {
+        if !self.volume_blit_same_level || texture.dimension() != crate::TextureDimension::D3 {
+            return Ok(None);
+        }
+        let image = self.create_texture(
+            &TextureDescriptor::new_3d(
+                (texture.width() / 2).max(1),
+                (texture.height() / 2).max(1),
+                (texture.depth() / 2).max(1),
+                texture.format(),
+                TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            )
+            .with_mip_levels(texture.mip_level_count() - 1),
+        )?;
+        let GpuTexture::Vulkan { image: handle, .. } = &image else {
+            unreachable!()
+        };
+        let handle = *handle;
+        // Retain before recording: abandoned command buffers obey the same
+        // frame-slot lifetime as successful submissions.
+        self.mip_resources.lock().volumes[self.current_slot.load(Ordering::SeqCst)].push(image);
+        Ok(Some(handle))
+    }
+
     pub(super) fn encode_cube_mipmaps(
         &self,
         cmd: vk::CommandBuffer,
@@ -70,7 +107,7 @@ impl VulkanBackend {
                 GraphicsError::InvalidParameter("cube layer count overflows".into())
             })?
         };
-        let mut state = self.cube_mips.lock();
+        let mut state = self.mip_resources.lock();
         if !state.pipelines.contains_key(&texture.format()) {
             let code = include_bytes!("../mipmaps_cube.wgsl");
             let mut descriptor = MaterialDescriptor::new()
@@ -325,7 +362,7 @@ impl VulkanBackend {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn mip_barrier(
+    pub(super) fn mip_barrier(
         &self,
         cmd: vk::CommandBuffer,
         image: vk::Image,

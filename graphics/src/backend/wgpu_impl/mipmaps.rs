@@ -26,20 +26,26 @@ impl WgpuBackend {
                 )
     }
 
-    fn mip_pipeline(&self, format: wgpu::TextureFormat, cube: bool) -> wgpu::RenderPipeline {
+    fn mip_pipeline(
+        &self,
+        format: wgpu::TextureFormat,
+        dimension: wgpu::TextureViewDimension,
+    ) -> wgpu::RenderPipeline {
         let mut cache = self.mip_pipelines.lock();
         cache
-            .entry((format, cube))
+            .entry((format, dimension))
             .or_insert_with(|| {
                 let shader = self
                     .device
                     .create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("mip reduction"),
                         source: wgpu::ShaderSource::Wgsl(
-                            if cube {
-                                include_str!("../mipmaps_cube.wgsl")
-                            } else {
-                                include_str!("mipmaps.wgsl")
+                            match dimension {
+                                wgpu::TextureViewDimension::D3 => include_str!("mipmaps_3d.wgsl"),
+                                wgpu::TextureViewDimension::D2Array => {
+                                    include_str!("../mipmaps_cube.wgsl")
+                                }
+                                _ => include_str!("mipmaps.wgsl"),
                             }
                             .into(),
                         ),
@@ -55,11 +61,7 @@ impl WgpuBackend {
                                     sample_type: wgpu::TextureSampleType::Float {
                                         filterable: false,
                                     },
-                                    view_dimension: if cube {
-                                        wgpu::TextureViewDimension::D2Array
-                                    } else {
-                                        wgpu::TextureViewDimension::D2
-                                    },
+                                    view_dimension: dimension,
                                     multisampled: false,
                                 },
                                 count: None,
@@ -111,7 +113,15 @@ impl WgpuBackend {
         };
         let format = convert_texture_format(target.format());
         let cube = target.dimension().is_cubemap();
-        let pipeline = self.mip_pipeline(format, cube);
+        let volume = target.dimension() == crate::TextureDimension::D3;
+        let dimension = if volume {
+            wgpu::TextureViewDimension::D3
+        } else if cube {
+            wgpu::TextureViewDimension::D2Array
+        } else {
+            wgpu::TextureViewDimension::D2
+        };
+        let pipeline = self.mip_pipeline(format, dimension);
         // Scratch keeps sampled/render-attachment usage private. The public
         // resource needs only COPY_SRC/DST, on both Vulkan and wgpu. wgpu retains
         // all these handles in the command buffer until submission completes.
@@ -120,7 +130,7 @@ impl WgpuBackend {
             size: texture.size(),
             mip_level_count: target.mip_level_count(),
             sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+            dimension: texture.dimension(),
             format,
             usage: wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST
@@ -134,7 +144,35 @@ impl WgpuBackend {
             texture.size(),
         );
         for mip in 1..target.mip_level_count() {
-            for layer in 0..texture.depth_or_array_layers() {
+            let slices = if volume {
+                (target.depth() >> mip).max(1)
+            } else {
+                texture.depth_or_array_layers()
+            };
+            // A volume binds an entire source mip; the render attachment selects
+            // one destination Z slice. Array layers remain separate 2D views.
+            let volume_views = volume.then(|| {
+                let view = |level| {
+                    scratch.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D3),
+                        base_mip_level: level,
+                        mip_level_count: Some(1),
+                        ..Default::default()
+                    })
+                };
+                (view(mip - 1), view(mip))
+            });
+            let volume_binding = volume_views.as_ref().map(|(src, _)| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("volume mip source"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    }],
+                })
+            });
+            for layer in 0..slices {
                 let view = |level| {
                     scratch.create_view(&wgpu::TextureViewDescriptor {
                         dimension: Some(wgpu::TextureViewDimension::D2),
@@ -145,7 +183,9 @@ impl WgpuBackend {
                         ..Default::default()
                     })
                 };
-                let src = if cube {
+                let src = if let Some((src, _)) = &volume_views {
+                    src.clone()
+                } else if cube {
                     scratch.create_view(&wgpu::TextureViewDescriptor {
                         dimension: Some(wgpu::TextureViewDimension::D2Array),
                         base_mip_level: mip - 1,
@@ -155,14 +195,20 @@ impl WgpuBackend {
                 } else {
                     view(mip - 1)
                 };
-                let dst = view(mip);
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("mip source"),
-                    layout: &pipeline.get_bind_group_layout(0),
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&src),
-                    }],
+                let dst = if let Some((_, dst)) = &volume_views {
+                    dst.clone()
+                } else {
+                    view(mip)
+                };
+                let bind_group = volume_binding.clone().unwrap_or_else(|| {
+                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("mip source"),
+                        layout: &pipeline.get_bind_group_layout(0),
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&src),
+                        }],
+                    })
                 });
                 {
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -170,7 +216,7 @@ impl WgpuBackend {
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &dst,
                             resolve_target: None,
-                            depth_slice: None,
+                            depth_slice: volume.then_some(layer),
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                                 store: wgpu::StoreOp::Store,
@@ -198,7 +244,7 @@ impl WgpuBackend {
                 wgpu::Extent3d {
                     width: (target.width() >> mip).max(1),
                     height: (target.height() >> mip).max(1),
-                    depth_or_array_layers: texture.depth_or_array_layers(),
+                    depth_or_array_layers: slices,
                 },
             );
         }
@@ -211,6 +257,7 @@ mod tests {
     fn mip_shader_validates_without_optional_capabilities() {
         for source in [
             include_str!("mipmaps.wgsl"),
+            include_str!("mipmaps_3d.wgsl"),
             include_str!("../mipmaps_cube.wgsl"),
         ] {
             let module = naga::front::wgsl::parse_str(source).unwrap();

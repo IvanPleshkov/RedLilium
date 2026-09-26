@@ -44,10 +44,11 @@ impl std::fmt::Display for MipmapError {
 impl std::error::Error for MipmapError {}
 
 impl CpuTexture {
-    /// Generate a full chain for a 2D texture, 2D array, cubemap or cube array.
+    /// Generate a full chain for a 2D texture, 2D array, cubemap, cube array or 3D volume.
     /// 2D array layers are independent. Cubes use a cross-face tent filter;
     /// alpha coverage is corrected per cube, and cubes never mix. Output
-    /// remains mip-major with all layers/faces stored within each mip.
+    /// remains mip-major with all layers/faces stored within each mip. Volumes
+    /// shrink all three axes; alpha coverage is corrected over the whole volume.
     /// Supports every uncompressed color format represented by TextureFormat,
     /// including non-filterable float and integer channels. Integer averages
     /// round to the nearest representable value. Depth/stencil and compressed
@@ -61,6 +62,7 @@ impl CpuTexture {
             self.dimension,
             TextureDimension::D2
                 | TextureDimension::D2Array
+                | TextureDimension::D3
                 | TextureDimension::Cube
                 | TextureDimension::CubeArray
         ) || self.depth_or_array_layers == 0
@@ -74,7 +76,7 @@ impl CpuTexture {
             || self.mip_level_count == 0
         {
             return Err(MipmapError::InvalidTexture(
-                "mip generation requires a nonempty 2D texture, array, or square cubemap",
+                "mip generation requires a nonempty 2D texture, array, square cubemap, or 3D volume",
             ));
         }
         let format = self.format;
@@ -105,9 +107,15 @@ impl CpuTexture {
             }
             _ => {}
         }
+        let mut depth = if self.dimension == TextureDimension::D3 {
+            self.depth_or_array_layers
+        } else {
+            1
+        };
         let stride = format.block_size() as usize;
         let layer_bytes = (self.width as usize)
             .checked_mul(self.height as usize)
+            .and_then(|n| n.checked_mul(depth as usize))
             .and_then(|n| n.checked_mul(stride))
             .ok_or(MipmapError::InvalidTexture("mip byte size overflows"))?;
         let layers = if self.dimension == TextureDimension::CubeArray {
@@ -157,8 +165,8 @@ impl CpuTexture {
         let mut data = self.data.clone();
         let (mut width, mut height) = (self.width, self.height);
         let mut levels = 1;
-        while width > 1 || height > 1 {
-            let (w, h) = ((width / 2).max(1), (height / 2).max(1));
+        while width > 1 || height > 1 || depth > 1 {
+            let (w, h, d) = ((width / 2).max(1), (height / 2).max(1), (depth / 2).max(1));
             // All faces must read the same source level before any is replaced.
             let mut next: Vec<_> = sources
                 .iter()
@@ -167,7 +175,7 @@ impl CpuTexture {
                     if self.dimension.is_cubemap() {
                         reduce_cube(&sources, layer, width, w)
                     } else {
-                        reduce(source, width, height, w, h)
+                        reduce(source, [width, height, depth], [w, h, d])
                     }
                 })
                 .collect();
@@ -210,6 +218,7 @@ impl CpuTexture {
             sources = next;
             width = w;
             height = h;
+            depth = d;
             levels += 1;
         }
         self.data = data;
@@ -292,27 +301,37 @@ fn reduce_cube(sources: &[Vec<[f64; 4]>], layer: usize, size: u32, dst_size: u32
     result
 }
 
-fn reduce(source: &[[f64; 4]], width: u32, height: u32, w: u32, h: u32) -> Vec<[f64; 4]> {
-    let sx = f64::from(width) / f64::from(w);
-    let sy = f64::from(height) / f64::from(h);
-    let mut dst = Vec::with_capacity(w as usize * h as usize);
-    for y in 0..h {
-        for x in 0..w {
-            let (x0, x1) = (f64::from(x) * sx, f64::from(x + 1) * sx);
-            let (y0, y1) = (f64::from(y) * sy, f64::from(y + 1) * sy);
-            let mut sum = [0.0; 4];
-            for iy in y0.floor() as u32..(y1.ceil() as u32).min(height) {
-                for ix in x0.floor() as u32..(x1.ceil() as u32).min(width) {
-                    let weight = (x1.min(f64::from(ix + 1)) - x0.max(f64::from(ix)))
-                        * (y1.min(f64::from(iy + 1)) - y0.max(f64::from(iy)))
-                        / (sx * sy);
-                    let pixel = source[iy as usize * width as usize + ix as usize];
-                    for c in 0..4 {
-                        sum[c] += pixel[c] * weight;
+// Treat 2D images as a one-slice volume. Weighting the full source footprint
+// preserves edge voxels for odd dimensions, including along Z.
+fn reduce(source: &[[f64; 4]], size: [u32; 3], dst_size: [u32; 3]) -> Vec<[f64; 4]> {
+    let scale: [f64; 3] = std::array::from_fn(|i| f64::from(size[i]) / f64::from(dst_size[i]));
+    let mut dst = Vec::with_capacity(dst_size.iter().map(|&n| n as usize).product());
+    for z in 0..dst_size[2] {
+        for y in 0..dst_size[1] {
+            for x in 0..dst_size[0] {
+                let position = [x, y, z];
+                let lo: [f64; 3] = std::array::from_fn(|i| f64::from(position[i]) * scale[i]);
+                let hi: [f64; 3] = std::array::from_fn(|i| f64::from(position[i] + 1) * scale[i]);
+                let range = |i: usize| lo[i].floor() as u32..(hi[i].ceil() as u32).min(size[i]);
+                let weight = |i: usize, c: u32| {
+                    (hi[i].min(f64::from(c + 1)) - lo[i].max(f64::from(c))) / scale[i]
+                };
+                let mut sum = [0.0; 4];
+                for iz in range(2) {
+                    for iy in range(1) {
+                        for ix in range(0) {
+                            let w = weight(0, ix) * weight(1, iy) * weight(2, iz);
+                            let pixel = source[(iz as usize * size[1] as usize + iy as usize)
+                                * size[0] as usize
+                                + ix as usize];
+                            for c in 0..4 {
+                                sum[c] += pixel[c] * w;
+                            }
+                        }
                     }
                 }
+                dst.push(sum);
             }
-            dst.push(sum);
         }
     }
     dst
@@ -496,6 +515,83 @@ mod tests {
     }
 
     #[test]
+    fn volumes_reduce_all_axes_and_preserve_odd_edge_energy() {
+        for (w, h, d) in [(2, 2, 2), (1, 1, 8), (4, 2, 1), (3, 5, 7)] {
+            let mut pixels = vec![[0.0; 4]; (w * h * d) as usize];
+            pixels.last_mut().unwrap()[0] = 1.0;
+            let mut cpu = texture(TextureFormat::Rgba32Float, w, h, &pixels)
+                .with_dimension(TextureDimension::D3)
+                .with_depth_or_array_layers(d);
+            cpu.generate_mipmaps(MipmapFilter::Color).unwrap();
+            assert_eq!(cpu.mip_level_count, 32 - w.max(h).max(d).leading_zeros());
+            assert_eq!(cpu.layer_count(), 1);
+            assert_eq!(cpu.data.len(), cpu.expected_data_len());
+            assert!((top(&cpu)[0] - 1.0 / f64::from(w * h * d)).abs() < 1e-6);
+            for mip in 0..cpu.mip_level_count {
+                assert_eq!(
+                    cpu.byte_range(mip, 0).len(),
+                    ((w >> mip).max(1) * (h >> mip).max(1) * (d >> mip).max(1) * 16) as usize
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn volume_filters_use_neighbors_across_z() {
+        let mut normal = texture(
+            TextureFormat::Rgba32Float,
+            1,
+            1,
+            &[[1.0, 0.5, 0.5, 1.0], [0.5, 1.0, 0.5, 1.0]],
+        )
+        .with_dimension(TextureDimension::D3)
+        .with_depth_or_array_layers(2);
+        normal.generate_mipmaps(MipmapFilter::NormalMap).unwrap();
+        let n = top(&normal);
+        assert!((n[0] - (1.0 + 0.5f64.sqrt()) / 2.0).abs() < 1e-6);
+        assert!((n[1] - n[0]).abs() < 1e-6);
+        assert!((n[2] - 0.5).abs() < 1e-6);
+
+        // Four slices become two voxels. Preserve 50% coverage over the whole
+        // volume, even though ordinary averaging would put both below cutoff.
+        let mut alpha = texture(
+            TextureFormat::Rgba32Float,
+            1,
+            1,
+            &[
+                [0.25, 0.0, 0.0, 0.8],
+                [0.25, 0.0, 0.0, 0.0],
+                [0.25, 0.0, 0.0, 0.6],
+                [0.25, 0.0, 0.0, 0.0],
+            ],
+        )
+        .with_dimension(TextureDimension::D3)
+        .with_depth_or_array_layers(4);
+        alpha
+            .generate_mipmaps(MipmapFilter::AlphaCoverage { cutoff: 128 })
+            .unwrap();
+        let pixels: Vec<_> = alpha.data[alpha.byte_range(1, 0)]
+            .chunks_exact(16)
+            .map(|p| decode(alpha.format, p))
+            .collect();
+        assert_eq!(coverage(&pixels, 128.0 / 255.0), 0.5);
+        assert!(pixels.iter().all(|p| p[0] == 0.25));
+    }
+
+    #[test]
+    fn invalid_volume_byte_counts_leave_input_intact() {
+        for (w, h, d) in [(2, 2, 2), (1, 1, 0), (u32::MAX, u32::MAX, u32::MAX)] {
+            let mut cpu = CpuTexture::new(w, h, TextureFormat::Rgba32Float, vec![0; 16])
+                .with_dimension(TextureDimension::D3)
+                .with_depth_or_array_layers(d);
+            let before = cpu.data.clone();
+            assert!(cpu.generate_mipmaps(MipmapFilter::Color).is_err());
+            assert_eq!(cpu.data, before);
+            assert_eq!(cpu.mip_level_count, 1);
+        }
+    }
+
+    #[test]
     fn odd_sizes_and_one_pixel_axis_include_edge_texels() {
         for (w, h) in [(3, 1), (1, 3), (3, 3), (5, 3)] {
             let mut pixels = vec![[0.0; 4]; (w * h) as usize];
@@ -630,7 +726,7 @@ mod tests {
         let authored = cpu.data.clone();
         cpu.generate_mipmaps(MipmapFilter::NormalMap).unwrap();
         assert_eq!(cpu.data, authored);
-        for dimension in [TextureDimension::D1, TextureDimension::D3] {
+        for dimension in [TextureDimension::D1, TextureDimension::D1Array] {
             let mut cpu =
                 texture(TextureFormat::Rgba8Unorm, 2, 2, &[[1.0; 4]; 4]).with_dimension(dimension);
             assert!(cpu.generate_mipmaps(MipmapFilter::Color).is_err());

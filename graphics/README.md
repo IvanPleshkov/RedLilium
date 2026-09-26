@@ -74,8 +74,8 @@ contract includes:
   different resources, even for disjoint buffer ranges or texture subresources.
   In-place texture copies need subresource tracking, which is not implemented.
 - Mip generation requires `COPY_SRC | COPY_DST` and, for multiple levels, a
-  single-sampled 2D texture, 2D array, cubemap or cube array with a supported format. A single level
-  is a no-op.
+  single-sampled 2D texture, 2D array, cubemap, cube array or 3D volume with a
+  supported format. A single level is a no-op.
 
 `upload_texture_data` and `upload_texture_level` prepare staging data with the
 required padding; the destination upload is still an ordered graph operation.
@@ -84,8 +84,8 @@ required padding; the destination upload is still an ordered graph operation.
 
 `TransferOperation::generate_mipmaps(texture)` generates the allocated levels
 from mip 0 inside the graph. The resource needs only `COPY_SRC | COPY_DST`.
-For 2D textures/arrays, Vulkan uses linear blits. wgpu uses a cached render pipeline and private scratch
-texture, with area-weighted `textureLoad` reduction: float formats do not need
+For 2D textures/arrays and 3D volumes, Vulkan uses linear blits. wgpu uses a cached
+render pipeline and private scratch texture, with weighted box `textureLoad` reduction: float formats do not need
 hardware linear filtering, and odd-size edges contribute to the result. Both
 paths filter sRGB colors in linear light; their kernels may differ for odd sizes.
 Check `device.supports_mipmap_generation(format)` before requesting GPU generation.
@@ -137,10 +137,20 @@ This is mip downsampling across face boundaries, not specular IBL convolution
 by roughness or a repair for mismatched source faces. No radiance solid-angle
 integration or face-local normal-basis conversion is performed.
 
+3D textures shrink width, height and depth independently down to one. wgpu renders
+each destination Z slice using volume-weighted `textureLoad` reduction; CPU import
+uses the same box kernel. Vulkan uses trilinear blits, whose kernel may differ for
+odd dimensions. Normal-map filtering normalizes each reduced voxel; alpha coverage
+is corrected over the entire volume. All slices of each mip are stored and uploaded
+together. MoltenVK uses a temporary chain starting at half size to avoid incorrect
+Z normalization in cross-mip blits: it blits between equal mip indices and copies
+the result into the target level. This scratch survives until the frame slot retires.
+
 Supplied mip chains are preserved, including compressed KTX2 assets. BC/ETC/ASTC
 need precomputed mips; no runtime recompression is performed. Generation remains
-limited to 2D textures, 2D arrays, cubemaps and cube arrays without MSAA.
-3D generation is deferred. CPU fallback broadens **asset import** support; a
+limited to 2D textures, 2D arrays, cubemaps, cube arrays and 3D volumes without MSAA.
+1D textures are unsupported; multisampled sources need a resolve before generation.
+CPU fallback broadens **asset import** support; a
 direct GPU graph operation on an unsupported format still returns an error.
 
 ### Public API boundary

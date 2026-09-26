@@ -332,7 +332,7 @@ impl AssetStage for MakeSolidArrayStage {
 struct UploadTextureStage {
     device: Arc<GraphicsDevice>,
     /// Whether to request GPU mips when the CPU stage has not supplied a chain.
-    /// Still gated by device support and the 2D/array/cubemap restriction.
+    /// Still gated by device format support and texture dimension.
     generate_mips: bool,
 }
 
@@ -360,6 +360,7 @@ impl AssetStage for PrepareMipmapsStage {
                     cpu.dimension,
                     TextureDimension::D2
                         | TextureDimension::D2Array
+                        | TextureDimension::D3
                         | TextureDimension::Cube
                         | TextureDimension::CubeArray
                 )
@@ -379,9 +380,9 @@ impl AssetStage for PrepareMipmapsStage {
     }
 }
 
-/// Full mip count for a `width × height` 2D image: `floor(log2(max)) + 1`.
-fn full_mip_level_count(width: u32, height: u32) -> u32 {
-    32 - width.max(height).max(1).leading_zeros()
+/// Full mip count for a `width × height × depth` image: `floor(log2(max)) + 1`.
+fn full_mip_level_count(width: u32, height: u32, depth: u32) -> u32 {
+    32 - width.max(height).max(depth).max(1).leading_zeros()
 }
 
 impl AssetStage for UploadTextureStage {
@@ -400,24 +401,30 @@ impl AssetStage for UploadTextureStage {
             stored_chain || cpu.layer_count() > 1 || cpu.dimension == TextureDimension::D2Array;
 
         // CPU-generated and container-supplied chains arrive complete. GPU
-        // generation handles 2D, arrays and cubemaps; unsupported compressed
+        // generation handles 2D, arrays, cubemaps and 3D volumes; unsupported compressed
         // formats stay as supplied and log once.
+        let volume_depth = if cpu.dimension == TextureDimension::D3 {
+            cpu.depth_or_array_layers
+        } else {
+            1
+        };
         let wants_mips = self.generate_mips
             && !stored_chain
             && matches!(
                 cpu.dimension,
                 TextureDimension::D2
                     | TextureDimension::D2Array
+                    | TextureDimension::D3
                     | TextureDimension::Cube
                     | TextureDimension::CubeArray
             )
-            && (cpu.width > 1 || cpu.height > 1);
+            && (cpu.width > 1 || cpu.height > 1 || volume_depth > 1);
         let can_mip = wants_mips && self.device.supports_mipmap_generation(cpu.format);
         if wants_mips && !can_mip {
             log_mip_fallback(cpu.format);
         }
         let mip_level_count = if can_mip {
-            full_mip_level_count(cpu.width, cpu.height)
+            full_mip_level_count(cpu.width, cpu.height, volume_depth)
         } else {
             cpu.mip_level_count
         };
@@ -519,10 +526,10 @@ mod tests {
     /// `floor(log2(max(w,h))) + 1` — the full 2D mip count.
     #[test]
     fn mip_level_count_matches_dimension() {
-        assert_eq!(full_mip_level_count(1, 1), 1);
-        assert_eq!(full_mip_level_count(4, 4), 3); // 4→2→1
-        assert_eq!(full_mip_level_count(256, 256), 9);
-        assert_eq!(full_mip_level_count(640, 480), 10); // driven by max
+        assert_eq!(full_mip_level_count(1, 1, 1), 1);
+        assert_eq!(full_mip_level_count(4, 4, 1), 3); // 4→2→1
+        assert_eq!(full_mip_level_count(256, 256, 1), 9);
+        assert_eq!(full_mip_level_count(640, 480, 1), 10); // driven by max
     }
 
     /// The settings→sampler mapping applies filter to all three filters and the
@@ -645,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_stage_keeps_container_chains_and_does_not_generate_volume_mips() {
+    fn cpu_stage_keeps_container_chains_and_does_not_generate_1d_mips() {
         let device = dummy_device();
         let stage = PrepareMipmapsStage {
             device: device.clone(),
@@ -658,9 +665,8 @@ mod tests {
             .downcast::<CpuTexture>()
             .unwrap();
         assert_eq!(cpu.data, vec![42; 20]);
-        let cpu = CpuTexture::new(2, 2, TextureFormat::Rgba8Unorm, vec![42; 16 * 6])
-            .with_dimension(TextureDimension::D3)
-            .with_depth_or_array_layers(6);
+        let cpu = CpuTexture::new(4, 1, TextureFormat::Rgba8Unorm, vec![42; 16])
+            .with_dimension(TextureDimension::D1);
         let cpu = ready(stage.run_async(Box::new(cpu))).unwrap();
         let upload = UploadTextureStage {
             device,
@@ -679,6 +685,57 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, TransferOperation::GenerateMipmaps { .. }))
         );
+    }
+
+    #[test]
+    fn volume_cpu_import_uploads_whole_mips_and_preserves_authored_chain() {
+        let device = dummy_device();
+        for filter in [
+            MipmapFilter::Color,
+            MipmapFilter::NormalMap,
+            MipmapFilter::AlphaCoverage { cutoff: 128 },
+        ] {
+            let stage = PrepareMipmapsStage {
+                device: device.clone(),
+                filter,
+            };
+            let base = CpuTexture::new(
+                1,
+                1,
+                TextureFormat::Rgba8Unorm,
+                [128, 128, 255, 255].repeat(8),
+            )
+            .with_dimension(TextureDimension::D3)
+            .with_depth_or_array_layers(8);
+            let prepared = ready(stage.run_async(Box::new(base))).unwrap();
+            let cpu = prepared.downcast_ref::<CpuTexture>().unwrap();
+            assert_eq!(cpu.mip_level_count, 4);
+            assert_eq!(cpu.data.len(), (8 + 4 + 2 + 1) * 4);
+            let authored = cpu.data.clone();
+            let prepared = ready(stage.run_async(prepared)).unwrap();
+            assert_eq!(
+                prepared.downcast_ref::<CpuTexture>().unwrap().data,
+                authored
+            );
+            let (value, ops) = UploadTextureStage {
+                device: device.clone(),
+                generate_mips: true,
+            }
+            .run_gpu(prepared)
+            .unwrap();
+            let texture = value.downcast_ref::<Arc<Texture>>().unwrap();
+            assert_eq!(texture.dimension(), TextureDimension::D3);
+            assert_eq!(texture.mip_level_count(), 4);
+            assert_eq!(ops.len(), 4);
+            for (mip, op) in ops.iter().enumerate() {
+                let TransferOperation::BufferToTexture { regions, .. } = op else {
+                    panic!("expected volume mip upload")
+                };
+                assert_eq!(regions[0].texture_location.mip_level, mip as u32);
+                assert_eq!(regions[0].texture_location.origin.z, 0);
+                assert_eq!(regions[0].extent.depth, 8 >> mip);
+            }
+        }
     }
 
     #[test]
@@ -756,14 +813,21 @@ mod tests {
             (TextureDimension::D2Array, 3),
             (TextureDimension::Cube, 1),
             (TextureDimension::CubeArray, 2),
+            (TextureDimension::D3, 8),
         ] {
-            let layers = dimension.layer_count(count);
+            let volume = dimension == TextureDimension::D3;
+            let layers = if volume {
+                1
+            } else {
+                dimension.layer_count(count)
+            };
+            let size = if volume { 1 } else { 4 };
             for generate_mips in [false, true] {
                 let cpu = CpuTexture::new(
-                    4,
-                    4,
+                    size,
+                    size,
                     TextureFormat::Rgba8Unorm,
-                    vec![42; 64 * layers as usize],
+                    vec![42; (4 * size * size * if volume { count } else { layers }) as usize],
                 )
                 .with_dimension(dimension)
                 .with_depth_or_array_layers(count);
@@ -787,7 +851,14 @@ mod tests {
                 };
                 let (value, operations) = upload.run_gpu(input).unwrap();
                 let texture = value.downcast_ref::<Arc<Texture>>().unwrap();
-                assert_eq!(texture.mip_level_count(), if generate_mips { 3 } else { 1 });
+                assert_eq!(
+                    texture.mip_level_count(),
+                    if generate_mips {
+                        if volume { 4 } else { 3 }
+                    } else {
+                        1
+                    }
+                );
                 assert_eq!(
                     operations.len(),
                     layers as usize + usize::from(generate_mips)
@@ -801,6 +872,7 @@ mod tests {
                     assert!(Arc::ptr_eq(dst, texture));
                     assert_eq!(regions[0].texture_location.mip_level, 0);
                     assert_eq!(regions[0].texture_location.origin.z, layer);
+                    assert_eq!(regions[0].extent.depth, if volume { count } else { 1 });
                 }
                 if generate_mips {
                     let Some(TransferOperation::GenerateMipmaps { texture: generated }) =

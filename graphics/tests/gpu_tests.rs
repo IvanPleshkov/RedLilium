@@ -4152,6 +4152,135 @@ fn test_wgpu_mipmaps_include_odd_edges_and_can_regenerate() {
     }
 }
 
+/// Checks all voxels/levels, shrinking Z, re-generation after readback, and
+/// layout restoration across graphs. COPY-only targets keep scratch private.
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::wgpu(Backend::WebGpu)]
+fn test_volume_mipmaps_all_axes_and_levels(#[case] backend: Backend) {
+    use redlilium_core::texture::{CpuTexture, MipmapFilter, TextureDimension};
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    #[cfg(feature = "vulkan-backend")]
+    redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
+    let sizes = [(4u32, 4u32, 4u32), (1, 1, 8), (4, 2, 1), (3, 5, 7)];
+    for (width, height, depth) in sizes {
+        for format in [TextureFormat::Rgba8UnormSrgb, TextureFormat::Rgba32Float] {
+            let levels = 32 - width.max(height).max(depth).leading_zeros();
+            let texture = ctx
+                .device
+                .create_texture(
+                    &TextureDescriptor::new_3d(
+                        width,
+                        height,
+                        depth,
+                        format,
+                        TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+                    )
+                    .with_mip_levels(levels),
+                )
+                .unwrap();
+            for round in 0..2u8 {
+                let mut data = Vec::new();
+                for z in 0..depth {
+                    for y in 0..height {
+                        for x in 0..width {
+                            // NPOT kernels differ: a constant field checks Vulkan's
+                            // odd extents without asserting CPU box-filter semantics.
+                            let rgba = if backend == Backend::Vulkan && width == 3 {
+                                [40 + round * 7, 80, 120, 255]
+                            } else {
+                                [
+                                    10 + x as u8 * 31 + round * 7,
+                                    20 + y as u8 * 29,
+                                    30 + z as u8 * 23,
+                                    255,
+                                ]
+                            };
+                            if format == TextureFormat::Rgba32Float {
+                                for channel in rgba {
+                                    data.extend_from_slice(&f32::from(channel).to_le_bytes());
+                                }
+                            } else {
+                                data.extend_from_slice(&rgba);
+                            }
+                        }
+                    }
+                }
+                let mut expected = CpuTexture::new(width, height, format, data.clone())
+                    .with_dimension(TextureDimension::D3)
+                    .with_depth_or_array_layers(depth);
+                expected.generate_mipmaps(MipmapFilter::Color).unwrap();
+                let mut graph = RenderGraph::new();
+                let mut pass = TransferPass::new("volume mips".into());
+                pass.set_transfer_config(TransferConfig::new().with_operations(vec![
+                        TransferOperation::upload_texture_data(&ctx.device, texture.clone(), &data)
+                            .unwrap(),
+                        TransferOperation::generate_mipmaps(texture.clone()),
+                    ]));
+                graph.add_transfer_pass(pass);
+                ctx.execute_graph(graph);
+                let mut reads = Vec::new();
+                let mut operations = Vec::new();
+                for mip in 0..levels {
+                    let (w, h, d) = expected.mip_extent(mip);
+                    let buffer = ctx.create_readback_buffer(u64::from(256 * h * d));
+                    operations.push(TransferOperation::readback_texture(
+                        texture.clone(),
+                        buffer.clone(),
+                        vec![BufferTextureCopyRegion::new(
+                            BufferTextureLayout::new(0, Some(256), Some(h)),
+                            TextureCopyLocation::mip(mip),
+                            Extent3d::new_3d(w, h, d),
+                        )],
+                    ));
+                    reads.push((buffer, mip, w, h, d));
+                }
+                let mut graph = RenderGraph::new();
+                let mut pass = TransferPass::new("volume readback".into());
+                pass.set_transfer_config(TransferConfig::new().with_operations(operations));
+                graph.add_transfer_pass(pass);
+                ctx.execute_graph(graph);
+                for (buffer, mip, w, h, d) in reads {
+                    let bytes = ctx.read_buffer(&buffer, u64::from(256 * h * d));
+                    let reference = &expected.data[expected.byte_range(mip, 0)];
+                    let row = (w * format.block_size()) as usize;
+                    for zy in 0..(h * d) as usize {
+                        let actual = &bytes[zy * 256..zy * 256 + row];
+                        let reference = &reference[zy * row..(zy + 1) * row];
+                        if format == TextureFormat::Rgba32Float {
+                            for (a, b) in actual.chunks_exact(4).zip(reference.chunks_exact(4)) {
+                                let a = f32::from_le_bytes(a.try_into().unwrap());
+                                let b = f32::from_le_bytes(b.try_into().unwrap());
+                                assert!(
+                                    (a - b).abs() < 0.002,
+                                    "{backend:?} {width}x{height}x{depth}, mip {mip}, row {zy}: {a} != {b}"
+                                );
+                            }
+                        } else {
+                            for (&a, &b) in actual.iter().zip(reference) {
+                                assert!(
+                                    (i16::from(a) - i16::from(b)).abs() <= 2,
+                                    "{backend:?} {width}x{height}x{depth}, mip {mip}, row {zy}: {a} != {b}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    drop(ctx);
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        assert_eq!(
+            redlilium_graphics::diagnostics::vulkan::validation_error_count(),
+            0
+        );
+    }
+}
+
 #[rstest]
 #[case::vulkan(Backend::Vulkan)]
 #[case::wgpu(Backend::WebGpu)]
@@ -4408,49 +4537,54 @@ fn test_cross_face_cube_mips_match_cpu(#[case] backend: Backend) {
 }
 
 #[rstest]
-#[case::vulkan(Backend::Vulkan)]
-#[case::wgpu(Backend::WebGpu)]
-fn test_cube_mips_recover_after_recording_failure_and_regenerate(#[case] backend: Backend) {
+#[case::vulkan_cube(Backend::Vulkan, false)]
+#[case::wgpu_cube(Backend::WebGpu, false)]
+#[case::vulkan_volume(Backend::Vulkan, true)]
+#[case::wgpu_volume(Backend::WebGpu, true)]
+fn test_mips_recover_after_recording_failure_and_regenerate(
+    #[case] backend: Backend,
+    #[case] volume: bool,
+) {
     let Some(ctx) = TestContext::new_with_validation(backend) else {
         return;
     };
     #[cfg(feature = "vulkan-backend")]
     redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
+    let usage = TextureUsage::COPY_SRC | TextureUsage::COPY_DST | TextureUsage::RENDER_ATTACHMENT;
+    let descriptor = if volume {
+        TextureDescriptor::new_3d(4, 4, 4, TextureFormat::Rgba8Unorm, usage)
+    } else {
+        TextureDescriptor::new_cube(4, TextureFormat::Rgba8Unorm, usage)
+    };
     let texture = ctx
         .device
-        .create_texture(
-            &TextureDescriptor::new_cube(
-                4,
-                TextureFormat::Rgba8Unorm,
-                TextureUsage::COPY_SRC | TextureUsage::COPY_DST | TextureUsage::RENDER_ATTACHMENT,
-            )
-            .with_mip_levels(3),
-        )
+        .create_texture(&descriptor.with_mip_levels(3))
         .unwrap();
+    let layers = if volume { 1 } else { 6 };
     // More rounds than frame slots exercise scratch retirement and reuse of
     // the format pipeline, as well as regeneration on an already-used image.
     for round in 0..5u8 {
         let expected = [32 + round * 16, 96, 192, 255];
         let mut uploads = Vec::new();
-        for face in 0..6 {
+        for face in 0..layers {
             uploads.push(
                 TransferOperation::upload_texture_level(
                     &ctx.device,
                     texture.clone(),
                     0,
                     face,
-                    &expected.repeat(16),
+                    &expected.repeat(if volume { 64 } else { 16 }),
                 )
                 .unwrap(),
             );
         }
-        let mut pass = TransferPass::new("base_faces".into());
+        let mut pass = TransferPass::new("mip_base".into());
         pass.set_transfer_config(TransferConfig::new().with_operations(uploads));
         let mut graph = RenderGraph::new();
         graph.add_transfer_pass(pass);
         ctx.execute_graph(graph);
         let mut failed = RenderGraph::new();
-        let mut generate = TransferPass::new("cube_before_error".into());
+        let mut generate = TransferPass::new("mips_before_error".into());
         generate.set_transfer_config(
             TransferConfig::new()
                 .with_operation(TransferOperation::generate_mipmaps(texture.clone())),
@@ -4468,7 +4602,7 @@ fn test_cube_mips_recover_after_recording_failure_and_regenerate(#[case] backend
             assert!(schedule.submit(failed).is_err());
             pipeline.end_frame(schedule);
         }
-        let mut pass = TransferPass::new("regenerate_cube".into());
+        let mut pass = TransferPass::new("regenerate_mips".into());
         pass.set_transfer_config(
             TransferConfig::new()
                 .with_operation(TransferOperation::generate_mipmaps(texture.clone())),
@@ -4477,8 +4611,8 @@ fn test_cube_mips_recover_after_recording_failure_and_regenerate(#[case] backend
         graph.add_transfer_pass(pass);
         ctx.execute_graph(graph);
         // Read in a separate graph to check the final whole-image layout.
-        let readback = ctx.create_readback_buffer(6 * 256);
-        let mut pass = TransferPass::new("read_cube".into());
+        let readback = ctx.create_readback_buffer(u64::from(layers) * 256);
+        let mut pass = TransferPass::new("read_mips".into());
         pass.set_transfer_config(TransferConfig::new().with_operation(
             TransferOperation::readback_texture(
                 texture.clone(),
@@ -4486,16 +4620,19 @@ fn test_cube_mips_recover_after_recording_failure_and_regenerate(#[case] backend
                 vec![BufferTextureCopyRegion::new(
                     BufferTextureLayout::new(0, Some(256), Some(1)),
                     TextureCopyLocation::mip(2),
-                    Extent3d::new_3d(1, 1, 6),
+                    Extent3d::new_3d(1, 1, layers),
                 )],
             ),
         ));
         let mut graph = RenderGraph::new();
         graph.add_transfer_pass(pass);
         ctx.execute_graph(graph);
-        let bytes = ctx.read_buffer(&readback, 6 * 256);
-        for face in 0..6 {
-            assert_eq!(&bytes[face * 256..face * 256 + 4], &expected);
+        let bytes = ctx.read_buffer(&readback, u64::from(layers) * 256);
+        for face in 0..layers {
+            assert_eq!(
+                &bytes[face as usize * 256..face as usize * 256 + 4],
+                &expected
+            );
         }
     }
     drop(texture);

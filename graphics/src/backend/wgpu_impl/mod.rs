@@ -75,7 +75,9 @@ pub struct WgpuBackend {
     /// it — the clean way to satisfy wgpu's bind-group/pipeline compatibility.
     // parking_lot: no poisoning.
     bind_group_layout_cache: parking_lot::Mutex<HashMap<BindGroupLayoutKey, wgpu::BindGroupLayout>>,
-    mip_pipelines: parking_lot::Mutex<HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>>,
+    mip_pipelines: parking_lot::Mutex<
+        HashMap<(wgpu::TextureFormat, wgpu::TextureViewDimension), wgpu::RenderPipeline>,
+    >,
 }
 
 impl std::fmt::Debug for WgpuBackend {

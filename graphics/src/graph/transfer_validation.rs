@@ -336,14 +336,15 @@ impl TransferOperation {
                 }
                 if !matches!(
                     target.dimension(),
-                    TextureDimension::D2
+                    TextureDimension::D3
+                        | TextureDimension::D2
                         | TextureDimension::D2Array
                         | TextureDimension::Cube
                         | TextureDimension::CubeArray
                 ) || target.sample_count() != 1
                 {
                     return Err(invalid(
-                        "mip generation requires a single-sampled 2D texture, array, or cubemap",
+                        "mip generation requires a single-sampled 2D texture, array, cubemap, or 3D volume",
                     ));
                 }
                 if target.dimension().is_cubemap() && target.width() != target.height() {
@@ -801,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn mip_generation_accepts_arrays_and_cubes_but_rejects_volumes_and_msaa() {
+    fn mip_generation_accepts_arrays_cubes_and_volumes_but_rejects_1d_and_msaa() {
         let d = device();
         let array = tex(
             &d,
@@ -820,7 +821,11 @@ mod tests {
             TransferOperation::generate_mipmaps(array).validate(&d),
             Err(GraphicsError::FeatureNotSupported(_))
         ));
-        for dimension in [TextureDimension::Cube, TextureDimension::CubeArray] {
+        for dimension in [
+            TextureDimension::Cube,
+            TextureDimension::CubeArray,
+            TextureDimension::D3,
+        ] {
             assert!(matches!(
                 TransferOperation::generate_mipmaps(tex(
                     &d,
@@ -830,7 +835,7 @@ mod tests {
                 Err(GraphicsError::FeatureNotSupported(_))
             ));
         }
-        for dimension in [TextureDimension::D3, TextureDimension::D1Array] {
+        for dimension in [TextureDimension::D1, TextureDimension::D1Array] {
             check_bad(
                 TransferOperation::generate_mipmaps(tex(
                     &d,
