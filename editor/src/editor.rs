@@ -1522,7 +1522,10 @@ impl AppHandler for Editor {
         true
     }
 
-    fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
+    fn on_draw(
+        &mut self,
+        mut ctx: DrawContext,
+    ) -> Result<FrameSchedule, redlilium_graphics::GraphicsError> {
         #[allow(unused_variables)]
         let window = ctx.window().clone();
         let custom_titlebar = ctx.custom_titlebar();
@@ -2170,7 +2173,7 @@ impl AppHandler for Editor {
                 .expect("RenderSchedule must hold the graph after the Render schedule");
             drop(schedule_res);
             for transfer in transfer_graphs {
-                ctx.submit(transfer);
+                ctx.submit(transfer)?;
             }
         }
 
@@ -2191,9 +2194,9 @@ impl AppHandler for Editor {
             let play_graph = ctx.acquire_graph();
             let (play_graph, play_transfers) = play.render(&self.runner, play_graph, w, h, format);
             for transfer in play_transfers {
-                ctx.submit(transfer);
+                ctx.submit(transfer)?;
             }
-            ctx.submit(play_graph);
+            ctx.submit(play_graph)?;
         }
 
         if render_active

@@ -183,7 +183,10 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         true
     }
 
-    fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
+    fn on_draw(
+        &mut self,
+        mut ctx: DrawContext,
+    ) -> Result<FrameSchedule, redlilium_graphics::GraphicsError> {
         let Some(state) = self.state.as_mut() else {
             let graph = ctx.acquire_graph();
             return ctx.render(graph);
@@ -209,7 +212,7 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             .expect("RenderSchedule must hold the graph after the Render schedule");
         drop(schedule_res);
         for transfer in transfer_graphs {
-            ctx.submit(transfer);
+            ctx.submit(transfer)?;
         }
 
         state.blit.flush_uploads(&mut graph);

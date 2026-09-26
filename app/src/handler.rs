@@ -33,10 +33,10 @@ use winit::keyboard::ModifiersState;
 ///         log::info!("Application initialized");
 ///     }
 ///
-///     fn on_draw(&mut self, ctx: DrawContext) -> FrameSchedule {
+///     fn on_draw(&mut self, ctx: DrawContext) -> Result<FrameSchedule, redlilium_graphics::GraphicsError> {
 ///         self.frame_count += 1;
 ///         // Render your frame here
-///         ctx.finish(&[])
+///         ctx.render(redlilium_graphics::RenderGraph::new())
 ///     }
 /// }
 /// ```
@@ -63,9 +63,12 @@ pub trait AppHandler {
     ///
     /// This is where you submit render graphs and draw commands.
     /// The returned `FrameSchedule` is used by the App to complete the frame.
-    /// You must call `ctx.finish()` at the end of your rendering and return
+    /// Call `ctx.render(graph)` at the end of rendering and return
     /// the resulting schedule.
-    fn on_draw(&mut self, ctx: DrawContext) -> FrameSchedule;
+    fn on_draw(
+        &mut self,
+        ctx: DrawContext,
+    ) -> Result<FrameSchedule, redlilium_graphics::GraphicsError>;
 
     /// Called when a key is pressed or released.
     fn on_key(&mut self, _ctx: &mut AppContext, _event: &KeyEvent) {}

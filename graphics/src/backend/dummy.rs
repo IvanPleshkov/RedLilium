@@ -32,6 +32,8 @@ impl DummyBackend {
     /// like a typical desktop device in tests.
     pub fn capabilities(&self) -> crate::device::DeviceCapabilities {
         crate::device::DeviceCapabilities {
+            indirect_draw: true,
+            indirect_first_instance: true,
             tier: crate::device::DeviceTier::Baseline,
             max_texture_dimension: 16384,
             max_buffer_size: 1 << 30, // 1 GB

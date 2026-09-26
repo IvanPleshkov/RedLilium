@@ -95,7 +95,7 @@ fn deferred_camera_no_environment_fallback() {
         .resource_mut::<RenderSchedule>()
         .take()
         .expect("graph back from the Render schedule");
-    schedule.submit(graph);
+    schedule.submit(graph).expect("graph submission failed");
 
     // The deferred path must have derived the G-buffer for the camera.
     {
@@ -141,12 +141,16 @@ fn deferred_camera_no_environment_fallback() {
     );
     let mut readback_graph = schedule.acquire_graph();
     readback_graph.add_transfer_pass(transfer);
-    schedule.submit(readback_graph);
+    schedule
+        .submit(readback_graph)
+        .expect("graph submission failed");
     pipeline.end_frame(schedule);
     pipeline.wait_idle().expect("wait_idle");
     // Recycle the slot so the post-fence readback processing fills `pixels`.
     let mut schedule = pipeline.begin_frame().expect("drain frame");
-    schedule.render(redlilium_graphics::RenderGraph::new());
+    schedule
+        .render(redlilium_graphics::RenderGraph::new())
+        .expect("graph submission failed");
     pipeline.end_frame(schedule);
     pipeline.wait_idle().expect("wait_idle 2");
 

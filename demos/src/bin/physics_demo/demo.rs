@@ -382,7 +382,10 @@ impl AppHandler for PhysicsDemoApp {
         true
     }
 
-    fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
+    fn on_draw(
+        &mut self,
+        mut ctx: DrawContext,
+    ) -> Result<FrameSchedule, redlilium_graphics::GraphicsError> {
         profile_scope!("on_draw");
 
         let mut graph = ctx.acquire_graph();

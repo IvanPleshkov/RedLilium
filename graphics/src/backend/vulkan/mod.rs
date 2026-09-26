@@ -90,6 +90,7 @@ struct VulkanEncoderScratch {
     /// allocation. (Binding groups are now created eagerly, so there is no
     /// per-draw allocation/write scratch.)
     descriptor_sets: Vec<vk::DescriptorSet>,
+    dynamic_offsets: Vec<u32>,
 }
 
 /// Whether two binding layouts are descriptor-set-layout compatible: identical
@@ -263,6 +264,7 @@ pub struct VulkanBackend {
     pipeline_manager: pipeline::PipelineManager,
     /// Scratch buffers for allocation reuse during pass encoding.
     encoder_scratch: Mutex<VulkanEncoderScratch>,
+    submission_lock: Mutex<()>,
     /// Pooled staging memory for frame-graph uploads (`WriteBuffer` transfer
     /// ops). Chunks written during a frame stay owned by its slot and return
     /// to the pool in [`advance_frame`](Self::advance_frame) once the slot's
@@ -511,6 +513,42 @@ fn region_is_whole_base(
         && loc.origin.y == 0
         && loc.origin.z == 0
         && extent == tex.size()
+}
+
+/// Roll back provisional resource states whenever recording/submission fails.
+/// The submission lock serializes the complete record + commit interval.
+struct TrackerTransaction<'a> {
+    backend: &'a VulkanBackend,
+    surface_transitioned: bool,
+    committed: bool,
+}
+
+impl<'a> TrackerTransaction<'a> {
+    fn new(backend: &'a VulkanBackend) -> Self {
+        backend.layout_tracker.lock().begin_submit();
+        backend.buffer_tracker.lock().begin_submit();
+        Self {
+            backend,
+            surface_transitioned: backend.swapchain_sync.lock().surface_transitioned,
+            committed: false,
+        }
+    }
+}
+
+impl Drop for TrackerTransaction<'_> {
+    fn drop(&mut self) {
+        self.backend
+            .layout_tracker
+            .lock()
+            .finish_submit(self.committed);
+        self.backend
+            .buffer_tracker
+            .lock()
+            .finish_submit(self.committed);
+        if !self.committed {
+            self.backend.swapchain_sync.lock().surface_transitioned = self.surface_transitioned;
+        }
+    }
 }
 
 impl VulkanBackend {
@@ -1001,6 +1039,7 @@ impl VulkanBackend {
             pipeline_manager,
             depth24_stencil8_format,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
+            submission_lock: Mutex::new(()),
             staging_belt: Mutex::new(staging_belt),
             queue_timeline,
             timeline_next: AtomicU64::new(1),
@@ -2933,6 +2972,8 @@ impl VulkanBackend {
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
         profile_scope!("vulkan_execute_graph");
+        let _submission = self.submission_lock.lock();
+        let mut transaction = TrackerTransaction::new(self);
 
         // Route the graph. The swapchain handshake below is reachable only on
         // the graphics route: a swapchain write needs a graphics pass, which
@@ -2976,13 +3017,8 @@ impl VulkanBackend {
             GraphicsError::Internal(format!("Failed to begin command buffer: {:?}", e))
         })?;
 
-        // Allocate this submit's timeline value up front: the trackers record
-        // it as each resource's last-access value while barriers are
-        // generated. Values allocated for failed submits leave a gap in the
-        // signal sequence, which is fine — a later submit's higher signal
-        // satisfies any wait on the gap value. (A gap value recorded in the
-        // trackers makes a dependent submit wait for work that never ran —
-        // over-synchronization, never corruption.)
+        // Provisional accesses are journaled until queue submission succeeds.
+        // Failed submits may leave timeline gaps, but no tracker references them.
         let timeline_value = timeline_next.fetch_add(1, Ordering::Relaxed);
 
         // Get all passes from the graph
@@ -3240,6 +3276,8 @@ impl VulkanBackend {
                 });
             }
         }
+
+        transaction.committed = true;
 
         // Submit enqueued: this fence is now satisfied exactly when the
         // routed queue's timeline reaches this submit's value.
@@ -3525,52 +3563,33 @@ impl VulkanBackend {
             return Ok(());
         };
 
-        // Build color attachments for dynamic rendering
+        render_targets.validate()?;
         let color_attachments: Vec<vk::RenderingAttachmentInfo> = render_targets
             .color_attachments
             .iter()
-            .filter_map(|attachment| {
+            .map(|attachment| {
                 let (load_op, clear_value) =
                     conversion::convert_load_op_color(&attachment.load_op());
-                let store_op = conversion::convert_store_op(&attachment.store_op());
-
-                match &attachment.target {
-                    RenderTarget::Texture { texture, .. } => {
-                        let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() else {
-                            return None;
-                        };
-
-                        Some(
-                            vk::RenderingAttachmentInfo::default()
-                                .image_view(*view)
-                                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                                .load_op(load_op)
-                                .store_op(store_op)
-                                .clear_value(clear_value),
-                        )
-                    }
-                    RenderTarget::Surface { vulkan_view, .. } => {
-                        // Use the Vulkan swapchain image view if available
-                        if let Some(surface_view) = vulkan_view {
-                            Some(
-                                vk::RenderingAttachmentInfo::default()
-                                    .image_view(surface_view.view())
-                                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                                    .load_op(load_op)
-                                    .store_op(store_op)
-                                    .clear_value(clear_value),
-                            )
-                        } else {
-                            log::warn!(
-                                "Pass '{}' has surface attachment but no Vulkan view available",
-                                pass.name()
-                            );
-                            None
-                        }
-                    }
+                let mut info = vk::RenderingAttachmentInfo::default()
+                    .image_view(attachment.target.vulkan_view()?)
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(load_op)
+                    .store_op(conversion::convert_store_op(&attachment.store_op()))
+                    .clear_value(clear_value);
+                if let Some(resolve) = &attachment.resolve_target {
+                    info = info
+                        .resolve_mode(vk::ResolveModeFlags::AVERAGE)
+                        .resolve_image_view(resolve.vulkan_view()?)
+                        .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
                 }
+                Ok(info)
             })
-            .collect();
+            .collect::<Result<_, GraphicsError>>()?;
+        let depth_view = render_targets
+            .depth_stencil_attachment
+            .as_ref()
+            .map(|attachment| attachment.target.vulkan_view())
+            .transpose()?;
 
         // Build depth attachment if present
         let depth_attachment =
@@ -3596,33 +3615,14 @@ impl VulkanBackend {
                     // co-use sampling descriptor); otherwise it is a write target.
                     let ds_layout = ds_attachment_layout(attachment);
 
-                    match &attachment.target {
-                        RenderTarget::Texture { texture, .. } => {
-                            let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() else {
-                                return None;
-                            };
-
-                            Some(
-                                vk::RenderingAttachmentInfo::default()
-                                    .image_view(*view)
-                                    .image_layout(ds_layout)
-                                    .load_op(load_op)
-                                    .store_op(store_op)
-                                    .clear_value(clear_value),
-                            )
-                        }
-                        RenderTarget::Surface { vulkan_view, .. } => {
-                            // Depth attachments are typically not surfaces, but handle for completeness
-                            vulkan_view.as_ref().map(|surface_view| {
-                                vk::RenderingAttachmentInfo::default()
-                                    .image_view(surface_view.view())
-                                    .image_layout(ds_layout)
-                                    .load_op(load_op)
-                                    .store_op(store_op)
-                                    .clear_value(clear_value)
-                            })
-                        }
-                    }
+                    Some(
+                        vk::RenderingAttachmentInfo::default()
+                            .image_view(depth_view.unwrap())
+                            .image_layout(ds_layout)
+                            .load_op(load_op)
+                            .store_op(store_op)
+                            .clear_value(clear_value),
+                    )
                 });
 
         // Build stencil attachment if format has a stencil component
@@ -3644,32 +3644,14 @@ impl VulkanBackend {
                 // Same image as the depth attachment, so it must carry the same layout.
                 let ds_layout = ds_attachment_layout(attachment);
 
-                match &attachment.target {
-                    RenderTarget::Texture { texture, .. } => {
-                        let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() else {
-                            return None;
-                        };
-
-                        Some(
-                            vk::RenderingAttachmentInfo::default()
-                                .image_view(*view)
-                                .image_layout(ds_layout)
-                                .load_op(load_op)
-                                .store_op(store_op)
-                                .clear_value(clear_value),
-                        )
-                    }
-                    RenderTarget::Surface { vulkan_view, .. } => {
-                        vulkan_view.as_ref().map(|surface_view| {
-                            vk::RenderingAttachmentInfo::default()
-                                .image_view(surface_view.view())
-                                .image_layout(ds_layout)
-                                .load_op(load_op)
-                                .store_op(store_op)
-                                .clear_value(clear_value)
-                        })
-                    }
-                }
+                Some(
+                    vk::RenderingAttachmentInfo::default()
+                        .image_view(depth_view.unwrap())
+                        .image_layout(ds_layout)
+                        .load_op(load_op)
+                        .store_op(store_op)
+                        .clear_value(clear_value),
+                )
             });
 
         // Determine render area from the attachments (first color, else the
@@ -3705,11 +3687,15 @@ impl VulkanBackend {
         // `TOP_OF_PIPE` source would NOT be ordered after the semaphore wait
         // (the canonical WSI hazard: the transition could execute while the
         // presentation engine still reads the image).
-        for attachment in &render_targets.color_attachments {
+        for target in render_targets
+            .color_attachments
+            .iter()
+            .flat_map(|a| std::iter::once(&a.target).chain(a.resolve_target.iter()))
+        {
             if let RenderTarget::Surface {
                 vulkan_view: Some(surface_view),
                 ..
-            } = &attachment.target
+            } = target
             {
                 let first_write = {
                     let mut sync = self.swapchain_sync.lock();
@@ -3828,9 +3814,19 @@ impl VulkanBackend {
             self.device.cmd_set_scissor(cmd, 0, &[default_scissor]);
         }
 
-        // Encode draw commands
-        for draw_cmd in pass.draw_commands() {
-            self.encode_draw_command(cmd, draw_cmd, default_scissor, render_area.extent)?;
+        // One scratch lock for the raster commands in this pass. Capacity is
+        // retained across passes/frames; no allocation or mutex per draw.
+        {
+            let mut scratch = self.encoder_scratch.lock();
+            for draw_cmd in pass.raster_draws() {
+                self.encode_draw_command(
+                    cmd,
+                    &draw_cmd,
+                    default_scissor,
+                    render_area.extent,
+                    &mut scratch,
+                )?;
+            }
         }
 
         // Encode mesh-tasks draws (#111)
@@ -3859,13 +3855,43 @@ impl VulkanBackend {
         Ok(())
     }
 
+    fn encode_indirect_draw(
+        &self,
+        cmd: vk::CommandBuffer,
+        draw: &crate::IndirectDrawCommand,
+    ) -> Result<(), GraphicsError> {
+        let GpuBuffer::Vulkan { buffer, .. } = draw.indirect_buffer.gpu_handle() else {
+            return Err(GraphicsError::InvalidParameter(
+                "indirect buffer is not Vulkan".into(),
+            ));
+        };
+        // Portable fallback: no multiDrawIndirect feature or device draw-count
+        // limit is required. Each entry retains the caller's chosen stride.
+        for i in 0..draw.draw_count {
+            let offset = draw.indirect_offset + u64::from(i) * u64::from(draw.stride);
+            unsafe {
+                if draw.indexed {
+                    self.device
+                        .cmd_draw_indexed_indirect(cmd, *buffer, offset, 1, 0);
+                } else {
+                    self.device.cmd_draw_indirect(cmd, *buffer, offset, 1, 0);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn encode_draw_command(
         &self,
         cmd: vk::CommandBuffer,
-        draw_cmd: &crate::graph::DrawCommand,
+        draw_cmd: &crate::graph::RasterDraw<'_>,
         pass_scissor: vk::Rect2D,
         target_extent: vk::Extent2D,
+        scratch: &mut VulkanEncoderScratch,
     ) -> Result<(), GraphicsError> {
+        if let Some(indirect) = draw_cmd.indirect {
+            indirect.validate()?;
+        }
         let material_arc = draw_cmd.material.material();
         let mesh = &draw_cmd.mesh;
 
@@ -3885,9 +3911,9 @@ impl VulkanBackend {
         let pipeline_layout = *pipeline_layout;
 
         // Collect the cached descriptor sets — reuses scratch capacity.
-        let scratch = &mut *self.encoder_scratch.lock();
         let VulkanEncoderScratch {
             descriptor_sets: scratch_ds_sets,
+            dynamic_offsets,
             ..
         } = scratch;
 
@@ -3942,8 +3968,8 @@ impl VulkanBackend {
         // Bind descriptor sets. Dynamic offsets are flattened across sets in
         // group order (matching `scratch_ds_sets`), one per dynamic binding.
         if !scratch_ds_sets.is_empty() {
-            let dynamic_offsets: Vec<u32> =
-                draw_cmd.dynamic_offsets.iter().flatten().copied().collect();
+            dynamic_offsets.clear();
+            dynamic_offsets.extend(draw_cmd.dynamic_offsets.iter().flatten().copied());
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
@@ -3951,7 +3977,7 @@ impl VulkanBackend {
                     pipeline_layout,
                     0,
                     scratch_ds_sets,
-                    &dynamic_offsets,
+                    dynamic_offsets,
                 );
             }
         }
@@ -3995,7 +4021,10 @@ impl VulkanBackend {
         }
 
         // Issue draw call
-        if mesh.is_indexed() {
+        if draw_cmd
+            .indirect
+            .map_or(mesh.is_indexed(), |draw| draw.indexed)
+        {
             // Bind index buffer
             if let Some(index_buffer) = mesh.index_buffer()
                 && let GpuBuffer::Vulkan {
@@ -4019,16 +4048,22 @@ impl VulkanBackend {
                 }
             }
 
-            unsafe {
-                self.device.cmd_draw_indexed(
-                    cmd,
-                    mesh.index_count(),
-                    draw_cmd.instance_count,
-                    0,
-                    0,
-                    draw_cmd.first_instance,
-                );
+            if let Some(draw) = draw_cmd.indirect {
+                self.encode_indirect_draw(cmd, draw)?;
+            } else {
+                unsafe {
+                    self.device.cmd_draw_indexed(
+                        cmd,
+                        mesh.index_count(),
+                        draw_cmd.instance_count,
+                        0,
+                        0,
+                        draw_cmd.first_instance,
+                    );
+                }
             }
+        } else if let Some(draw) = draw_cmd.indirect {
+            self.encode_indirect_draw(cmd, draw)?;
         } else {
             unsafe {
                 self.device.cmd_draw(

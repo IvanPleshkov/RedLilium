@@ -6,6 +6,28 @@ use crate::backend::GpuTexture;
 use crate::device::GraphicsDevice;
 use crate::types::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat};
 
+/// Attachment views select exactly one mip and array layer. Cached by the
+/// owning texture, so their lifetime covers every submitted graph using it.
+pub(crate) enum AttachmentView {
+    Dummy,
+    #[cfg(feature = "wgpu-backend")]
+    Wgpu(wgpu::TextureView),
+    #[cfg(feature = "vulkan-backend")]
+    Vulkan {
+        device: ash::Device,
+        view: ash::vk::ImageView,
+    },
+}
+
+#[cfg(feature = "vulkan-backend")]
+impl Drop for AttachmentView {
+    fn drop(&mut self) {
+        if let Self::Vulkan { device, view } = self {
+            unsafe { device.destroy_image_view(*view, None) };
+        }
+    }
+}
+
 /// A GPU texture resource.
 ///
 /// Textures are created by [`GraphicsDevice::create_texture`] and are reference-counted.
@@ -23,6 +45,8 @@ use crate::types::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat}
 /// ```
 pub struct Texture {
     descriptor: TextureDescriptor,
+    attachment_views:
+        parking_lot::Mutex<std::collections::HashMap<(u32, u32), Arc<AttachmentView>>>,
     gpu_handle: GpuTexture,
     /// Declared after `gpu_handle` deliberately: fields drop in declaration
     /// order, and this keep-alive must outlive the handle's `Drop`, which
@@ -40,8 +64,104 @@ impl Texture {
         Self {
             device,
             descriptor,
+            attachment_views: Default::default(),
             gpu_handle,
         }
+    }
+
+    pub(crate) fn validate_attachment(
+        &self,
+        mip: u32,
+        layer: u32,
+    ) -> Result<(), crate::GraphicsError> {
+        use crate::{GraphicsError, TextureUsage};
+        let layers = match self.dimension() {
+            TextureDimension::D2 => 1,
+            TextureDimension::D2Array => self.depth(),
+            TextureDimension::Cube => 6,
+            TextureDimension::CubeArray => self.depth() * 6,
+            _ => {
+                return Err(GraphicsError::FeatureNotSupported(
+                    "render attachments require a 2D texture or array/cube face".into(),
+                ));
+            }
+        };
+        if mip >= self.mip_level_count() || layer >= layers {
+            return Err(GraphicsError::InvalidParameter(
+                "attachment mip/layer is out of bounds".into(),
+            ));
+        }
+        if !self.usage().contains(TextureUsage::RENDER_ATTACHMENT) {
+            return Err(GraphicsError::InvalidParameter(
+                "texture lacks RENDER_ATTACHMENT usage".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn attachment_view(
+        &self,
+        mip: u32,
+        layer: u32,
+    ) -> Result<Arc<AttachmentView>, crate::GraphicsError> {
+        self.validate_attachment(mip, layer)?;
+        let mut views = self.attachment_views.lock();
+        if let Some(view) = views.get(&(mip, layer)) {
+            return Ok(Arc::clone(view));
+        }
+        let view = match &self.gpu_handle {
+            GpuTexture::Dummy => AttachmentView::Dummy,
+            #[cfg(feature = "wgpu-backend")]
+            GpuTexture::Wgpu { texture, .. } => {
+                AttachmentView::Wgpu(texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_mip_level: mip,
+                    mip_level_count: Some(1),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                }))
+            }
+            #[cfg(feature = "vulkan-backend")]
+            GpuTexture::Vulkan {
+                device,
+                image,
+                format,
+                ..
+            } => {
+                use ash::vk;
+                let aspect = if self.format().is_depth_stencil() {
+                    if self.format().has_stencil() {
+                        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+                    } else {
+                        vk::ImageAspectFlags::DEPTH
+                    }
+                } else {
+                    vk::ImageAspectFlags::COLOR
+                };
+                let info = vk::ImageViewCreateInfo::default()
+                    .image(*image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(*format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: aspect,
+                        base_mip_level: mip,
+                        level_count: 1,
+                        base_array_layer: layer,
+                        layer_count: 1,
+                    });
+                let view = unsafe { device.create_image_view(&info, None) }.map_err(|e| {
+                    crate::GraphicsError::ResourceCreationFailed(format!("attachment view: {e:?}"))
+                })?;
+                AttachmentView::Vulkan {
+                    device: device.clone(),
+                    view,
+                }
+            }
+        };
+        let view = Arc::new(view);
+        views.insert((mip, layer), Arc::clone(&view));
+        Ok(view)
     }
 
     /// Get the GPU handle for this texture.

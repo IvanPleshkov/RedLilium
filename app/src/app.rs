@@ -38,9 +38,9 @@ use crate::pacing::FramePacer;
 /// struct MyApp;
 ///
 /// impl AppHandler for MyApp {
-///     fn on_draw(&mut self, ctx: DrawContext) -> redlilium_graphics::FrameSchedule {
+///     fn on_draw(&mut self, ctx: DrawContext) -> Result<FrameSchedule, redlilium_graphics::GraphicsError> {
 ///         // Render frame
-///         ctx.finish(&[])
+///         ctx.render(redlilium_graphics::RenderGraph::new())
 ///     }
 /// }
 ///
@@ -672,7 +672,16 @@ where
 
         // Call draw - handler returns the schedule after finishing
         let phase_start = Instant::now();
-        let schedule = self.handler.on_draw(draw_ctx);
+        let schedule = match self.handler.on_draw(draw_ctx) {
+            Ok(schedule) => schedule,
+            Err(error) => {
+                log::error!("frame submission failed: {error}");
+                if error == redlilium_graphics::GraphicsError::DeviceLost {
+                    self.running = false;
+                }
+                return;
+            }
+        };
 
         // End frame with the returned schedule
         if let Some(ctx) = &mut self.context {

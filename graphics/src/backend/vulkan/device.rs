@@ -17,6 +17,7 @@ use crate::error::GraphicsError;
 /// (ADR-027 capabilities, not tier requirements).
 #[derive(Debug, Clone, Copy)]
 pub struct OptionalFeatures {
+    pub indirect_first_instance: bool,
     /// Anisotropic filtering; without it samplers are created isotropic.
     pub sampler_anisotropy: bool,
     /// BC1–BC7 block-compressed textures (`textureCompressionBC`, #119).
@@ -351,6 +352,7 @@ pub fn select_physical_device(
                     physical_device: device,
                     properties,
                     optional: OptionalFeatures {
+                        indirect_first_instance: features.draw_indirect_first_instance == vk::TRUE,
                         sampler_anisotropy: features.sampler_anisotropy == vk::TRUE,
                         texture_compression_bc: features.texture_compression_bc == vk::TRUE,
                         texture_compression_etc2: features.texture_compression_etc2 == vk::TRUE,
@@ -754,6 +756,7 @@ pub fn create_logical_device(
 
     // Optional features, enabled only where supported.
     let features = vk::PhysicalDeviceFeatures::default()
+        .draw_indirect_first_instance(selected.optional.indirect_first_instance)
         .sampler_anisotropy(selected.optional.sampler_anisotropy)
         .fill_mode_non_solid(selected.optional.fill_mode_non_solid)
         .texture_compression_bc(selected.optional.texture_compression_bc)
@@ -901,6 +904,8 @@ pub fn device_capabilities(
     };
 
     crate::device::DeviceCapabilities {
+        indirect_draw: true,
+        indirect_first_instance: selected.optional.indirect_first_instance,
         // Selection passing the baseline filter IS the tier detection today;
         // higher rungs (bindless, ray tracing) will extend this when their
         // render paths exist (ADR-027).

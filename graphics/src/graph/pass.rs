@@ -504,6 +504,11 @@ impl std::fmt::Debug for MeshTasksIndirectDrawCommand {
 /// - For non-indexed draws: [`DrawIndirectArgs`](crate::types::DrawIndirectArgs)
 /// - For indexed draws: [`DrawIndexedIndirectArgs`](crate::types::DrawIndexedIndirectArgs)
 ///
+/// The arguments' `first_instance` must be zero unless
+/// [`DeviceCapabilities::indirect_first_instance`](crate::DeviceCapabilities::indirect_first_instance)
+/// is true. Counts and indices written by shaders must stay within the mesh's
+/// bounds; the CPU cannot validate GPU-generated argument values.
+///
 /// # Multi-Draw Support
 ///
 /// When `draw_count > 1`, multiple draw calls are issued from consecutive
@@ -547,7 +552,66 @@ pub struct IndirectDrawCommand {
     pub indexed: bool,
 }
 
+/// Borrowed raster command used by both encoders. Binding code is shared
+/// between direct and indirect draws; no temporary Arc clones are needed.
+pub(crate) struct RasterDraw<'a> {
+    pub mesh: &'a Arc<Mesh>,
+    pub material: &'a Arc<MaterialInstance>,
+    pub dynamic_offsets: &'a [Vec<u32>],
+    pub scissor_rect: Option<ScissorRect>,
+    pub instance_count: u32,
+    pub first_instance: u32,
+    pub indirect: Option<&'a IndirectDrawCommand>,
+}
+
 impl IndirectDrawCommand {
+    pub(crate) fn validate(&self) -> Result<(), crate::GraphicsError> {
+        let invalid = |message: &str| crate::GraphicsError::InvalidParameter(message.into());
+        if !self
+            .material
+            .material()
+            .device()
+            .capabilities()
+            .indirect_draw
+        {
+            return Err(crate::GraphicsError::FeatureNotSupported(
+                "indirect drawing is unavailable".into(),
+            ));
+        }
+        if !self
+            .indirect_buffer
+            .descriptor()
+            .usage
+            .contains(crate::BufferUsage::INDIRECT)
+        {
+            return Err(invalid("indirect argument buffer lacks INDIRECT usage"));
+        }
+        if self.indexed && !self.mesh.is_indexed() {
+            return Err(invalid("indexed indirect draw requires an index buffer"));
+        }
+        let args_size = if self.indexed { 20u64 } else { 16u64 };
+        if self.indirect_offset % 4 != 0
+            || (self.draw_count > 1 && (u64::from(self.stride) < args_size || self.stride % 4 != 0))
+        {
+            return Err(invalid(
+                "indirect offset/stride is not aligned or stride is too small",
+            ));
+        }
+        let bytes = if self.draw_count == 0 {
+            0
+        } else {
+            u64::from(self.draw_count - 1) * u64::from(self.stride) + args_size
+        };
+        if self
+            .indirect_offset
+            .checked_add(bytes)
+            .is_none_or(|end| end > self.indirect_buffer.size())
+        {
+            return Err(invalid("indirect argument range exceeds the buffer"));
+        }
+        Ok(())
+    }
+
     /// Create a new indirect draw command.
     ///
     /// Creates a single non-indexed indirect draw.
@@ -801,6 +865,29 @@ impl GraphicsPass {
     /// Add a pre-built draw command.
     pub fn add_draw_command(&mut self, command: DrawCommand) {
         self.draw_commands.push(command);
+    }
+
+    pub(crate) fn raster_draws(&self) -> impl Iterator<Item = RasterDraw<'_>> {
+        self.draw_commands
+            .iter()
+            .map(|draw| RasterDraw {
+                mesh: &draw.mesh,
+                material: &draw.material,
+                dynamic_offsets: &draw.dynamic_offsets,
+                scissor_rect: draw.scissor_rect,
+                instance_count: draw.instance_count,
+                first_instance: draw.first_instance,
+                indirect: None,
+            })
+            .chain(self.indirect_draw_commands.iter().map(|draw| RasterDraw {
+                mesh: &draw.mesh,
+                material: &draw.material,
+                dynamic_offsets: &[],
+                scissor_rect: None,
+                instance_count: 0,
+                first_instance: 0,
+                indirect: Some(draw),
+            }))
     }
 
     /// Get all draw commands.
@@ -1060,8 +1147,14 @@ impl GraphicsPass {
                     }
                 }
                 // Resolve targets are also written to
-                if let Some(RenderTarget::Texture { texture, .. }) = &color.resolve_target {
-                    usage.add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                match &color.resolve_target {
+                    Some(RenderTarget::Texture { texture, .. }) => {
+                        usage.add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite)
+                    }
+                    Some(RenderTarget::Surface { .. }) => {
+                        usage.set_surface_access(SurfaceAccess::Write)
+                    }
+                    None => {}
                 }
             }
 
@@ -1161,6 +1254,9 @@ impl GraphicsPass {
 /// pass with N draws would declare the same buffers N times (N tracker
 /// lookups per frame in the Vulkan backend).
 struct BufferDeclSet {
+    textures: HashSet<(usize, TextureAccessMode)>,
+    groups: HashSet<(usize, usize)>,
+    heaps: HashSet<usize>,
     seen: HashSet<(*const Buffer, BufferAccessMode)>,
 }
 
@@ -1168,6 +1264,23 @@ impl BufferDeclSet {
     fn new() -> Self {
         Self {
             seen: HashSet::new(),
+            textures: HashSet::new(),
+            groups: HashSet::new(),
+            heaps: HashSet::new(),
+        }
+    }
+
+    fn add_texture(
+        &mut self,
+        usage: &mut PassResourceUsage,
+        texture: &Arc<crate::Texture>,
+        access: TextureAccessMode,
+    ) {
+        if self
+            .textures
+            .insert((Arc::as_ptr(texture) as usize, access))
+        {
+            usage.add_texture(Arc::clone(texture), access);
         }
     }
 
@@ -1201,6 +1314,12 @@ fn extract_material_resources(
     let binding_layouts = material.material().binding_layouts();
     for (group_index, group) in material.binding_groups().iter().enumerate() {
         let layout = binding_layouts.get(group_index);
+        if !seen.groups.insert((
+            Arc::as_ptr(group) as usize,
+            layout.map_or(0, |l| Arc::as_ptr(l) as usize),
+        )) {
+            continue;
+        }
         for entry in group.entries() {
             // A depth texture co-used as a read-only depth attachment declares
             // the depth-read-only layout so its transition matches the
@@ -1213,11 +1332,11 @@ fn extract_material_resources(
             };
             let buffer = match &entry.resource {
                 BoundResource::Texture(tex) => {
-                    usage.add_texture(Arc::clone(tex), sampled_access);
+                    seen.add_texture(usage, tex, sampled_access);
                     continue;
                 }
                 BoundResource::CombinedTextureSampler { texture, .. } => {
-                    usage.add_texture(Arc::clone(texture), sampled_access);
+                    seen.add_texture(usage, texture, sampled_access);
                     continue;
                 }
                 BoundResource::Buffer(buffer) => buffer,
@@ -1247,9 +1366,11 @@ fn extract_material_resources(
                 // uploaded texture moves TransferDst → ShaderReadOnly before
                 // the first bindless draw).
                 BoundResource::BindlessHeap(slots) => {
-                    slots.for_each_live_texture(|texture| {
-                        usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
-                    });
+                    if seen.heaps.insert(Arc::as_ptr(slots) as usize) {
+                        slots.for_each_live_texture(|texture| {
+                            seen.add_texture(usage, texture, TextureAccessMode::ShaderRead);
+                        });
+                    }
                     continue;
                 }
                 _ => continue,
@@ -1692,5 +1813,64 @@ impl AccelerationStructureBuildPass {
         }
 
         usage
+    }
+}
+
+#[cfg(test)]
+mod resource_inference_tests {
+    use super::*;
+    use crate::{
+        BindingGroupDescriptor, BindingLayout, MaterialDescriptor, TextureDescriptor,
+        TextureFormat, TextureUsage,
+    };
+
+    #[test]
+    fn repeated_draws_and_distinct_groups_declare_each_texture_once() {
+        let instance = crate::GraphicsInstance::with_parameters(
+            crate::InstanceParameters::new().with_backend(crate::BackendType::Dummy),
+        )
+        .unwrap();
+        let device = instance.create_device().unwrap();
+        let texture = device
+            .create_texture(&TextureDescriptor::new_2d(
+                8,
+                8,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING,
+            ))
+            .unwrap();
+        let layout = Arc::new(BindingLayout::new().with_texture(0));
+        let vertex_layout = Arc::new(
+            crate::VertexLayout::new()
+                .with_buffer(crate::VertexBufferLayout::new(12))
+                .with_attribute(crate::VertexAttribute::position(0)),
+        );
+        let material = Arc::new(crate::Material::new(
+            device.clone(),
+            MaterialDescriptor::new()
+                .with_binding_layout(layout.clone())
+                .with_vertex_layout(vertex_layout.clone()),
+            crate::backend::GpuPipeline::Dummy,
+        ));
+        let mesh = device
+            .create_mesh(&crate::MeshDescriptor::new(vertex_layout).with_vertex_count(1))
+            .unwrap();
+        let mut pass = GraphicsPass::new("shared textures".into());
+        for _ in 0..2 {
+            let group = device
+                .create_binding_group(
+                    layout.clone(),
+                    BindingGroupDescriptor::new().with_texture(0, texture.clone()),
+                )
+                .unwrap();
+            let material =
+                Arc::new(MaterialInstance::new(material.clone()).with_binding_group(group));
+            for _ in 0..1000 {
+                pass.add_draw(mesh.clone(), material.clone());
+            }
+        }
+        let usages = pass.infer_resource_usage();
+        assert_eq!(usages.texture_usages.len(), 1);
+        assert!(Arc::ptr_eq(&usages.texture_usages[0].texture, &texture));
     }
 }

@@ -384,7 +384,10 @@ impl AppHandler for BindlessDemo {
         true
     }
 
-    fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
+    fn on_draw(
+        &mut self,
+        mut ctx: DrawContext,
+    ) -> Result<FrameSchedule, redlilium_graphics::GraphicsError> {
         let mut graph = ctx.acquire_graph();
 
         if !self.supported {

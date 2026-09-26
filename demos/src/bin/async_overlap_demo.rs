@@ -333,7 +333,9 @@ impl App {
         ));
         copy_pass.set_transfer_config(config);
         async_graph.add_transfer_pass(copy_pass);
-        schedule.submit(async_graph);
+        schedule
+            .submit(async_graph)
+            .expect("graph submission failed");
 
         // Main render graph: draw a fullscreen quad into both offscreen
         // compression-inspection targets (profilers only list targets with
@@ -376,7 +378,9 @@ impl App {
             ),
         );
         render_graph.add_graphics_pass(pass);
-        schedule.submit(render_graph);
+        schedule
+            .submit(render_graph)
+            .expect("graph submission failed");
 
         pipeline.end_frame(schedule);
 

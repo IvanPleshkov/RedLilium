@@ -494,7 +494,14 @@ fn tick(
         .expect("RenderSchedule must hold the graph after the Render schedule");
     drop(schedule_res);
     for transfer in transfer_graphs {
-        schedule.submit(transfer);
+        if let Err(error) = schedule.submit(transfer) {
+            log::error!("headless frame submission failed: {error}");
+            ew.window_input.write().begin_frame();
+            return TickOutcome {
+                shutdown,
+                rendered: false,
+            };
+        }
     }
 
     // The play world renders into its own graph, submitted BEFORE the main
@@ -506,9 +513,23 @@ fn tick(
         let (play_graph, play_transfers) =
             play.render(runner, play_graph, width, height, COLOR_FORMAT);
         for transfer in play_transfers {
-            schedule.submit(transfer);
+            if let Err(error) = schedule.submit(transfer) {
+                log::error!("headless frame submission failed: {error}");
+                ew.window_input.write().begin_frame();
+                return TickOutcome {
+                    shutdown,
+                    rendered: false,
+                };
+            }
         }
-        schedule.submit(play_graph);
+        if let Err(error) = schedule.submit(play_graph) {
+            log::error!("headless frame submission failed: {error}");
+            ew.window_input.write().begin_frame();
+            return TickOutcome {
+                shutdown,
+                rendered: false,
+            };
+        }
     }
 
     // Entity-index pass + readback while a remote pick is in flight, plus the
@@ -578,7 +599,16 @@ fn tick(
     let source = play.as_deref().and_then(|p| p.scene_color());
     remote_commands::inject_screenshot_pass(rc, &ew.world, scene_view.device(), &mut graph, source);
 
-    schedule.render(graph);
+    if let Err(error) = schedule.render(graph) {
+        log::error!("headless frame submission failed: {error}");
+
+        ew.window_input.write().begin_frame();
+
+        return TickOutcome {
+            shutdown,
+            rendered: false,
+        };
+    }
     pipeline.end_frame(schedule);
 
     ew.window_input.write().begin_frame();

@@ -89,6 +89,7 @@ impl Fence {
     ///
     /// Used as the frame fence when a submit failed and no GPU work is in
     /// flight (the slot is trivially safe to recycle), and in tests.
+    #[cfg(test)]
     pub(crate) fn new_signaled() -> Self {
         Self {
             inner: FenceInner::Dummy {

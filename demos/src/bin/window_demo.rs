@@ -104,7 +104,7 @@ impl App {
             ),
         );
         graph.add_graphics_pass(pass);
-        schedule.render(graph);
+        schedule.render(graph).expect("graph submission failed");
         pipeline.end_frame(schedule);
 
         if let Err(e) = swapchain_texture.present() {

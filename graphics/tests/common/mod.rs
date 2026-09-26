@@ -103,7 +103,7 @@ pub struct TestContext {
     /// Graphics device for creating resources.
     pub device: Arc<GraphicsDevice>,
     /// Frame pipeline for graph execution (uses RefCell for interior mutability).
-    pipeline: RefCell<FramePipeline>,
+    pub pipeline: RefCell<FramePipeline>,
     /// Held for the context's lifetime when synchronization validation is on
     /// (#99): the syncval layer is not robust to many concurrent syncval-enabled
     /// devices, and under `cargo test --workspace` the default multi-threaded
@@ -158,6 +158,24 @@ impl TestContext {
         validation: bool,
         breadcrumbs: redlilium_graphics::BreadcrumbsMode,
     ) -> Option<Self> {
+        Self::with_options_and_frames(backend, validation, breadcrumbs, 1)
+    }
+
+    pub fn new_with_validation_and_frames(backend: Backend, frames: usize) -> Option<Self> {
+        Self::with_options_and_frames(
+            backend,
+            true,
+            redlilium_graphics::BreadcrumbsMode::Auto,
+            frames,
+        )
+    }
+
+    fn with_options_and_frames(
+        backend: Backend,
+        validation: bool,
+        breadcrumbs: redlilium_graphics::BreadcrumbsMode,
+        frames: usize,
+    ) -> Option<Self> {
         // Surface backend logs (queue plan, validation warnings) under RUST_LOG.
         let _ = env_logger::builder().is_test(true).try_init();
 
@@ -183,7 +201,7 @@ impl TestContext {
         let instance = GraphicsInstance::with_parameters(params).ok()?;
         let device = instance.create_device().ok()?;
         // Use 1 frame in flight for synchronous test execution
-        let pipeline = device.create_pipeline(1);
+        let pipeline = device.create_pipeline(frames);
 
         Some(Self {
             backend,
@@ -287,7 +305,7 @@ impl TestContext {
         let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
         for graph in graphs {
-            schedule.submit(graph);
+            schedule.submit(graph).expect("graph submission failed");
         }
 
         // End the frame and wait for completion
@@ -317,14 +335,16 @@ impl TestContext {
         let mut pipeline = self.pipeline.borrow_mut();
         // Frame 1: record + submit the readback op.
         let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
-        schedule.render(graph);
+        schedule.render(graph).expect("graph submission failed");
         pipeline.end_frame(schedule);
         pipeline.wait_idle().expect("wait_idle failed");
         // Frame 2: recycling the slot runs its post-fence readback processing in
         // begin_frame (filling `dst`); render an empty graph to complete the
         // frame (the scheduler requires render() before end_frame).
         let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
-        schedule.render(RenderGraph::new());
+        schedule
+            .render(RenderGraph::new())
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         pipeline.wait_idle().expect("wait_idle failed");
 
@@ -358,7 +378,7 @@ impl Drop for TestContext {
 
 /// Vertex data for a simple quad (two triangles).
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct QuadVertex {
     pub position: [f32; 3],
     pub uv: [f32; 2],

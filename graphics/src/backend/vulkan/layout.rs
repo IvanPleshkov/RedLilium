@@ -487,6 +487,8 @@ impl TextureId {
 pub struct TextureLayoutTracker {
     /// Tracked state of each texture, by stable id.
     layouts: HashMap<TextureId, TrackedTexture>,
+    journal: HashMap<TextureId, Option<TrackedTexture>>,
+    recording: bool,
     /// Usage graph cache for sharing.
     usage_graph_cache: TextureUsageGraphCache,
     /// Extra pipeline stages OR'd into every shader-stage layout scope (#114):
@@ -530,10 +532,35 @@ impl Default for TextureLayoutTracker {
 }
 
 impl TextureLayoutTracker {
+    pub(crate) fn begin_submit(&mut self) {
+        assert!(!self.recording, "nested tracker transaction");
+        self.recording = true;
+    }
+
+    pub(crate) fn finish_submit(&mut self, committed: bool) {
+        if committed {
+            self.journal.clear();
+        } else {
+            for (id, previous) in self.journal.drain() {
+                match previous {
+                    Some(state) => {
+                        self.layouts.insert(id, state);
+                    }
+                    None => {
+                        self.layouts.remove(&id);
+                    }
+                }
+            }
+        }
+        self.recording = false;
+    }
+
     /// Create a new empty tracker.
     pub fn new() -> Self {
         Self {
             layouts: HashMap::new(),
+            journal: HashMap::new(),
+            recording: false,
             usage_graph_cache: TextureUsageGraphCache::new(),
             shader_stage_augment: vk::PipelineStageFlags2::empty(),
         }
@@ -618,6 +645,11 @@ impl TextureLayoutTracker {
         submit_value: u64,
         waits: &mut super::barriers::SubmitWaits,
     ) -> (TextureLayout, bool) {
+        if self.recording {
+            self.journal
+                .entry(id)
+                .or_insert_with(|| self.layouts.get(&id).copied());
+        }
         let state = self.layouts.entry(id).or_default();
         let is_write = layout.is_write();
 
@@ -667,6 +699,66 @@ impl TextureLayoutTracker {
 mod tests {
     use super::super::barriers::{QueueId, SubmitWaits};
     use super::*;
+
+    #[test]
+    fn failed_submit_restores_layout_and_queue_history() {
+        let mut tracker = TextureLayoutTracker::new();
+        let id = TextureId::from_raw(1);
+        let fresh = TextureId::from_raw(2);
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            TextureLayout::TransferDst,
+            QueueId::Graphics,
+            7,
+            &mut waits,
+        );
+        tracker.begin_submit();
+        tracker.request_access(
+            id,
+            TextureLayout::General,
+            QueueId::AsyncCompute,
+            9,
+            &mut waits,
+        );
+        tracker.request_access(
+            id,
+            TextureLayout::ShaderReadOnly,
+            QueueId::AsyncCompute,
+            9,
+            &mut waits,
+        );
+        tracker.request_access(
+            fresh,
+            TextureLayout::General,
+            QueueId::AsyncCompute,
+            9,
+            &mut waits,
+        );
+        tracker.finish_submit(false);
+        assert_eq!(tracker.get_layout(id), TextureLayout::TransferDst);
+        assert_eq!(tracker.get_layout(fresh), TextureLayout::Undefined);
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            TextureLayout::ShaderReadOnly,
+            QueueId::Transfer,
+            10,
+            &mut waits,
+        );
+        assert_eq!(waits.get(QueueId::Graphics), Some(7));
+        assert_eq!(waits.get(QueueId::AsyncCompute), None);
+        tracker.begin_submit();
+        tracker.request_access(
+            fresh,
+            TextureLayout::TransferDst,
+            QueueId::Graphics,
+            11,
+            &mut waits,
+        );
+        tracker.finish_submit(true);
+        assert_eq!(tracker.get_layout(fresh), TextureLayout::TransferDst);
+    }
 
     #[test]
     fn request_access_same_queue_emits_no_waits() {

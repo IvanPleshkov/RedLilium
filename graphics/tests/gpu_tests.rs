@@ -1350,7 +1350,7 @@ fn test_async_compute_hint_declined_for_exclusive_texture(#[case] backend: Backe
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
 fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backend) {
-    let Some(ctx) = TestContext::new_with_validation(backend) else {
+    let Some(ctx) = TestContext::new_with_validation_and_frames(backend, 2) else {
         eprintln!("Backend {:?} not available, skipping", backend);
         return;
     };
@@ -1373,7 +1373,7 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
 
     // Dedicated pipeline with 2 frames in flight (the shared TestContext
     // pipeline uses 1, which would serialize frames on the fence).
-    let mut pipeline = ctx.device.create_pipeline(2);
+    let mut pipeline = ctx.pipeline.borrow_mut();
 
     // Frame 1: async-routed upload into `async_written`.
     let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
@@ -1384,7 +1384,7 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
         TransferOperation::write_buffer(async_written.clone(), 0, pattern_a.clone()),
     ));
     graph.add_transfer_pass(pass);
-    schedule.submit(graph);
+    schedule.submit(graph).expect("graph submission failed");
     pipeline.end_frame(schedule);
 
     // Frame 2: a graphics graph reads `async_written` (cross-queue RAW from
@@ -1405,14 +1405,14 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
             )),
     );
     graph.add_transfer_pass(pass);
-    schedule.submit(graph);
+    schedule.submit(graph).expect("graph submission failed");
     let mut graph = RenderGraph::new();
     let mut pass = TransferPass::new("xframe_gfx_write".into());
     pass.set_transfer_config(TransferConfig::new().with_operation(
         TransferOperation::write_buffer(gfx_written.clone(), 0, pattern_b.clone()),
     ));
     graph.add_transfer_pass(pass);
-    schedule.submit(graph);
+    schedule.submit(graph).expect("graph submission failed");
     pipeline.end_frame(schedule);
 
     // Frame 3: async-routed graph reads `gfx_written` (the reverse
@@ -1434,7 +1434,7 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
             )),
     );
     graph.add_transfer_pass(pass);
-    schedule.submit(graph);
+    schedule.submit(graph).expect("graph submission failed");
     pipeline.end_frame(schedule);
 
     // Drain: wait for the GPU, then run empty frames so every slot is
@@ -1442,7 +1442,9 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
     pipeline.wait_idle().expect("wait_idle failed");
     for _ in 0..2 {
         let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
-        schedule.submit(RenderGraph::new());
+        schedule
+            .submit(RenderGraph::new())
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
     }
     pipeline.wait_idle().expect("wait_idle failed");
@@ -3461,6 +3463,225 @@ fn test_egui_headless_text_renders_glyphs(
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during the egui headless render"
+        );
+    }
+}
+
+/// Attachment views must select the requested mip and layer on both backends.
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_render_contract_mip_layer(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+    let texture = ctx
+        .device
+        .create_texture(
+            &TextureDescriptor::new_2d_array(
+                128,
+                128,
+                2,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+            )
+            .with_mip_levels(2),
+        )
+        .unwrap();
+    let mut graph = RenderGraph::new();
+    // Clear both layers of mip 1 differently; neither view may alias layer 0.
+    for (layer, color) in [(0, [0.0, 1.0, 0.0, 1.0]), (1, [1.0, 0.0, 0.0, 1.0])] {
+        let target =
+            redlilium_graphics::RenderTarget::from_texture_layer(texture.clone(), 1, layer);
+        assert_eq!((target.width(), target.height()), (64, 64));
+        let mut pass = GraphicsPass::new(format!("clear_layer_{layer}"));
+        pass.set_render_targets(RenderTargetConfig::new().with_color(
+            ColorAttachment::new(target).with_clear_color(color[0], color[1], color[2], color[3]),
+        ));
+        graph.add_graphics_pass(pass);
+    }
+    let readback = ctx.create_readback_buffer(64 * 64 * 4 * 2);
+    let mut copy = TransferPass::new("read_layers".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture(
+            texture,
+            readback.clone(),
+            vec![BufferTextureCopyRegion::new(
+                BufferTextureLayout::new(0, Some(256), Some(64)),
+                TextureCopyLocation::mip(1),
+                Extent3d::new_3d(64, 64, 2),
+            )],
+        ),
+    ));
+    graph.add_transfer_pass(copy);
+    ctx.execute_graph(graph);
+    let bytes = ctx.read_buffer(&readback, 64 * 64 * 4 * 2);
+    assert_eq!(&bytes[..4], &[0, 255, 0, 255]);
+    assert_eq!(&bytes[64 * 64 * 4..64 * 64 * 4 + 4], &[255, 0, 0, 255]);
+}
+
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_render_contract_msaa_resolve(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+    if !ctx.device.capabilities().supports_sample_count(4) {
+        return;
+    }
+    let msaa = ctx
+        .device
+        .create_texture(
+            &TextureDescriptor::new_2d(
+                64,
+                64,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::RENDER_ATTACHMENT,
+            )
+            .with_sample_count(4),
+        )
+        .unwrap();
+    let resolved = ctx.create_render_target(64, 64);
+    let readback = ctx.create_readback_buffer(64 * 64 * 4);
+    let mut graph = RenderGraph::new();
+    let mut pass = GraphicsPass::new("msaa_clear_and_resolve".into());
+    pass.set_render_targets(
+        RenderTargetConfig::new().with_color(
+            ColorAttachment::from_texture(msaa)
+                .with_clear_color(1.0, 0.0, 0.0, 1.0)
+                .with_store_op(StoreOp::DontCare)
+                .with_resolve_target(redlilium_graphics::RenderTarget::from_texture(
+                    resolved.clone(),
+                )),
+        ),
+    );
+    graph.add_graphics_pass(pass);
+    let mut copy = TransferPass::new("read_resolve".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(resolved, readback.clone()),
+    ));
+    graph.add_transfer_pass(copy);
+    ctx.execute_graph(graph);
+    let bytes = ctx.read_buffer(&readback, 64 * 64 * 4);
+    assert!(bytes.chunks_exact(4).all(|pixel| pixel == [255, 0, 0, 255]));
+}
+
+/// Draw arguments are uploaded by a transfer pass in the same graph as the
+/// consumer. A no-op first draw also exercises a nonzero stride/offset.
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_render_contract_indirect(#[case] backend: Backend, #[values(false, true)] indexed: bool) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+    let mut mesh_desc =
+        redlilium_graphics::MeshDescriptor::new(quad_vertex_layout()).with_vertex_count(6);
+    if indexed {
+        mesh_desc = mesh_desc.with_indices(redlilium_graphics::IndexFormat::Uint32, 6);
+    }
+    let mesh = ctx.device.create_mesh(&mesh_desc).unwrap();
+    let material = create_material_instance(create_solid_color_material(&ctx));
+    let args = ctx.create_buffer(64, BufferUsage::INDIRECT | BufferUsage::COPY_DST);
+    let target = ctx.create_render_target(64, 64);
+    let readback = ctx.create_readback_buffer(64 * 64 * 4);
+    let mut upload = TransferPass::new("indirect_upload".into());
+    let mut config = TransferConfig::new().with_operation(TransferOperation::write_buffer(
+        mesh.vertex_buffers()[0].clone(),
+        0,
+        Arc::from(bytemuck::cast_slice(&FULLSCREEN_QUAD_VERTICES)),
+    ));
+    if let Some(index) = mesh.index_buffer() {
+        config = config.with_operation(TransferOperation::write_buffer(
+            index.clone(),
+            0,
+            Arc::from(bytemuck::cast_slice(&[0u32, 1, 2, 3, 4, 5])),
+        ));
+    }
+    let mut words = [0u32; 16];
+    // Entry 0 at byte 4 has zero vertices. Entry 1 at byte 36 draws the quad.
+    words[9] = 6;
+    words[10] = 1;
+    config = config.with_operation(TransferOperation::write_buffer(
+        args.clone(),
+        0,
+        Arc::from(bytemuck::cast_slice(&words)),
+    ));
+    upload.set_transfer_config(config);
+    let mut graph = RenderGraph::new();
+    graph.add_transfer_pass(upload);
+    let mut pass = create_simple_render_pass("indirect_draw", target.clone(), [0.0, 0.0, 0.0, 1.0]);
+    let draw = if indexed {
+        redlilium_graphics::IndirectDrawCommand::new_indexed(mesh, material, args)
+    } else {
+        redlilium_graphics::IndirectDrawCommand::new(mesh, material, args)
+    };
+    pass.add_indirect_draw_command(draw.with_offset(4).with_draw_count(2).with_stride(32));
+    graph.add_graphics_pass(pass);
+    let mut copy = TransferPass::new("read_indirect".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(target, readback.clone()),
+    ));
+    graph.add_transfer_pass(copy);
+    ctx.execute_graph(graph);
+    let bytes = ctx.read_buffer(&readback, 64 * 64 * 4);
+    assert!(verify_pixel(&bytes, 64, 32, 32, ExpectedPixel::RED, 1));
+}
+
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_render_contract_failed_submit_preserves_image(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+    #[cfg(feature = "vulkan-backend")]
+    redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    let texture = ctx.create_render_target(64, 64);
+    let readback = ctx.create_readback_buffer(64 * 64 * 4);
+    let mut graph = RenderGraph::new();
+    graph.add_graphics_pass(create_simple_render_pass(
+        "initial",
+        texture.clone(),
+        [0.0, 1.0, 0.0, 1.0],
+    ));
+    let mut copy = TransferPass::new("initial_read".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(texture.clone(), readback.clone()),
+    ));
+    graph.add_transfer_pass(copy);
+    ctx.execute_graph(graph);
+    let mut bad = RenderGraph::new();
+    let mut pass = GraphicsPass::new("invalid_attachment".into());
+    pass.set_render_targets(RenderTargetConfig::new().with_color(ColorAttachment::new(
+        redlilium_graphics::RenderTarget::from_texture_mip(texture.clone(), 9),
+    )));
+    bad.add_graphics_pass(pass);
+    {
+        let mut pipeline = ctx.pipeline.borrow_mut();
+        let mut schedule = pipeline.begin_frame().unwrap();
+        assert!(schedule.submit(bad).is_err());
+        // Exercise the early-return path instead of manually ending this frame.
+    }
+    let mut graph = RenderGraph::new();
+    let mut copy = TransferPass::new("read_after_error".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(texture, readback.clone()),
+    ));
+    graph.add_transfer_pass(copy);
+    ctx.execute_graph(graph);
+    let bytes = ctx.read_buffer(&readback, 64 * 64 * 4);
+    assert!(verify_pixel(&bytes, 64, 32, 32, ExpectedPixel::GREEN, 1));
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        assert_eq!(
+            redlilium_graphics::backend::vulkan::validation_error_count(),
+            0
         );
     }
 }

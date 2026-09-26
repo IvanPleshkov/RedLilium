@@ -50,7 +50,7 @@
 //!
 //! // Frame loop
 //! while running {
-//!     let mut schedule = pipeline.begin_frame();
+//!     let mut schedule = pipeline.begin_frame()?;
 //!
 //!     // Acquire a pooled graph (avoids per-frame allocation)
 //!     let mut graph = schedule.acquire_graph();
@@ -58,7 +58,7 @@
 //!     let lighting = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
 //!     graph.add_dependency(lighting, geometry);
 //!
-//!     schedule.submit(graph); // graphs execute in submission order
+//!     schedule.submit(graph)?; // graphs execute in submission order
 //!     pipeline.end_frame(schedule);
 //! }
 //!

@@ -382,7 +382,10 @@ impl AppHandler for TexturedQuadDemo {
         true
     }
 
-    fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
+    fn on_draw(
+        &mut self,
+        mut ctx: DrawContext,
+    ) -> Result<FrameSchedule, redlilium_graphics::GraphicsError> {
         let mut graph = ctx.acquire_graph();
 
         // Flush queued mesh/texture uploads through the frame graph (first frame).

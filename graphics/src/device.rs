@@ -45,6 +45,10 @@ pub enum DeviceTier {
 /// against these values instead of hardcoding limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeviceCapabilities {
+    /// Whether raster indirect drawing is supported (false on WebGL).
+    pub indirect_draw: bool,
+    /// Whether indirect arguments may specify a nonzero first instance.
+    pub indirect_first_instance: bool,
     /// Renderer-architecture tier (see [`DeviceTier`]).
     pub tier: DeviceTier,
     /// Maximum texture dimension the backend accepts.
@@ -1489,7 +1493,8 @@ impl GraphicsDevice {
     ///
     /// # Panics
     ///
-    /// Panics if `frames_in_flight` is 0.
+    /// Panics if the frame count is outside `1..=MAX_FRAMES_IN_FLIGHT`, or
+    /// another pipeline still owns this instance's backend frame state.
     ///
     /// # Example
     ///
@@ -1497,7 +1502,7 @@ impl GraphicsDevice {
     /// let mut pipeline = device.create_pipeline(2);
     ///
     /// while running {
-    ///     let mut schedule = pipeline.begin_frame();
+    ///     let mut schedule = pipeline.begin_frame()?;
     ///     // ... submit graphs ...
     ///     schedule.present("present", &graph, &[deps]);
     ///     pipeline.end_frame(schedule);

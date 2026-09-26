@@ -301,80 +301,48 @@ Benefits:
 
 ### GPU Resource Lifetime Management
 
-GPU resources (buffers, textures, samplers, fences, semaphores) have a critical lifetime constraint: they cannot be destroyed while the GPU is still using them. This is because GPU commands execute asynchronously - when you submit work, the CPU continues while the GPU processes commands 1-3 frames behind.
+Submitted render graphs retain their resources (`Arc<Buffer>`, textures, meshes,
+materials and binding groups) until every submission fence for their frame slot
+has completed. Vulkan resources are destroyed when their last owning `Arc` is
+released; there is no frame-count-based deferred destructor for ordinary resources.
 
-```
-CPU Frame 0: Record commands using Buffer A → Submit → Continue to Frame 1
-CPU Frame 1: Record commands using Buffer B → Submit → Continue to Frame 2
-CPU Frame 2: User drops Buffer A (Arc refcount = 0)
-                 ↓
-GPU Frame 0: Still reading from Buffer A! ← PROBLEM
-```
+A graphics instance supports one live `FramePipeline`, because its backend owns
+one set of frame command pools. Only one schedule can be active at a time. Creating
+another pipeline while that lease is held is rejected, as is beginning another
+frame before the active schedule has been returned.
 
-#### Deferred Destruction (Vulkan Backend)
+`pipeline.end_frame(schedule)` returns the submitted graphs and fences explicitly.
+Dropping a schedule (including during an early return or unwind) returns them to its
+owner automatically; the next begin-frame collects that frame before recycling a
+slot. A schedule can outlive its pipeline without freeing pending resources.
 
-The Vulkan backend implements a deferred destruction system to solve this problem. When a resource's `Arc` is dropped, instead of immediately destroying the Vulkan handle, it's queued for later destruction:
+On native targets, dropping the pipeline/last frame owner waits for pending
+submissions. If waiting fails, resources and the backend lease are retained rather
+than destroying objects still in use. WebGPU on the browser keeps those resources
+through a queue-completion callback without blocking the event loop.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     DeferredDestructor                          │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                   Frame-indexed queues                     │  │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                 │  │
-│  │  │ Frame 0  │  │ Frame 1  │  │ Frame 2  │  ...            │  │
-│  │  │ pending  │  │ pending  │  │ pending  │                 │  │
-│  │  └──────────┘  └──────────┘  └──────────┘                 │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
+### Resource Transfers and Submission Errors
 
-**Flow:**
+`GraphicsDevice` allocates resources and creates pipelines/bindings. Data uploads,
+copies and readbacks are operations in render graphs (`TransferPass` with
+`TransferOperation::WriteBuffer`, texture uploads/copies, or readback operations).
+Do not add direct resource-upload methods to `GraphicsDevice`: transfer ordering
+and synchronization belong to the graph. Per-frame ring streaming retains its
+existing fence-protected host-visible allocation contract.
 
-1. **On Resource Drop**: Resource handle queued in current frame's pending list
-2. **On Frame Boundary**: After fence wait in `begin_frame()`, oldest queue is processed
-3. **Safe Destruction**: Resources destroyed only after `MAX_FRAMES_IN_FLIGHT` (3) frames
-
-```
-CPU Frame 0: Create Buffer A, submit commands → GPU starts
-CPU Frame 2: Drop Buffer A → Queued for frame 2
-CPU Frame 5: begin_frame() waits for frame 2 fence
-             → fence signaled (GPU done with frame 2)
-             → Buffer A safely destroyed
-```
-
-This is automatic - users don't need to manually manage resource lifetimes. The wgpu backend handles this internally.
-
-#### Best Practices
-
-1. **Avoid excessive resource churn**: Reuse buffers/textures across frames when possible
-2. **Use object pools**: For frequently created/destroyed resources (particles, UI elements)
-3. **Don't hold unnecessary references**: Drop `Arc` handles when no longer needed
-4. **Trust the system**: Resources are automatically cleaned up safely
+`FrameSchedule::submit` returns `Result<SubmitHandle, GraphicsError>`. Successful
+submissions keep their fences even if a later graph fails. Automatic compilation
+resolves ambiguous writers by addition order; `submit_with_mode(graph, Strict)`
+reports ambiguity without silently retrying another policy. Vulkan access/layout
+tracking is transactional: recording or submission failure restores the prior
+resource state and removes waits on unsubmitted timeline values.
 
 ### Graceful Shutdown
 
-When the application exits, call `FramePipeline::wait_idle()` before destroying resources:
-
-```
-[Window Close Event]
-        │
-        ▼
-┌───────────────────┐
-│  Stop rendering   │  Don't start new frames
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│ pipeline.wait_idle│  Wait for all in-flight GPU work
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  Drop resources   │  Safe to destroy GPU objects
-└───────────────────┘
-```
-
-During shutdown, `wait_idle()` ensures all pending GPU work completes. The Vulkan backend then flushes all deferred destruction queues, safely destroying any pending resources before the device is destroyed.
+Use `pipeline.wait_idle()?` when shutdown needs to report timeout or device loss.
+The pipeline also protects resources on drop. Before resizing a surface, wait for
+completion and call `recycle_all_graphs()` to release graph-held swapchain views;
+recycling while a schedule or GPU work is active is rejected.
 
 ### Profiling Support
 
@@ -474,23 +442,23 @@ let mut pipeline = device.create_pipeline(2);  // 2 frames in flight
 // Main loop
 while !window.should_close() {
     // begin_frame waits for frame slot AND returns a schedule
-    let mut schedule = pipeline.begin_frame();
+    let mut schedule = pipeline.begin_frame()?;
 
     // Build render graphs
     let shadow_graph = build_shadow_graph();
     let main_graph = build_main_graph();
 
     // Submit via streaming schedule
-    let shadows = schedule.submit("shadows", shadow_graph.compile()?, &[]);
-    let main = schedule.submit("main", main_graph.compile()?, &[shadows]);
-    schedule.present("present", post_graph.compile()?, &[main]);
+    schedule.submit(shadow_graph)?;
+    schedule.submit(main_graph)?; // contains all swapchain-writing passes
+    // Present the acquired SurfaceTexture after its rendering was submitted.
 
     // end_frame takes ownership of schedule
     pipeline.end_frame(schedule);
 }
 
 // Shutdown
-pipeline.wait_idle();  // Wait for GPU before cleanup
+pipeline.wait_idle()?;  // Wait for GPU before cleanup
 ```
 
 ### Window Resize Handling

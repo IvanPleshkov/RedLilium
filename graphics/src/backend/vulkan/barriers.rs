@@ -154,6 +154,8 @@ struct BufferAccessState {
 #[derive(Debug, Default)]
 pub struct BufferAccessTracker {
     states: HashMap<BufferId, BufferAccessState>,
+    journal: HashMap<BufferId, Option<BufferAccessState>>,
+    recording: bool,
     /// Extra pipeline stages OR'd into every shader-stage scope (#111):
     /// `TASK_SHADER_EXT | MESH_SHADER_EXT` when `VK_EXT_mesh_shader` is
     /// enabled, empty otherwise. Storage/uniform/AS reads can originate from
@@ -164,6 +166,29 @@ pub struct BufferAccessTracker {
 }
 
 impl BufferAccessTracker {
+    pub(crate) fn begin_submit(&mut self) {
+        assert!(!self.recording, "nested tracker transaction");
+        self.recording = true;
+    }
+
+    pub(crate) fn finish_submit(&mut self, committed: bool) {
+        if committed {
+            self.journal.clear();
+        } else {
+            for (id, previous) in self.journal.drain() {
+                match previous {
+                    Some(state) => {
+                        self.states.insert(id, state);
+                    }
+                    None => {
+                        self.states.remove(&id);
+                    }
+                }
+            }
+        }
+        self.recording = false;
+    }
+
     /// Create a new empty tracker.
     pub fn new() -> Self {
         Self::default()
@@ -220,6 +245,11 @@ impl BufferAccessTracker {
     ) -> Option<(vk::PipelineStageFlags2, vk::AccessFlags2)> {
         let stage = self.dst_stage(access);
         let access_mask = access.dst_access_mask();
+        if self.recording {
+            self.journal
+                .entry(id)
+                .or_insert_with(|| self.states.get(&id).copied());
+        }
         let state = self.states.entry(id).or_default();
 
         // Whether the last write came from another queue: its hazard is
@@ -590,6 +620,46 @@ impl BarrierBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_submit_restores_buffer_hazards() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from(vk::Buffer::from_raw(1));
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::TransferWrite,
+            QueueId::Graphics,
+            7,
+            &mut waits,
+        );
+        tracker.begin_submit();
+        tracker.request_access(
+            id,
+            BufferAccessMode::StorageReadWrite,
+            QueueId::AsyncCompute,
+            9,
+            &mut waits,
+        );
+        tracker.request_access(
+            id,
+            BufferAccessMode::StorageRead,
+            QueueId::AsyncCompute,
+            9,
+            &mut waits,
+        );
+        tracker.finish_submit(false);
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::TransferRead,
+            QueueId::Transfer,
+            10,
+            &mut waits,
+        );
+        assert_eq!(waits.get(QueueId::Graphics), Some(7));
+        assert_eq!(waits.get(QueueId::AsyncCompute), None);
+    }
 
     #[test]
     fn test_barrier_batch_empty() {

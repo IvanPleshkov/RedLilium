@@ -128,12 +128,14 @@ fn offscreen_camera_clear_lands_in_virtual_texture() {
     );
     graph.add_transfer_pass(transfer);
 
-    schedule.render(graph);
+    schedule.render(graph).expect("graph submission failed");
     pipeline.end_frame(schedule);
     pipeline.wait_idle().expect("wait_idle");
     // Recycle the slot so the post-fence readback processing fills `pixels`.
     let mut schedule = pipeline.begin_frame().expect("begin_frame 2");
-    schedule.render(RenderGraph::new());
+    schedule
+        .render(RenderGraph::new())
+        .expect("graph submission failed");
     pipeline.end_frame(schedule);
     pipeline.wait_idle().expect("wait_idle 2");
 

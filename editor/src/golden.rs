@@ -1525,9 +1525,9 @@ fn tick(ew: &mut EditorWorld, pipeline: &mut FramePipeline, runner: &EcsRunner) 
         .expect("graph back from the Render schedule");
     drop(schedule_res);
     for transfer in transfer_graphs {
-        schedule.submit(transfer);
+        schedule.submit(transfer).expect("graph submission failed");
     }
-    schedule.render(graph);
+    schedule.render(graph).expect("graph submission failed");
     pipeline.end_frame(schedule);
     ew.window_input.write().begin_frame();
 }
@@ -1587,14 +1587,16 @@ fn read_back_texture(
     let mut schedule = pipeline.begin_frame().expect("readback frame");
     let mut graph = schedule.acquire_graph();
     graph.add_transfer_pass(transfer);
-    schedule.render(graph);
+    schedule.render(graph).expect("graph submission failed");
     pipeline.end_frame(schedule);
     pipeline.wait_idle().expect("wait_idle");
     // Recycle every slot so the post-fence readback processing fills
     // `result` (the pipeline has two frames in flight).
     for _ in 0..2 {
         let mut schedule = pipeline.begin_frame().expect("drain frame");
-        schedule.render(redlilium_graphics::RenderGraph::new());
+        schedule
+            .render(redlilium_graphics::RenderGraph::new())
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         pipeline.wait_idle().expect("drain wait_idle");
     }

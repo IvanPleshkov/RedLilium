@@ -462,6 +462,9 @@ pub(crate) fn vendor_name(id: u32) -> String {
 /// let device = instance.create_device()?;
 /// ```
 pub struct GraphicsInstance {
+    /// The backend owns one set of frame command pools. A pipeline holds this
+    /// lease until its last outstanding schedule and GPU submission retire.
+    pub(crate) pipeline_claimed: std::sync::atomic::AtomicBool,
     /// Weak self-reference for creating devices.
     self_ref: RwLock<Weak<GraphicsInstance>>,
     /// Number of currently alive [`GraphicsDevice`]s created by this
@@ -549,6 +552,7 @@ impl GraphicsInstance {
         log::info!("Using GPU backend: {}", backend.name());
 
         let instance = Arc::new(Self {
+            pipeline_claimed: std::sync::atomic::AtomicBool::new(false),
             self_ref: RwLock::new(Weak::new()),
             live_devices: std::sync::atomic::AtomicUsize::new(0),
             backend: RwLock::new(backend),

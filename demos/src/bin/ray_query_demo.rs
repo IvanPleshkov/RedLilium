@@ -521,7 +521,10 @@ impl AppHandler for RayQueryDemo {
         true
     }
 
-    fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
+    fn on_draw(
+        &mut self,
+        mut ctx: DrawContext,
+    ) -> Result<FrameSchedule, redlilium_graphics::GraphicsError> {
         let mut graph = ctx.acquire_graph();
 
         if !self.supported {
@@ -558,7 +561,7 @@ impl AppHandler for RayQueryDemo {
             let build = async_graph.add_acceleration_structure_build_pass(pass);
             async_graph.add_dependency(build, upload);
 
-            ctx.submit(async_graph);
+            ctx.submit(async_graph)?;
             self.blases_built = true;
             log::info!("BLAS builds queued on the async compute queue (compaction enabled)");
         }

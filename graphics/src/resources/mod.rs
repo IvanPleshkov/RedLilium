@@ -28,4 +28,5 @@ pub(crate) use acceleration_structure::{
 pub use buffer::Buffer;
 pub use ring_buffer::{RingAllocation, RingBuffer};
 pub use sampler::Sampler;
+pub(crate) use texture::AttachmentView;
 pub use texture::Texture;

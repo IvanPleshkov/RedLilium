@@ -311,7 +311,7 @@ impl<'a> DrawContext<'a> {
     /// ```ignore
     /// let mut graph = ctx.acquire_graph();
     /// graph.add_graphics_pass(pass);
-    /// let handle = ctx.submit("name", graph, &[]);
+    /// let handle = ctx.submit(graph)?;
     /// ```
     pub fn acquire_graph(&mut self) -> RenderGraph {
         self.schedule.acquire_graph()
@@ -321,19 +321,21 @@ impl<'a> DrawContext<'a> {
     /// (e.g. asset-upload transfer graphs, #89). Ordering against other
     /// submits is automatic: same-queue hazards are tracker-emitted pipeline
     /// barriers, cross-queue hazards are timeline waits.
-    pub fn submit(&mut self, graph: RenderGraph) {
-        self.schedule.submit(graph);
+    pub fn submit(
+        &mut self,
+        graph: RenderGraph,
+    ) -> Result<redlilium_graphics::SubmitHandle, GraphicsError> {
+        self.schedule.submit(graph)
     }
 
-    /// Render the frame's single graph and present it.
+    /// Submit the final graph and present the acquired image.
     ///
-    /// One render graph is submitted per frame (it may contain many passes;
-    /// ordering and barriers are resolved by the graph compiler). Takes
+    /// Earlier graphs may have been submitted with `submit`. This takes
     /// ownership of the graph, executes it (signalling the frame fence), and
     /// presents the swapchain image. Returns the [`FrameSchedule`], which must
     /// be returned from `on_draw` for the pipeline to complete the frame.
-    pub fn render(mut self, graph: RenderGraph) -> FrameSchedule {
-        self.schedule.render(graph);
+    pub fn render(mut self, graph: RenderGraph) -> Result<FrameSchedule, GraphicsError> {
+        self.schedule.render(graph)?;
         match self.swapchain_texture.present() {
             Ok(()) => {}
             Err(GraphicsError::SurfaceOutdated | GraphicsError::SurfaceLost) => {
@@ -341,8 +343,8 @@ impl<'a> DrawContext<'a> {
                 // next acquire (picked up at the top of the next frame).
                 self.app.surface_outdated = true;
             }
-            Err(e) => log::error!("Failed to present frame: {e}"),
+            Err(e) => return Err(e),
         }
-        self.schedule
+        Ok(self.schedule)
     }
 }

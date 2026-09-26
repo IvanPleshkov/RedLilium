@@ -71,6 +71,9 @@ impl PassHandle {
         self.0 as usize
     }
 }
+#[cfg(feature = "vulkan-backend")]
+pub(crate) use pass::RasterDraw;
+
 pub use target::{
     ColorAttachment, DepthStencilAttachment, LoadOp, RenderTarget, RenderTargetConfig, StoreOp,
 };
@@ -118,6 +121,7 @@ pub struct RenderGraph {
     /// Cached compiled result. Uses [`Pooled`] to preserve allocation
     /// across invalidations instead of deallocating with `Option<T>`.
     compiled: Pooled<CompiledGraph>,
+    compiled_mode: Option<RenderGraphCompilationMode>,
     /// Queue routing hint (#47 phase 4, #89). See
     /// [`set_queue_preference`](Self::set_queue_preference).
     queue_preference: QueuePreference,
@@ -157,6 +161,7 @@ impl RenderGraph {
             passes: Vec::new(),
             edges: Vec::new(),
             compiled: Pooled::default(),
+            compiled_mode: None,
         }
     }
 
@@ -336,10 +341,13 @@ impl RenderGraph {
             pass.as_graphics()
                 .and_then(|g| g.render_targets())
                 .is_some_and(|targets| {
-                    targets
-                        .color_attachments
-                        .iter()
-                        .any(|attachment| matches!(attachment.target, RenderTarget::Surface { .. }))
+                    targets.color_attachments.iter().any(|attachment| {
+                        matches!(attachment.target, RenderTarget::Surface { .. })
+                            || matches!(
+                                attachment.resolve_target,
+                                Some(RenderTarget::Surface { .. })
+                            )
+                    })
                 })
         })
     }
@@ -367,6 +375,9 @@ impl RenderGraph {
         &mut self,
         mode: RenderGraphCompilationMode,
     ) -> Result<&CompiledGraph, GraphError> {
+        if self.compiled_mode != Some(mode) {
+            self.compiled.release();
+        }
         if !self.compiled.is_active() {
             let target = self.compiled.activate();
             if let Err(e) = crate::compiler::compile_into(&self.passes, &self.edges, mode, target) {
@@ -374,6 +385,7 @@ impl RenderGraph {
                 return Err(e);
             }
         }
+        self.compiled_mode = Some(mode);
         Ok(self.compiled.get().unwrap())
     }
 

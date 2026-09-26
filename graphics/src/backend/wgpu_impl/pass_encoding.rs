@@ -45,118 +45,63 @@ impl WgpuBackend {
         encoder: &mut wgpu::CommandEncoder,
         pass: &crate::graph::GraphicsPass,
     ) -> Result<(), GraphicsError> {
-        use crate::graph::RenderTarget;
-
         // Get render targets configuration
         let Some(render_targets) = pass.render_targets() else {
             return Ok(());
         };
 
-        // Build color attachments on stack (8 = wgpu max_color_attachments
-        // default). Exceeding it must be an error: silently dropping trailing
-        // attachments would render without them and corrupt MRT output.
+        render_targets.validate()?;
         let color_count = render_targets.color_attachments.len();
         if color_count > 8 {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "pass '{}' declares {} color attachments; wgpu supports at most 8",
-                pass.name(),
-                color_count
-            )));
+            return Err(GraphicsError::InvalidParameter(
+                "at most 8 color attachments are supported".into(),
+            ));
+        }
+        let mut views = [const { None }; 8];
+        let mut resolves = [const { None }; 8];
+        for (i, attachment) in render_targets.color_attachments.iter().enumerate() {
+            views[i] = Some(attachment.target.wgpu_view()?);
+            resolves[i] = attachment
+                .resolve_target
+                .as_ref()
+                .map(|target| target.wgpu_view())
+                .transpose()?;
         }
         let mut color_attachments = [const { None }; 8];
         for (i, attachment) in render_targets.color_attachments.iter().enumerate() {
-            color_attachments[i] = match &attachment.target {
-                RenderTarget::Texture { texture, .. } => {
-                    let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
-                        continue;
-                    };
-                    Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: convert_load_op(&attachment.load_op()),
-                            store: convert_store_op(&attachment.store_op()),
-                        },
-                        depth_slice: None,
-                    })
-                }
-                RenderTarget::Surface { view, .. } => {
-                    if let Some(surface_view) = view {
-                        Some(wgpu::RenderPassColorAttachment {
-                            view: surface_view.view(),
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: convert_load_op(&attachment.load_op()),
-                                store: convert_store_op(&attachment.store_op()),
-                            },
-                            depth_slice: None,
-                        })
-                    } else {
-                        log::warn!(
-                            "Pass '{}' has surface attachment but no texture view available",
-                            pass.name()
-                        );
-                        None
-                    }
-                }
-            };
+            color_attachments[i] = Some(wgpu::RenderPassColorAttachment {
+                view: views[i].as_ref().unwrap(),
+                resolve_target: resolves[i].as_ref(),
+                ops: wgpu::Operations {
+                    load: convert_load_op(&attachment.load_op()),
+                    store: convert_store_op(&attachment.store_op()),
+                },
+                depth_slice: None,
+            });
         }
         let color_attachments = &color_attachments[..color_count];
-
-        // Build depth stencil attachment if present. Mismatched handles are
-        // errors, not panics — matching the color/buffer handling in this
-        // file (a panic here also poisons the encoder scratch mutex).
-        let depth_stencil_attachment = match &render_targets.depth_stencil_attachment {
-            Some(attachment) => {
-                let view = match &attachment.target {
-                    RenderTarget::Texture { texture, .. } => {
-                        let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
-                            return Err(GraphicsError::InvalidParameter(format!(
-                                "wgpu: depth attachment of pass '{}' has a non-wgpu GPU \
-                                 handle (resource from a different backend)",
-                                pass.name()
-                            )));
-                        };
-                        view
-                    }
-                    RenderTarget::Surface { .. } => {
-                        return Err(GraphicsError::InvalidParameter(format!(
-                            "wgpu: pass '{}' uses the surface as a depth attachment; \
-                             surfaces are color-only",
-                            pass.name()
-                        )));
-                    }
-                };
-                // wgpu expresses a read-only depth/stencil attachment as
-                // `ops: None` (WebGPU `depthReadOnly` / `stencilReadOnly`). This
-                // is what lets the same depth texture be a depth attachment and
-                // be sampled in one pass (#60); WebGPU rejects a writable depth
-                // attachment that is also bound for sampling.
-                let depth_ops = if attachment.depth_read_only {
-                    None
-                } else {
-                    Some(wgpu::Operations {
+        let depth_view = render_targets
+            .depth_stencil_attachment
+            .as_ref()
+            .map(|attachment| attachment.target.wgpu_view())
+            .transpose()?;
+        let depth_stencil_attachment =
+            render_targets
+                .depth_stencil_attachment
+                .as_ref()
+                .map(|attachment| wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view.as_ref().unwrap(),
+                    depth_ops: (!attachment.depth_read_only).then(|| wgpu::Operations {
                         load: convert_depth_load_op(&attachment.depth_load_op()),
                         store: convert_store_op(&attachment.depth_store_op()),
-                    })
-                };
-                let stencil_ops =
-                    if attachment.target.format().has_stencil() && !attachment.stencil_read_only {
-                        Some(wgpu::Operations {
+                    }),
+                    stencil_ops: (attachment.target.format().has_stencil()
+                        && !attachment.stencil_read_only)
+                        .then(|| wgpu::Operations {
                             load: convert_stencil_load_op(&attachment.stencil_load_op()),
                             store: convert_store_op(&attachment.stencil_store_op()),
-                        })
-                    } else {
-                        None
-                    };
-                Some(wgpu::RenderPassDepthStencilAttachment {
-                    view,
-                    depth_ops,
-                    stencil_ops,
-                })
-            }
-            None => None,
-        };
+                        }),
+                });
 
         // Check if we have any valid attachments - wgpu requires at least one
         let has_valid_color = color_attachments.iter().any(|a| a.is_some());
@@ -209,7 +154,10 @@ impl WgpuBackend {
         }
 
         // Encode each draw command
-        for draw_cmd in pass.draw_commands() {
+        for draw_cmd in pass.raster_draws() {
+            if let Some(indirect) = draw_cmd.indirect {
+                indirect.validate()?;
+            }
             let material_arc = draw_cmd.material.material();
             let mesh = &draw_cmd.mesh;
 
@@ -258,7 +206,10 @@ impl WgpuBackend {
                 render_pass.set_scissor_rect(c.x, c.y, c.width, c.height);
             }
 
-            if mesh.is_indexed() {
+            if draw_cmd
+                .indirect
+                .map_or(mesh.is_indexed(), |draw| draw.indexed)
+            {
                 if let Some(index_buffer) = mesh.index_buffer()
                     && let GpuBuffer::Wgpu(wgpu_buffer) = index_buffer.gpu_handle()
                 {
@@ -269,11 +220,38 @@ impl WgpuBackend {
                     render_pass
                         .set_index_buffer(wgpu_buffer.slice(mesh.index_offset()..), index_format);
                 }
-                render_pass.draw_indexed(
-                    0..mesh.index_count(),
-                    0,
-                    draw_cmd.first_instance..(draw_cmd.first_instance + draw_cmd.instance_count),
-                );
+                if let Some(draw) = draw_cmd.indirect {
+                    let GpuBuffer::Wgpu(buffer) = draw.indirect_buffer.gpu_handle() else {
+                        return Err(GraphicsError::InvalidParameter(
+                            "indirect buffer is not wgpu".into(),
+                        ));
+                    };
+                    for i in 0..draw.draw_count {
+                        render_pass.draw_indexed_indirect(
+                            buffer,
+                            draw.indirect_offset + u64::from(i) * u64::from(draw.stride),
+                        );
+                    }
+                } else {
+                    render_pass.draw_indexed(
+                        0..mesh.index_count(),
+                        0,
+                        draw_cmd.first_instance
+                            ..(draw_cmd.first_instance + draw_cmd.instance_count),
+                    );
+                }
+            } else if let Some(draw) = draw_cmd.indirect {
+                let GpuBuffer::Wgpu(buffer) = draw.indirect_buffer.gpu_handle() else {
+                    return Err(GraphicsError::InvalidParameter(
+                        "indirect buffer is not wgpu".into(),
+                    ));
+                };
+                for i in 0..draw.draw_count {
+                    render_pass.draw_indirect(
+                        buffer,
+                        draw.indirect_offset + u64::from(i) * u64::from(draw.stride),
+                    );
+                }
             } else {
                 render_pass.draw(
                     0..mesh.vertex_count(),

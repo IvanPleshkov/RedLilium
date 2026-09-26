@@ -235,7 +235,7 @@ impl WindowTestApp {
         let _pass_handle = graph.add_graphics_pass(pass);
 
         // Render the frame's single graph (signals the frame fence).
-        schedule.render(graph);
+        schedule.render(graph).expect("graph submission failed");
 
         // End the frame
         pipeline.end_frame(schedule);

@@ -122,6 +122,83 @@ impl RenderTarget {
         }
     }
 
+    /// Select one mip and array layer (or cube face) as an attachment.
+    pub fn from_texture_layer(texture: Arc<Texture>, mip_level: u32, array_layer: u32) -> Self {
+        Self::Texture {
+            texture,
+            mip_level,
+            array_layer,
+        }
+    }
+
+    pub fn sample_count(&self) -> u32 {
+        match self {
+            Self::Texture { texture, .. } => texture.sample_count(),
+            Self::Surface { .. } => 1,
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), crate::GraphicsError> {
+        match self {
+            Self::Texture {
+                texture,
+                mip_level,
+                array_layer,
+            } => texture.validate_attachment(*mip_level, *array_layer),
+            Self::Surface { width, height, .. } if *width > 0 && *height > 0 => Ok(()),
+            _ => Err(crate::GraphicsError::InvalidParameter(
+                "empty surface attachment".into(),
+            )),
+        }
+    }
+
+    #[cfg(feature = "wgpu-backend")]
+    pub(crate) fn wgpu_view(&self) -> Result<wgpu::TextureView, crate::GraphicsError> {
+        match self {
+            Self::Texture {
+                texture,
+                mip_level,
+                array_layer,
+            } => {
+                let view = texture.attachment_view(*mip_level, *array_layer)?;
+                if let crate::resources::AttachmentView::Wgpu(view) = &*view {
+                    return Ok(view.clone());
+                }
+            }
+            Self::Surface {
+                view: Some(view), ..
+            } => return Ok(view.view().clone()),
+            _ => {}
+        }
+        Err(crate::GraphicsError::InvalidParameter(
+            "attachment has no wgpu view".into(),
+        ))
+    }
+
+    #[cfg(feature = "vulkan-backend")]
+    pub(crate) fn vulkan_view(&self) -> Result<ash::vk::ImageView, crate::GraphicsError> {
+        match self {
+            Self::Texture {
+                texture,
+                mip_level,
+                array_layer,
+            } => {
+                let view = texture.attachment_view(*mip_level, *array_layer)?;
+                if let crate::resources::AttachmentView::Vulkan { view, .. } = &*view {
+                    return Ok(*view);
+                }
+            }
+            Self::Surface {
+                vulkan_view: Some(view),
+                ..
+            } => return Ok(view.view()),
+            _ => {}
+        }
+        Err(crate::GraphicsError::InvalidParameter(
+            "attachment has no Vulkan view".into(),
+        ))
+    }
+
     /// Get the format of the render target.
     pub fn format(&self) -> TextureFormat {
         match self {
@@ -133,7 +210,9 @@ impl RenderTarget {
     /// Get the width of the render target.
     pub fn width(&self) -> u32 {
         match self {
-            Self::Texture { texture, .. } => texture.width(),
+            Self::Texture {
+                texture, mip_level, ..
+            } => texture.width().checked_shr(*mip_level).unwrap_or(0).max(1),
             Self::Surface { width, .. } => *width,
         }
     }
@@ -141,7 +220,9 @@ impl RenderTarget {
     /// Get the height of the render target.
     pub fn height(&self) -> u32 {
         match self {
-            Self::Texture { texture, .. } => texture.height(),
+            Self::Texture {
+                texture, mip_level, ..
+            } => texture.height().checked_shr(*mip_level).unwrap_or(0).max(1),
             Self::Surface { height, .. } => *height,
         }
     }
@@ -383,6 +464,54 @@ impl RenderTargetConfig {
     pub fn with_depth_stencil(mut self, attachment: DepthStencilAttachment) -> Self {
         self.depth_stencil_attachment = Some(attachment);
         self
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), crate::GraphicsError> {
+        use crate::GraphicsError;
+        let Some(dimensions) = self.dimensions() else {
+            return Ok(());
+        };
+        let mut samples = None;
+        for (target, depth) in self
+            .color_attachments
+            .iter()
+            .map(|a| (&a.target, false))
+            .chain(
+                self.depth_stencil_attachment
+                    .iter()
+                    .map(|a| (&a.target, true)),
+            )
+        {
+            target.validate()?;
+            if (target.width(), target.height()) != dimensions
+                || target.format().is_depth_stencil() != depth
+            {
+                return Err(GraphicsError::InvalidParameter(
+                    "attachment dimensions or color/depth format mismatch".into(),
+                ));
+            }
+            if samples.is_some_and(|n| n != target.sample_count()) {
+                return Err(GraphicsError::InvalidParameter(
+                    "attachment sample counts differ".into(),
+                ));
+            }
+            samples = Some(target.sample_count());
+        }
+        for color in &self.color_attachments {
+            if let Some(resolve) = &color.resolve_target {
+                resolve.validate()?;
+                if color.target.sample_count() == 1
+                    || resolve.sample_count() != 1
+                    || color.target.format() != resolve.format()
+                    || (resolve.width(), resolve.height()) != dimensions
+                {
+                    return Err(GraphicsError::InvalidParameter(
+                        "invalid MSAA resolve target".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Get the render area dimensions.

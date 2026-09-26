@@ -41,8 +41,8 @@
 //!
 //!     // Graphs execute in submission order on the single graphics queue;
 //!     // shared resources are synchronized automatically.
-//!     schedule.submit(shadow_graph);
-//!     schedule.submit(main_graph);  // at most one graph writes the swapchain
+//!     schedule.submit(shadow_graph)?;
+//!     schedule.submit(main_graph)?;  // at most one graph writes the swapchain
 //!
 //!     pipeline.end_frame(schedule);  // Store fences, advance slot
 //! }
@@ -61,6 +61,7 @@
 //! More frames = higher throughput but more input latency and memory usage.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use redlilium_core::pool::Poolable;
@@ -81,6 +82,66 @@ use redlilium_core::profiling::{frame_mark, profile_scope};
 /// exceed it — enforced at creation (VK-M9): one frame too many would recycle
 /// a slot whose command buffers the GPU is still executing.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
+
+/// Shared with the schedule so an early return transfers ownership back to
+/// the pipeline without waiting on the render thread. It also outlives a
+/// pipeline dropped while its schedule is still in use.
+pub(crate) struct FrameOwner {
+    instance: Arc<crate::GraphicsInstance>,
+    returned: parking_lot::Mutex<Option<FrameResources>>,
+    active: AtomicBool,
+    poisoned: AtomicBool,
+}
+
+#[derive(Default)]
+pub(crate) struct FrameResources {
+    pub fences: Vec<Fence>,
+    pub graphs: Vec<RenderGraph>,
+    pub pool: Vec<RenderGraph>,
+    pub ring: Option<RingBuffer>,
+}
+
+impl FrameOwner {
+    pub(crate) fn return_frame(&self, frame: FrameResources) {
+        *self.returned.lock() = Some(frame);
+        self.active.store(false, Ordering::Release);
+    }
+
+    fn retire(&self, frame: FrameResources) {
+        // WebGPU retains submitted native resources itself and cannot block
+        // the browser thread. Keep our graph alive through its completion
+        // callback as well (including any asynchronous readback destinations).
+        #[cfg(all(target_arch = "wasm32", feature = "wgpu-backend"))]
+        if let crate::backend::GpuBackend::Wgpu(backend) = &*self.instance.backend() {
+            backend.queue().on_submitted_work_done(move || drop(frame));
+            return;
+        }
+        for fence in &frame.fences {
+            if let Err(error) = fence.wait() {
+                // A failed wait is not completion. Preserve both the resources
+                // and the backend lease rather than destroy in-flight objects.
+                log::error!("Could not retire frame resources: {error}");
+                self.poisoned.store(true, Ordering::Release);
+                std::mem::forget(frame);
+                return;
+            }
+        }
+    }
+}
+
+impl Drop for FrameOwner {
+    fn drop(&mut self) {
+        let returned = self.returned.get_mut().take();
+        if let Some(frame) = returned {
+            self.retire(frame);
+        }
+        if !self.poisoned.load(Ordering::Acquire) {
+            self.instance
+                .pipeline_claimed
+                .store(false, Ordering::Release);
+        }
+    }
+}
 
 /// Manages multiple frames in flight for CPU-GPU parallelism.
 ///
@@ -114,6 +175,7 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 /// `FramePipeline` is **not thread-safe**. It should be owned by a single
 /// thread (typically the main/render thread).
 pub struct FramePipeline {
+    owner: Arc<FrameOwner>,
     /// Per-submit fences for each frame slot (one per graph submitted that
     /// frame). Empty if the slot hasn't been used yet. The slot is ready to
     /// recycle only when ALL of its fences are signaled — with per-submit
@@ -177,7 +239,8 @@ impl FramePipeline {
     ///
     /// # Panics
     ///
-    /// Panics if `frames_in_flight` is 0 or exceeds [`MAX_FRAMES_IN_FLIGHT`].
+    /// Panics if the frame count is invalid or the instance already has a
+    /// live pipeline (the backend owns one set of frame command pools).
     pub(crate) fn new(device: Arc<GraphicsDevice>, frames_in_flight: usize) -> Self {
         assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
         assert!(
@@ -189,6 +252,22 @@ impl FramePipeline {
         );
 
         Self {
+            owner: {
+                assert!(
+                    device
+                        .instance()
+                        .pipeline_claimed
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok(),
+                    "the graphics instance already has a frame pipeline"
+                );
+                Arc::new(FrameOwner {
+                    instance: Arc::clone(device.instance()),
+                    returned: parking_lot::Mutex::new(None),
+                    active: AtomicBool::new(false),
+                    poisoned: AtomicBool::new(false),
+                })
+            },
             device,
             frame_fences: (0..frames_in_flight).map(|_| Vec::new()).collect(),
             current_slot: 0,
@@ -214,8 +293,8 @@ impl FramePipeline {
     /// loop {
     ///     let mut schedule = pipeline.begin_frame()?;  // Wait + get schedule
     ///
-    ///     schedule.submit(prepass_graph);
-    ///     schedule.submit(main_graph);
+    ///     schedule.submit(prepass_graph)?;
+    ///     schedule.submit(main_graph)?;
     ///
     ///     pipeline.end_frame(schedule);
     /// }
@@ -274,6 +353,7 @@ impl FramePipeline {
     /// recycling anything. The fences stay in the slot, so a later call retries.
     pub fn begin_frame(&mut self) -> Result<FrameSchedule, GraphicsError> {
         profile_scope!("begin_frame");
+        self.collect_returned_frame()?;
         {
             profile_scope!("wait_fence");
             for fence in &self.frame_fences[self.current_slot] {
@@ -290,6 +370,7 @@ impl FramePipeline {
     /// `on_submitted_work_done` callback and is observed by `is_signaled`.
     pub fn try_begin_frame(&mut self) -> Result<Option<FrameSchedule>, GraphicsError> {
         profile_scope!("try_begin_frame");
+        self.collect_returned_frame()?;
         if !self.frame_fences[self.current_slot]
             .iter()
             .all(|fence| fence.is_signaled())
@@ -341,12 +422,15 @@ impl FramePipeline {
         // Take graph pool for this frame
         let graph_pool = std::mem::take(&mut self.graph_pool);
 
-        FrameSchedule::new(
+        let mut schedule = FrameSchedule::new(
             self.device.clone(),
             self.current_slot,
             ring_buffer,
             graph_pool,
-        )
+        );
+        self.owner.active.store(true, Ordering::Release);
+        schedule.owner = Some(Arc::clone(&self.owner));
+        schedule
     }
 
     /// Begin a new frame with a timeout.
@@ -371,7 +455,7 @@ impl FramePipeline {
     /// match pipeline.begin_frame_timeout(Duration::from_millis(100))? {
     ///     Some(mut schedule) => {
     ///         // Normal frame processing
-    ///         schedule.submit(graph);
+    ///         schedule.submit(graph)?;
     ///         pipeline.end_frame(schedule);
     ///     }
     ///     None => {
@@ -385,6 +469,7 @@ impl FramePipeline {
         timeout: Duration,
     ) -> Result<Option<FrameSchedule>, GraphicsError> {
         profile_scope!("begin_frame_timeout");
+        self.collect_returned_frame()?;
 
         // Wait every submit of the slot, sharing one deadline. On timeout the
         // fences stay in the slot so a later call retries.
@@ -409,25 +494,51 @@ impl FramePipeline {
     /// * `schedule` - The schedule returned from [`begin_frame`](Self::begin_frame),
     ///   after submitting the frame's graphs via [`submit`](FrameSchedule::submit).
     ///
-    /// # Panics
+    /// Empty frames are allowed. Dropping the schedule also returns it to
+    /// this pipeline, which collects it before beginning the next frame.
     ///
-    /// Panics if [`submit`](FrameSchedule::submit) was never called on the schedule.
+    /// # Panics
+    /// Panics if the schedule belongs to another pipeline.
     ///
     /// # Example
     ///
     /// ```ignore
     /// let mut schedule = pipeline.begin_frame()?;
-    /// schedule.submit(main_graph);
+    /// schedule.submit(main_graph)?;
     /// pipeline.end_frame(schedule);  // Takes ownership
     /// ```
     pub fn end_frame(&mut self, mut schedule: FrameSchedule) {
         profile_scope!("end_frame");
+        assert!(
+            schedule
+                .owner
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &self.owner)),
+            "schedule belongs to a different frame pipeline"
+        );
+        let frame = schedule.take_resources();
+        schedule.owner = None;
+        self.owner.active.store(false, Ordering::Release);
+        self.store_frame(frame);
+    }
 
-        let fences = schedule.take_fences();
+    fn collect_returned_frame(&mut self) -> Result<(), GraphicsError> {
+        if self.owner.active.load(Ordering::Acquire) {
+            return Err(GraphicsError::InvalidParameter(
+                "a frame schedule is still active".into(),
+            ));
+        }
+        let returned = self.owner.returned.lock().take();
+        if let Some(frame) = returned {
+            self.store_frame(frame);
+        }
+        Ok(())
+    }
 
+    fn store_frame(&mut self, mut frame: FrameResources) {
         // Return ring buffer to its slot (if configured)
         if !self.ring_buffers.is_empty()
-            && let Some(ring) = schedule.take_ring_buffer()
+            && let Some(ring) = frame.ring.take()
         {
             self.ring_buffers[self.current_slot] = Some(ring);
         }
@@ -435,13 +546,13 @@ impl FramePipeline {
         // Store submitted graphs per-slot (DON'T reset — GPU may still be using them).
         // Their Arc references keep GPU resources alive until begin_frame() resets them
         // after the fence wait guarantees the GPU is done.
-        self.slot_graphs[self.current_slot] = schedule.take_submitted_graphs();
+        self.slot_graphs[self.current_slot] = std::mem::take(&mut frame.graphs);
 
         // Return unused graphs to the pool directly
-        self.graph_pool.extend(schedule.take_graph_pool());
+        self.graph_pool.append(&mut frame.pool);
 
         // Store the per-submit fences for this slot
-        self.frame_fences[self.current_slot] = fences;
+        self.frame_fences[self.current_slot] = std::mem::take(&mut frame.fences);
 
         // Advance to next slot
         self.current_slot = (self.current_slot + 1) % self.frames_in_flight;
@@ -471,7 +582,16 @@ impl FramePipeline {
     /// update_slot_local_buffer(pipeline.current_slot());
     /// ```
     pub fn wait_current_slot(&self) -> Result<(), GraphicsError> {
-        for fence in &self.frame_fences[self.current_slot] {
+        if self.owner.active.load(Ordering::Acquire) {
+            return Err(GraphicsError::InvalidParameter(
+                "a frame schedule is still active".into(),
+            ));
+        }
+        let returned = self.owner.returned.lock();
+        for fence in self.frame_fences[self.current_slot]
+            .iter()
+            .chain(returned.iter().flat_map(|frame| &frame.fences))
+        {
             fence.wait()?;
         }
         Ok(())
@@ -495,7 +615,16 @@ impl FramePipeline {
         timeout: std::time::Duration,
     ) -> Result<bool, GraphicsError> {
         let start = web_time::Instant::now();
-        for fence in &self.frame_fences[self.current_slot] {
+        if self.owner.active.load(Ordering::Acquire) {
+            return Err(GraphicsError::InvalidParameter(
+                "a frame schedule is still active".into(),
+            ));
+        }
+        let returned = self.owner.returned.lock();
+        for fence in self.frame_fences[self.current_slot]
+            .iter()
+            .chain(returned.iter().flat_map(|frame| &frame.fences))
+        {
             let elapsed = start.elapsed();
             if elapsed >= timeout || !fence.wait_timeout(timeout - elapsed)? {
                 return Ok(false);
@@ -540,7 +669,18 @@ impl FramePipeline {
     pub fn wait_idle(&self) -> Result<(), GraphicsError> {
         profile_scope!("wait_idle");
 
-        for fence in self.frame_fences.iter().flatten() {
+        if self.owner.active.load(Ordering::Acquire) {
+            return Err(GraphicsError::InvalidParameter(
+                "a frame schedule is still active".into(),
+            ));
+        }
+        let returned = self.owner.returned.lock();
+        for fence in self
+            .frame_fences
+            .iter()
+            .flatten()
+            .chain(returned.iter().flat_map(|frame| &frame.fences))
+        {
             fence.wait()?;
         }
         Ok(())
@@ -559,6 +699,11 @@ impl FramePipeline {
     /// `Arc<wgpu::TextureView>` clones of the swapchain back buffers. On DX12,
     /// `ResizeBuffers` requires all back-buffer references to be released first.
     pub fn recycle_all_graphs(&mut self) {
+        assert!(
+            self.is_idle(),
+            "cannot recycle graphs while GPU work or a frame schedule is active"
+        );
+        self.collect_returned_frame().expect("no active frame");
         for slot_graphs in &mut self.slot_graphs {
             for mut graph in slot_graphs.drain(..) {
                 graph.reset();
@@ -583,7 +728,18 @@ impl FramePipeline {
     pub fn wait_idle_timeout(&self, timeout: Duration) -> Result<bool, GraphicsError> {
         let start = web_time::Instant::now();
 
-        for fence in self.frame_fences.iter().flatten() {
+        if self.owner.active.load(Ordering::Acquire) {
+            return Err(GraphicsError::InvalidParameter(
+                "a frame schedule is still active".into(),
+            ));
+        }
+        let returned = self.owner.returned.lock();
+        for fence in self
+            .frame_fences
+            .iter()
+            .flatten()
+            .chain(returned.iter().flat_map(|frame| &frame.fences))
+        {
             let elapsed = start.elapsed();
             if elapsed >= timeout {
                 return Ok(false);
@@ -718,6 +874,17 @@ impl FramePipeline {
     ///
     /// Returns `true` if [`wait_idle`](Self::wait_idle) would return immediately.
     pub fn is_idle(&self) -> bool {
+        if self.owner.active.load(Ordering::Acquire) {
+            return false;
+        }
+        let returned = self.owner.returned.lock();
+        if !returned
+            .iter()
+            .flat_map(|frame| &frame.fences)
+            .all(Fence::is_signaled)
+        {
+            return false;
+        }
         self.frame_fences
             .iter()
             .flatten()
@@ -735,11 +902,53 @@ impl FramePipeline {
     }
 }
 
+impl Drop for FramePipeline {
+    fn drop(&mut self) {
+        let frame = FrameResources {
+            fences: self.frame_fences.drain(..).flatten().collect(),
+            graphs: self.slot_graphs.drain(..).flatten().collect(),
+            pool: std::mem::take(&mut self.graph_pool),
+            ring: None,
+        };
+        // Submitted graphs retain every buffer used by GPU commands,
+        // including any ring buffer bound by a material instance.
+        self.owner.retire(frame);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::{GraphicsPass, RenderGraph};
     use crate::instance::GraphicsInstance;
+
+    #[test]
+    fn active_frame_cannot_be_overlapped_and_drop_returns_ring() {
+        let mut pipeline = make_test_pipeline(1);
+        pipeline
+            .create_ring_buffers(256, BufferUsage::UNIFORM, "test_ring")
+            .unwrap();
+        let schedule = pipeline.begin_frame().unwrap();
+        assert!(pipeline.begin_frame().is_err());
+        assert!(schedule.has_ring_buffer());
+        drop(schedule);
+        let schedule = pipeline.begin_frame().unwrap();
+        assert!(schedule.has_ring_buffer());
+        assert_eq!(pipeline.frame_count(), 2);
+        pipeline.end_frame(schedule);
+    }
+
+    #[test]
+    fn orphan_schedule_holds_backend_lease() {
+        let mut pipeline = make_test_pipeline(1);
+        let device = Arc::clone(&pipeline.device);
+        let schedule = pipeline.begin_frame().unwrap();
+        drop(pipeline);
+        assert!(device.instance().pipeline_claimed.load(Ordering::Acquire));
+        drop(schedule);
+        assert!(!device.instance().pipeline_claimed.load(Ordering::Acquire));
+        drop(device.create_pipeline(1));
+    }
 
     fn make_test_graph(name: &str) -> RenderGraph {
         let mut graph = RenderGraph::new();
@@ -790,7 +999,9 @@ mod tests {
         assert_eq!(pipeline.current_slot(), 0);
 
         let mut schedule = pipeline.begin_frame().unwrap();
-        schedule.render(make_test_graph("present"));
+        schedule
+            .render(make_test_graph("present"))
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -798,14 +1009,18 @@ mod tests {
         pipeline.signal_all_fences();
 
         let mut schedule = pipeline.begin_frame().unwrap();
-        schedule.render(make_test_graph("present"));
+        schedule
+            .render(make_test_graph("present"))
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 2);
 
         pipeline.signal_all_fences();
 
         let mut schedule = pipeline.begin_frame().unwrap();
-        schedule.render(make_test_graph("present"));
+        schedule
+            .render(make_test_graph("present"))
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0); // Wraps around
     }
@@ -837,7 +1052,9 @@ mod tests {
         // Frame 0
         let mut schedule = pipeline.begin_frame().unwrap();
         assert_eq!(pipeline.frame_count(), 1);
-        schedule.render(make_test_graph("present"));
+        schedule
+            .render(make_test_graph("present"))
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -847,7 +1064,9 @@ mod tests {
         // Frame 1
         let mut schedule = pipeline.begin_frame().unwrap();
         assert_eq!(pipeline.frame_count(), 2);
-        schedule.render(make_test_graph("present"));
+        schedule
+            .render(make_test_graph("present"))
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0);
 
@@ -892,11 +1111,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "submit() must be called at least once before end_frame()")]
-    fn test_end_frame_without_submit_panics() {
+    fn test_end_frame_without_submit() {
         let mut pipeline = make_test_pipeline(2);
         let schedule = pipeline.begin_frame().unwrap();
-        pipeline.end_frame(schedule); // Panics - submit() not called
+        pipeline.end_frame(schedule);
+        assert_eq!(pipeline.current_slot(), 1);
     }
 
     #[test]
@@ -904,7 +1123,9 @@ mod tests {
         let mut pipeline = make_test_pipeline(2);
 
         let mut schedule = pipeline.begin_frame().unwrap();
-        schedule.render(make_test_graph("main"));
+        schedule
+            .render(make_test_graph("main"))
+            .expect("graph submission failed");
 
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
@@ -917,8 +1138,12 @@ mod tests {
         // Two graphs in one frame, each its own submit; the slot must hold
         // one fence per submit and recycle only when all are signaled.
         let mut schedule = pipeline.begin_frame().unwrap();
-        schedule.submit(make_test_graph("prepass"));
-        schedule.submit(make_test_graph("main"));
+        schedule
+            .submit(make_test_graph("prepass"))
+            .expect("graph submission failed");
+        schedule
+            .submit(make_test_graph("main"))
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -929,7 +1154,9 @@ mod tests {
         // The slot recycles cleanly into the next frame.
         pipeline.signal_all_fences();
         let mut schedule = pipeline.begin_frame().unwrap();
-        schedule.submit(make_test_graph("main"));
+        schedule
+            .submit(make_test_graph("main"))
+            .expect("graph submission failed");
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0);
     }

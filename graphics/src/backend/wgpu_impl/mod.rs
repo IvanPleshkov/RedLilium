@@ -307,6 +307,7 @@ impl WgpuBackend {
             wgpu::Features::TEXTURE_COMPRESSION_ETC2,
             wgpu::Features::TEXTURE_COMPRESSION_ASTC,
             wgpu::Features::FLOAT32_FILTERABLE,
+            wgpu::Features::INDIRECT_FIRST_INSTANCE,
             // Wireframe (`PolygonMode::Line`) is native-only — absent on WebGPU
             // and WebGL. Requesting it unconditionally makes `request_device`
             // fail outright on web (WG-C2). Request it only where supported and
@@ -494,6 +495,10 @@ impl WgpuBackend {
         let features = self.device.features();
         let downlevel = self.adapter.get_downlevel_capabilities();
         crate::device::DeviceCapabilities {
+            indirect_draw: downlevel
+                .flags
+                .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION),
+            indirect_first_instance: features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             tier: crate::device::DeviceTier::Baseline,
             max_texture_dimension: limits.max_texture_dimension_2d,
             max_buffer_size: limits.max_buffer_size,
@@ -594,14 +599,6 @@ impl WgpuBackend {
     ///   failure. Per the trait-level contract this blocking is an
     ///   implementation detail — callers must not rely on it.
     ///
-    /// NOTE: the `None`-fence block is conservative. CPU/GPU overlap is bounded
-    /// per frame by the frame-in-flight fence waited in
-    /// [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame),
-    /// so making intermediate submits non-blocking is possible — but only once
-    /// every frame's GPU completion is represented by a real submission-tied
-    /// fence (today `FrameSchedule::finish` creates an untied fence and relies on
-    /// this block to mean "GPU is idle"). Removing the block without that change
-    /// would let `begin_frame` recycle resources still in use by the GPU.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
