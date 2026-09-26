@@ -4489,6 +4489,7 @@ dependencies = [
  "egui",
  "env_logger",
  "gpu-allocator",
+ "half",
  "log",
  "naga 24.0.0",
  "objc2 0.5.2",

@@ -153,6 +153,46 @@ limited to 2D textures, 2D arrays, cubemaps, cube arrays and 3D volumes without 
 CPU fallback broadens **asset import** support; a
 direct GPU graph operation on an unsupported format still returns an error.
 
+### GPU environment filtering (IBL)
+
+`ibl::EnvironmentFilter` builds reusable filtering jobs using the public graph,
+materials and resource APIs. Vulkan and wgpu execute the same WGSL shaders.
+`new(device)` creates shared pipelines; `prepare(source, settings)` creates a job
+with its own output cubemaps and bindings. Neither call uploads or submits work.
+`job.add_to_graph(graph, dependencies)` adds parameter uploads and convolution
+passes, returning the final pass for lighting to depend on. Reuse the filter
+across probes and the job across captures of the same source texture.
+
+Input is a square, single-sampled cubemap with `TEXTURE_BINDING` and a complete,
+initialized **ordinary radiance mip chain**. RGBA16F is the HDR path; normalized
+RGBA8/BGRA8, including sRGB, are also accepted. After scene capture, generate the
+source mips with `TransferOperation::generate_mipmaps` and make filtering depend
+on that pass. Across graphs submit capture/mips → filtering → lighting in order.
+Input radiance must be finite, nonnegative and representable in f16.
+
+Outputs are sampled/renderable RGBA16F cubemaps, also readable via graph copies:
+
+- `job.specular()` stores GGX convolution with `alpha = roughness²`, `N = V = R`,
+  and `roughness = mip / max_reflection_lod`. Mip zero directly resamples the
+  source at a LOD appropriate for the output size. Use the existing BRDF LUT.
+- `job.diffuse()` stores cosine-weighted irradiance **divided by PI**, matching
+  the deferred shader's `irradiance * albedo` convention.
+- `job.max_reflection_lod()` supplies the runtime roughness-to-LOD scale.
+
+Hammersley sampling is deterministic. Source LOD follows each sample's PDF to
+reduce noise and missed bright sources; see
+[pre-filtered importance sampling](https://google.github.io/filament/main/filament.html#annex/importancesamplingfortheibl/pre-filteredimportancesampling).
+Results are approximate and need not match the offline equirectangular baker
+texel for texel. Sizes and sample counts are configurable; defaults are 128-pixel
+specular faces / 512 samples and 32-pixel diffuse faces / 256 samples.
+
+This implements filtering for future reflection probes. Scene capture, probe
+placement/selection, parallax correction, blending, and a per-frame update budget
+are not implemented here. Each call schedules a complete update and overwrites
+its job's outputs. Use separate front/back jobs when old lighting must remain
+available while a new capture is prepared; publish only completed results. The
+existing asset-based environment resolver and offline `bake-ibl` remain usable.
+
 ### Public API boundary
 
 Applications use `GraphicsDevice`, engine resources, `RenderGraph`, and

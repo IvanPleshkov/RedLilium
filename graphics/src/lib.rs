@@ -75,6 +75,7 @@ pub mod display;
 pub mod egui;
 pub mod error;
 pub mod graph;
+pub mod ibl;
 pub mod instance;
 pub mod materials;
 pub mod mesh;
