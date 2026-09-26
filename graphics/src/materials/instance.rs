@@ -283,6 +283,8 @@ static_assertions::assert_impl_all!(BindingGroupDescriptor: Send, Sync);
 /// `Arc<MaterialInstance>` (and thus `Arc<BindingGroup>`) until the frame slot
 /// is recycled after its fence wait.
 pub struct BindingGroup {
+    // Descriptor entry indices in dynamic-offset order; computed once, not per draw.
+    dynamic_bindings: Vec<usize>,
     descriptor: BindingGroupDescriptor,
     layout: Arc<BindingLayout>,
     gpu_handle: GpuBindingGroup,
@@ -301,12 +303,30 @@ impl BindingGroup {
         descriptor: BindingGroupDescriptor,
         gpu_handle: GpuBindingGroup,
     ) -> Self {
+        let mut dynamic_bindings: Vec<_> = descriptor
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                layout.entries.iter().any(|decl| {
+                    decl.binding == entry.binding
+                        && decl.binding_type == super::BindingType::DynamicUniformBuffer
+                })
+            })
+            .map(|(index, _)| index)
+            .collect();
+        dynamic_bindings.sort_unstable_by_key(|&index| descriptor.entries[index].binding);
         Self {
+            dynamic_bindings,
             device,
             layout,
             descriptor,
             gpu_handle,
         }
+    }
+
+    pub(crate) fn dynamic_bindings(&self) -> &[usize] {
+        &self.dynamic_bindings
     }
 
     /// The bound entries.

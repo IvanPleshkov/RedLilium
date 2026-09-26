@@ -1064,6 +1064,17 @@ impl VulkanBackend {
         self.memory_stats.lock().clone()
     }
 
+    pub(crate) fn texture_filterable(&self, format: crate::TextureFormat) -> bool {
+        unsafe {
+            self.instance.get_physical_device_format_properties(
+                self.physical_device,
+                self.vk_texture_format(format),
+            )
+        }
+        .optimal_tiling_features
+        .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR)
+    }
+
     /// Whether a color format supports 2D/3D blits and cross-face cubemap
     /// rendering. The public format-only query conservatively covers both paths.
     pub fn supports_mipgen(&self, format: crate::types::TextureFormat) -> bool {
@@ -2010,6 +2021,32 @@ impl VulkanBackend {
                 .queue_family_indices(families.as_slice());
         }
 
+        let supported = unsafe {
+            self.instance.get_physical_device_image_format_properties(
+                self.physical_device,
+                format,
+                image_type,
+                vk::ImageTiling::OPTIMAL,
+                usage,
+                flags,
+            )
+        }
+        .map_err(|e| {
+            GraphicsError::FeatureNotSupported(format!(
+                "texture format/dimension/usage combination: {e:?}"
+            ))
+        })?;
+        if extent.width > supported.max_extent.width
+            || extent.height > supported.max_extent.height
+            || extent.depth > supported.max_extent.depth
+            || array_layers > supported.max_array_layers
+            || descriptor.mip_level_count > supported.max_mip_levels
+            || !supported.sample_counts.contains(image_info.samples)
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "texture descriptor exceeds format-specific limits".into(),
+            ));
+        }
         let image = unsafe { self.device.create_image(&image_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!("Failed to create image: {:?}", e))
         })?;

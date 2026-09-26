@@ -299,12 +299,11 @@ impl FrameSchedule {
             ));
         }
         graph.validate_transfers(&self.device)?;
+        graph.validate_commands(&self.device)?;
         let fence = Fence::new_gpu(Arc::clone(self.device.instance()))?;
 
         #[cfg(debug_assertions)]
         debug_assert_no_write_to_mapped(&graph);
-        #[cfg(debug_assertions)]
-        debug_assert_pipeline_state_matches_targets(&graph);
 
         let compiled = graph.compile(mode)?;
         let usage = GraphUsage::from_compiled(compiled);
@@ -413,79 +412,6 @@ fn debug_assert_no_write_to_mapped(graph: &RenderGraph) {
                  in flight (write-while-mapped, #33) — this consumer must wait the map out or \
                  double-buffer the readback target",
                 dst.label()
-            );
-        }
-    }
-}
-
-/// Debug-only guard (#39): a draw's material pipeline must agree with the pass's
-/// render-target attachments on MSAA sample count and depth-attachment presence.
-///
-/// These are two independent sources of truth now that `MaterialDescriptor`
-/// carries `sample_count` and `Option<DepthState>` (XB-L6): a mismatch is a
-/// validation error on wgpu and undefined-to-fatal on raw Vulkan. All attachments
-/// in a pass share one sample count, so it is read from the first color
-/// attachment (surface swapchains are single-sample), falling back to depth.
-#[cfg(debug_assertions)]
-fn debug_assert_pipeline_state_matches_targets(graph: &RenderGraph) {
-    use crate::graph::RenderTarget;
-
-    fn target_samples(t: &RenderTarget) -> u32 {
-        t.sample_count()
-    }
-
-    for pass in graph.passes() {
-        let Some(gp) = pass.as_graphics() else {
-            continue;
-        };
-        let Some(targets) = gp.render_targets() else {
-            continue;
-        };
-
-        let pass_samples = targets
-            .color_attachments
-            .first()
-            .map(|c| target_samples(&c.target))
-            .or_else(|| {
-                targets
-                    .depth_stencil_attachment
-                    .as_ref()
-                    .map(|d| target_samples(&d.target))
-            })
-            .unwrap_or(1);
-        let pass_has_depth = targets.depth_stencil_attachment.is_some();
-
-        for cmd in gp.draw_commands() {
-            let desc = cmd.material.material().descriptor();
-            let label = desc.label.as_deref().unwrap_or("<unlabeled>");
-            debug_assert_eq!(
-                desc.sample_count,
-                pass_samples,
-                "pass '{}': material '{label}' has sample_count {} but the target attachments \
-                 are {}-sample (#39, XB-L6)",
-                gp.name(),
-                desc.sample_count,
-                pass_samples,
-            );
-            debug_assert_eq!(
-                desc.depth.is_some(),
-                pass_has_depth,
-                "pass '{}': material '{label}' depth state ({}) disagrees with the pass depth \
-                 attachment ({}) — a pipeline must have a depth-stencil state iff its pass has a \
-                 depth attachment (#39)",
-                gp.name(),
-                if desc.depth.is_some() { "Some" } else { "None" },
-                if pass_has_depth { "present" } else { "absent" },
-            );
-            debug_assert_eq!(
-                desc.color_formats.len(),
-                targets.color_attachments.len(),
-                "pass '{}': material '{label}' declares {} color format(s) but the pass has {} \
-                 color attachment(s) — counts must match (zero-color depth-only passes need \
-                 zero-color materials, #129)",
-                gp.name(),
-                desc.color_formats.len(),
-                targets.color_attachments.len(),
             );
         }
     }

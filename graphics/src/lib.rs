@@ -86,6 +86,7 @@ pub mod scheduler;
 pub mod shader;
 pub mod swapchain;
 pub mod types;
+mod validation;
 
 // Re-export main types for convenience
 pub use bindless::{BINDLESS_SAMPLERS_BINDING, BINDLESS_TEXTURES_BINDING, BindlessSlots};

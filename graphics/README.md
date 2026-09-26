@@ -45,6 +45,36 @@ There is one live frame pipeline per graphics instance and one active schedule p
 pipeline. `submit_with_mode` selects Strict compilation when ambiguous writers
 should be treated as errors instead of using addition order.
 
+### Resource and command validation
+
+Resource creation validates binding completeness and uniqueness, device ownership,
+usage, buffer ranges/alignment/binding-size limits, texture dimensions/sample
+types, and sampler comparison mode. Texture descriptors use dimension-specific
+limits (including array layers), legal mip counts and MSAA constraints. Vulkan
+queries the requested format/dimension/usage combination; wgpu checks granted
+format features and limits. Compressed base extents on wgpu must be block-aligned;
+smaller edge mips remain supported.
+
+Before submission, every graphics/compute command is checked for pipeline stage,
+binding-layout compatibility, dynamic uniform offsets, resource ownership and
+pending CPU mappings. Draw constructors only describe commands; their former
+debug-only checks now return submission errors in every build. Graphics pipelines must match their attachments; direct
+compute and mesh dispatch counts must fit device limits. An invalid command
+rejects the graph before any of its transfers execute. Compute and indirect
+raster commands currently have no dynamic-offset parameter, so materials requiring
+dynamic offsets cannot be used with those commands.
+
+Native wgpu resource creation and command recording use error scopes, returning
+validation failures as `InvalidParameter`, allocation failures as `OutOfMemory`,
+and internal errors as `Internal`. Lost devices continue returning `DeviceLost`.
+Browser WebGPU validation is asynchronous: a creation call can return before the
+browser validates it. Such errors, and errors reported after queue submission,
+are retained and returned by the next resource creation or graph submission.
+Submitted resources remain protected by their fence even when a later error arrives.
+
+Texture views and precise mip/layer tracking are described in the
+[API proposal](TEXTURE_VIEWS_DESIGN.md); they are not implemented yet.
+
 ### Transfer validation
 
 Before recording commands, `submit` validates every transfer operation in the

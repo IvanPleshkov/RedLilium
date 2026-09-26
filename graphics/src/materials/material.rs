@@ -482,6 +482,10 @@ impl MaterialDescriptor {
         let has = |stage: ShaderStage| self.shaders.iter().any(|s| s.stage == stage);
         let err = |msg: String| Err(crate::error::GraphicsError::InvalidParameter(msg));
 
+        if has(ShaderStage::Compute) && self.shaders.iter().any(|s| s.stage != ShaderStage::Compute)
+        {
+            return err("compute and graphics stages cannot share a pipeline".into());
+        }
         if has(ShaderStage::Task) && !has(ShaderStage::Mesh) {
             return err(format!(
                 "material {:?}: a task stage requires a mesh stage (task shaders only \

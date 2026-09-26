@@ -1111,6 +1111,16 @@ impl GpuBackend {
         }
     }
 
+    pub(crate) fn texture_filterable(&self, format: crate::TextureFormat) -> bool {
+        match self {
+            Self::Dummy(_) => !format.is_integer() && !format.is_depth_stencil(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(b) => b.texture_filterable(format),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(b) => b.texture_filterable(format),
+        }
+    }
+
     /// Information about the adapter this backend was created on.
     pub fn adapter_info(&self) -> crate::instance::AdapterInfo {
         match self {

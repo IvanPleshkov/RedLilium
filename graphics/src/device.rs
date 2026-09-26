@@ -51,8 +51,26 @@ pub struct DeviceCapabilities {
     pub indirect_first_instance: bool,
     /// Renderer-architecture tier (see [`DeviceTier`]).
     pub tier: DeviceTier,
-    /// Maximum texture dimension the backend accepts.
+    /// Maximum width/height of a 2D texture. Other dimension limits are separate.
     pub max_texture_dimension: u32,
+    /// Maximum width of a 1D texture.
+    pub max_texture_dimension_1d: u32,
+    /// Maximum extent along each axis of a 3D texture.
+    pub max_texture_dimension_3d: u32,
+    /// Maximum cubemap face size.
+    pub max_texture_dimension_cube: u32,
+    /// Maximum number of array layers (cube arrays count six faces per cube).
+    pub max_texture_array_layers: u32,
+    /// Maximum uniform binding range in bytes.
+    pub max_uniform_buffer_binding_size: u64,
+    /// Maximum storage binding range in bytes.
+    pub max_storage_buffer_binding_size: u64,
+    /// Required uniform binding-offset alignment, in bytes.
+    pub min_uniform_buffer_offset_alignment: u64,
+    /// Required storage binding-offset alignment, in bytes.
+    pub min_storage_buffer_offset_alignment: u64,
+    /// Maximum direct compute dispatch group counts per axis.
+    pub max_compute_workgroups: [u32; 3],
     /// Maximum buffer size the backend accepts.
     pub max_buffer_size: u64,
     /// Maximum sampler anisotropy; `1` when anisotropic filtering is
@@ -450,33 +468,7 @@ impl GraphicsDevice {
     ) -> Result<Arc<Texture>, GraphicsError> {
         profile_scope!("create_texture");
 
-        // Validate
-        let max_dim = self.capabilities.max_texture_dimension;
-        if descriptor.size.width > max_dim
-            || descriptor.size.height > max_dim
-            || descriptor.size.depth > max_dim
-        {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "texture dimension exceeds maximum {max_dim}"
-            )));
-        }
-
-        if descriptor.size.width == 0 || descriptor.size.height == 0 {
-            return Err(GraphicsError::InvalidParameter(
-                "texture dimensions cannot be zero".to_string(),
-            ));
-        }
-
-        if descriptor.sample_count > 1
-            && !self
-                .capabilities
-                .supports_sample_count(descriptor.sample_count)
-        {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "sample count {} not supported by this device (supported mask: {:#x})",
-                descriptor.sample_count, self.capabilities.sample_count_mask
-            )));
-        }
+        crate::validation::texture_descriptor(descriptor, &self.capabilities)?;
 
         // Block-compressed formats (#119): sample-only on every backend, and
         // gated per-family by the device feature bit. The usage check comes
@@ -944,6 +936,9 @@ impl GraphicsDevice {
         };
 
         // Create the GPU pipeline via backend
+        for layout in &descriptor.binding_layouts {
+            crate::validation::binding_layout(layout)?;
+        }
         let gpu_handle = self.instance.backend().create_pipeline(descriptor)?;
 
         // Create the material
@@ -970,10 +965,10 @@ impl GraphicsDevice {
     ///
     /// # Errors
     ///
-    /// Returns an error if an entry's binding is not declared in `layout`, if a
-    /// bound resource's kind does not match the layout's declared
-    /// [`BindingType`](crate::BindingType), or if backend resource creation
-    /// fails.
+    /// Validates slot completeness/uniqueness, resource types and device ownership,
+    /// usage, buffer ranges/alignment/limits, texture dimension/sample type and
+    /// sampler comparison mode. Backend creation failures are also returned;
+    /// WebGPU browser validation can arrive asynchronously at a later operation.
     pub fn create_binding_group(
         self: &Arc<Self>,
         layout: Arc<crate::materials::BindingLayout>,
@@ -1051,6 +1046,8 @@ impl GraphicsDevice {
                 }
             }
         }
+
+        crate::validation::binding_group(self, &layout, &descriptor)?;
 
         let gpu_handle = self
             .instance

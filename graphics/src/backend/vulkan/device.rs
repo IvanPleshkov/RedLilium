@@ -911,6 +911,15 @@ pub fn device_capabilities(
         // render paths exist (ADR-027).
         tier: crate::device::DeviceTier::Baseline,
         max_texture_dimension: limits.max_image_dimension2_d,
+        max_texture_dimension_1d: limits.max_image_dimension1_d,
+        max_texture_dimension_3d: limits.max_image_dimension3_d,
+        max_texture_dimension_cube: limits.max_image_dimension_cube,
+        max_texture_array_layers: limits.max_image_array_layers,
+        max_uniform_buffer_binding_size: u64::from(limits.max_uniform_buffer_range),
+        max_storage_buffer_binding_size: u64::from(limits.max_storage_buffer_range),
+        min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
+        min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
+        max_compute_workgroups: limits.max_compute_work_group_count,
         max_buffer_size,
         max_sampler_anisotropy: if selected.optional.sampler_anisotropy {
             limits.max_sampler_anisotropy as u16

@@ -4645,3 +4645,166 @@ fn test_mips_recover_after_recording_failure_and_regenerate(
         );
     }
 }
+
+/// A bad command rejects the whole graph before its earlier upload executes.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn invalid_dispatch_does_not_execute_prior_transfers(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    let destination = ctx.create_gpu_buffer(16, BufferUsage::STORAGE);
+    ctx.write_buffer(&destination, &[17u8; 16]);
+    let material = ctx
+        .device
+        .create_material(
+            &MaterialDescriptor::new().with_shader(ShaderSource::compute(
+                "@compute @workgroup_size(1) fn main() {}",
+                "main",
+            )),
+        )
+        .unwrap();
+    let mut graph = RenderGraph::new();
+    let mut upload = TransferPass::new("must not run".into());
+    upload.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::write_buffer(destination.clone(), 0, Arc::from([99u8; 16])),
+    ));
+    graph.add_transfer_pass(upload);
+    let mut compute = redlilium_graphics::ComputePass::new("invalid dispatch".into());
+    compute.add_dispatch(
+        Arc::new(MaterialInstance::new(material)),
+        ctx.device.capabilities().max_compute_workgroups[0] + 1,
+        1,
+        1,
+    );
+    graph.add_compute_pass(compute);
+    {
+        let mut pipeline = ctx.pipeline.borrow_mut();
+        let mut schedule = pipeline.begin_frame().unwrap();
+        let err = schedule.submit(graph).unwrap_err();
+        assert!(
+            matches!(err,redlilium_graphics::GraphicsError::InvalidParameter(ref message) if message.contains("invalid dispatch"))
+        );
+        schedule.submit(RenderGraph::new()).unwrap();
+        pipeline.end_frame(schedule);
+        pipeline.wait_idle().unwrap();
+    }
+    let readback = ctx.create_readback_buffer(16);
+    let mut graph = RenderGraph::new();
+    let mut copy = TransferPass::new("verify untouched".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::copy_buffer_whole(destination, readback.clone()),
+    ));
+    graph.add_transfer_pass(copy);
+    ctx.execute_graph(graph);
+    let bytes = ctx.read_buffer(&readback, 16);
+    if backend != Backend::Dummy {
+        assert_eq!(bytes, vec![17u8; 16]);
+    }
+}
+
+#[cfg(feature = "wgpu-backend")]
+#[test]
+fn wgpu_creation_validation_returns_error_and_recovers() {
+    let Some(ctx) = TestContext::new(Backend::WebGpu) else {
+        return;
+    };
+    // This is native wgpu validation, outside the common binding/texture preflight.
+    let invalid = SamplerDescriptor {
+        lod_min_clamp: 4.0,
+        lod_max_clamp: 1.0,
+        ..SamplerDescriptor::nearest()
+    };
+    assert!(matches!(
+        ctx.device.create_sampler(&invalid),
+        Err(redlilium_graphics::GraphicsError::InvalidParameter(_))
+    ));
+    assert!(
+        ctx.device
+            .create_sampler(&SamplerDescriptor::linear())
+            .is_ok()
+    );
+    let descriptor = MaterialDescriptor::new().with_shader(ShaderSource::compute(
+        "@compute @workgroup_size(1) fn main() {}",
+        "missing_entry",
+    ));
+    assert!(ctx.device.create_material(&descriptor).is_err());
+    assert!(
+        ctx.device
+            .create_material(&MaterialDescriptor {
+                shaders: vec![ShaderSource::compute(
+                    "@compute @workgroup_size(1) fn main() {}",
+                    "main"
+                )],
+                ..descriptor
+            })
+            .is_ok()
+    );
+}
+
+#[cfg(feature = "wgpu-backend")]
+#[test]
+fn wgpu_recording_validation_returns_error_and_recovers() {
+    let Some(ctx) = TestContext::new(Backend::WebGpu) else {
+        return;
+    };
+    let layout = Arc::new(
+        BindingLayout::new().with_entry(
+            BindingLayoutEntry::new(0, BindingType::UniformBuffer)
+                .with_visibility(redlilium_graphics::ShaderStageFlags::COMPUTE),
+        ),
+    );
+    let material=ctx.device.create_material(&MaterialDescriptor::new()
+        .with_binding_layout(layout.clone())
+        .with_binding_layout(Arc::new(BindingLayout::new().with_entry(BindingLayoutEntry::new(0,BindingType::StorageBuffer).with_visibility(redlilium_graphics::ShaderStageFlags::COMPUTE))))
+        .with_shader(ShaderSource::compute("@group(0) @binding(0) var<uniform> value: vec4f; @group(1) @binding(0) var<storage, read_write> output: vec4f; @compute @workgroup_size(1) fn main() { output = value; }", "main"))).unwrap();
+    let output = ctx.create_gpu_buffer(16, BufferUsage::STORAGE);
+    let output_group = ctx
+        .device
+        .create_binding_group(
+            material.binding_layouts()[1].clone(),
+            BindingGroupDescriptor::new().with_buffer(0, output),
+        )
+        .unwrap();
+    let tiny = ctx.create_buffer(4, BufferUsage::UNIFORM);
+    let invalid = ctx
+        .device
+        .create_binding_group(
+            layout.clone(),
+            BindingGroupDescriptor::new().with_buffer(0, tiny),
+        )
+        .unwrap();
+    let enough = ctx.create_buffer(16, BufferUsage::UNIFORM);
+    let valid = ctx
+        .device
+        .create_binding_group(layout, BindingGroupDescriptor::new().with_buffer(0, enough))
+        .unwrap();
+    let graph = |group| {
+        let mut graph = RenderGraph::new();
+        let mut pass =
+            redlilium_graphics::ComputePass::new("binding size checked against shader".into());
+        pass.add_dispatch(
+            Arc::new(
+                MaterialInstance::new(material.clone())
+                    .with_binding_group(group)
+                    .with_binding_group(output_group.clone()),
+            ),
+            1,
+            1,
+            1,
+        );
+        graph.add_compute_pass(pass);
+        graph
+    };
+    let mut pipeline = ctx.pipeline.borrow_mut();
+    let mut schedule = pipeline.begin_frame().unwrap();
+    assert!(matches!(
+        schedule.submit(graph(invalid)),
+        Err(redlilium_graphics::GraphicsError::InvalidParameter(_))
+    ));
+    schedule.submit(graph(valid)).unwrap();
+    pipeline.end_frame(schedule);
+    pipeline.wait_idle().unwrap();
+}

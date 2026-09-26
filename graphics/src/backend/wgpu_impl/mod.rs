@@ -69,6 +69,8 @@ pub struct WgpuBackend {
     adapter: wgpu::Adapter,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
+    errors: Arc<parking_lot::Mutex<std::collections::VecDeque<GraphicsError>>>,
+    lost: Arc<std::sync::atomic::AtomicBool>,
     /// Content-keyed dedup of bind group layouts. Both pipeline creation and
     /// `create_binding_group` pull from here, so a binding group's
     /// `wgpu::BindGroupLayout` is the *same object* as the pipelines that use
@@ -340,15 +342,70 @@ impl WgpuBackend {
         }
     }
 
-    /// Install the uncaptured-error handler on a device.
-    ///
-    /// Without a handler every uncaptured wgpu validation error aborts the
-    /// process; routing them to the log makes a bad draw degrade (missing
-    /// output + error message) instead of killing the app.
-    fn install_error_handler(device: &wgpu::Device) {
-        device.on_uncaptured_error(std::sync::Arc::new(|error| {
-            log::error!("wgpu uncaptured error: {error}");
+    fn map_error(error: wgpu::Error) -> GraphicsError {
+        match error {
+            wgpu::Error::OutOfMemory { .. } => GraphicsError::OutOfMemory,
+            wgpu::Error::Validation { description, .. } => {
+                GraphicsError::InvalidParameter(description)
+            }
+            wgpu::Error::Internal { description, .. } => GraphicsError::Internal(description),
+        }
+    }
+
+    fn install_error_handler(
+        device: &wgpu::Device,
+        lost: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Arc<parking_lot::Mutex<std::collections::VecDeque<GraphicsError>>> {
+        device.set_device_lost_callback(move |_, _| {
+            lost.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let errors = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
+        let pending = errors.clone();
+        device.on_uncaptured_error(Arc::new(move |error| {
+            pending.lock().push_back(Self::map_error(error));
         }));
+        errors
+    }
+
+    /// Browser errors arrive asynchronously and are returned by the next operation.
+    /// Native scopes are thread-local and resolve before returning a new resource.
+    fn checked<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, GraphicsError>,
+    ) -> Result<T, GraphicsError> {
+        if self.lost.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(GraphicsError::DeviceLost);
+        }
+        if let Some(error) = self.errors.lock().pop_front() {
+            return Err(error);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let scopes = [
+            wgpu::ErrorFilter::OutOfMemory,
+            wgpu::ErrorFilter::Internal,
+            wgpu::ErrorFilter::Validation,
+        ]
+        .map(|filter| self.device.push_error_scope(filter));
+        let result = operation();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut first_error = None;
+            for scope in scopes.into_iter().rev() {
+                if let Some(error) = pollster::block_on(scope.pop()) {
+                    first_error.get_or_insert(Self::map_error(error));
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+        if self.lost.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(GraphicsError::DeviceLost);
+        }
+        if let Some(error) = self.errors.lock().pop_front() {
+            return Err(error);
+        }
+        result
     }
 
     /// Assemble the backend from a freshly created adapter/device/queue, logging
@@ -361,12 +418,15 @@ impl WgpuBackend {
         queue: wgpu::Queue,
     ) -> Self {
         log::info!("wgpu adapter: {:?}", adapter.get_info());
-        Self::install_error_handler(&device);
+        let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let errors = Self::install_error_handler(&device, lost.clone());
         Self {
             instance,
             adapter,
             device: Arc::new(device),
             queue: Arc::new(queue),
+            errors,
+            lost,
             bind_group_layout_cache: parking_lot::Mutex::new(HashMap::new()),
             mip_pipelines: parking_lot::Mutex::new(HashMap::new()),
         }
@@ -450,7 +510,8 @@ impl WgpuBackend {
                 .map_err(|e| {
                     GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
                 })?;
-        Self::install_error_handler(&new_device);
+        self.lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.errors = Self::install_error_handler(&new_device, self.lost.clone());
 
         // Update the backend with new adapter and device.
         // Note: Pipelines are now owned by Materials (GpuPipeline),
@@ -504,6 +565,19 @@ impl WgpuBackend {
             indirect_first_instance: features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             tier: crate::device::DeviceTier::Baseline,
             max_texture_dimension: limits.max_texture_dimension_2d,
+            max_texture_dimension_1d: limits.max_texture_dimension_1d,
+            max_texture_dimension_3d: limits.max_texture_dimension_3d,
+            max_texture_dimension_cube: limits.max_texture_dimension_2d,
+            max_texture_array_layers: limits.max_texture_array_layers,
+            max_uniform_buffer_binding_size: u64::from(limits.max_uniform_buffer_binding_size),
+            max_storage_buffer_binding_size: u64::from(limits.max_storage_buffer_binding_size),
+            min_uniform_buffer_offset_alignment: u64::from(
+                limits.min_uniform_buffer_offset_alignment,
+            ),
+            min_storage_buffer_offset_alignment: u64::from(
+                limits.min_storage_buffer_offset_alignment,
+            ),
+            max_compute_workgroups: [limits.max_compute_workgroups_per_dimension; 3],
             max_buffer_size: limits.max_buffer_size,
             // WebGPU validates anisotropy in [1, 16] and clamps to hardware
             // internally; there is no per-adapter query to be more precise.
@@ -608,26 +682,31 @@ impl WgpuBackend {
     ) -> Result<(), GraphicsError> {
         profile_scope!("wgpu_execute_graph");
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("RenderGraph Encoder"),
-            });
+        let command_buffer = self.checked(|| {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("RenderGraph Encoder"),
+                });
 
-        // Get all passes from the graph
-        let passes = graph.passes();
+            // Get all passes from the graph
+            let passes = graph.passes();
 
-        // Process each pass in compiled order
-        {
-            profile_scope!("record_passes");
-            for handle in compiled.pass_order() {
-                let pass = &passes[handle.index()];
-                self.encode_pass(&mut encoder, pass)?;
+            // Process each pass in compiled order
+            {
+                profile_scope!("record_passes");
+                for handle in compiled.pass_order() {
+                    let pass = &passes[handle.index()];
+                    self.encode_pass(&mut encoder, pass)?;
+                }
             }
-        }
 
-        // Submit commands
-        let command_buffer = encoder.finish();
+            // Submit commands
+            Ok(encoder.finish())
+        })?;
+        // Keep post-submit failures queued for the next operation: returning Err
+        // after work has been submitted would let the scheduler drop its resources
+        // without retaining them behind the submission fence.
         let submission_index = {
             profile_scope!("queue_submit");
             self.queue.submit(std::iter::once(command_buffer))

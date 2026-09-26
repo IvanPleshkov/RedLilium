@@ -39,6 +39,7 @@
 //! let handle = graph.add_graphics_pass(pass);
 //! ```
 
+mod command_validation;
 mod pass;
 pub mod resource_usage;
 mod target;
@@ -710,8 +711,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "BufferUsage::INDIRECT")]
     fn mesh_tasks_indirect_requires_indirect_flag() {
         use std::sync::Arc;
 
@@ -742,13 +741,17 @@ mod tests {
         ));
         let material_instance = Arc::new(MaterialInstance::new(material));
 
-        // A STORAGE-only buffer (no INDIRECT flag) must trip the debug check.
+        // Construction is infallible; submission uses this Result-based validation.
         let not_indirect = device
             .create_buffer(&BufferDescriptor::new(64, BufferUsage::STORAGE))
             .unwrap();
 
         let mut pass = GraphicsPass::new("bad indirect".into());
         pass.add_draw_mesh_tasks_indirect(material_instance, not_indirect);
+        assert!(matches!(
+            pass.mesh_tasks_indirect_commands()[0].validate(),
+            Err(crate::GraphicsError::InvalidParameter(_))
+        ));
     }
 
     #[test]

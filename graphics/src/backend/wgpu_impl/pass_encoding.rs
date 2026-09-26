@@ -537,8 +537,9 @@ impl WgpuBackend {
             // -- Pipeline: owned by Material, created at create_material() time --
             let super::super::GpuPipeline::WgpuCompute { pipeline, .. } = material_arc.gpu_handle()
             else {
-                log::warn!("Material has no wgpu compute pipeline");
-                continue;
+                return Err(GraphicsError::InvalidParameter(
+                    "material has no wgpu compute pipeline".into(),
+                ));
             };
 
             // Record into compute pass

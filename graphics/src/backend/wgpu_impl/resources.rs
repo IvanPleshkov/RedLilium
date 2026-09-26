@@ -13,30 +13,40 @@ use super::conversion::{
 };
 
 impl WgpuBackend {
+    pub(crate) fn texture_filterable(&self, format: crate::TextureFormat) -> bool {
+        convert_texture_format(format)
+            .guaranteed_format_features(self.device.features())
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+    }
+
     /// Get (or create + cache) the `wgpu::BindGroupLayout` for a binding layout,
     /// deduped by content. Shared between pipeline creation and binding-group
     /// creation so a group's layout is the same object the pipeline uses.
     pub(super) fn get_or_create_bind_group_layout(
         &self,
         layout: &crate::materials::BindingLayout,
-    ) -> wgpu::BindGroupLayout {
+    ) -> Result<wgpu::BindGroupLayout, GraphicsError> {
         let key = super::bind_group_layout_key(layout);
         if let Some(cached) = self.bind_group_layout_cache.lock().get(&key) {
-            return cached.clone();
+            return Ok(cached.clone());
         }
         let entries = super::conversion::binding_layout_entries(layout);
-        let created = self
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: layout.label.as_deref(),
-                entries: &entries,
-            });
+        let created = self.checked(|| {
+            Ok(self
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: layout.label.as_deref(),
+                    entries: &entries,
+                }))
+        })?;
         // Another thread may have raced; keep one object per key.
-        self.bind_group_layout_cache
+        Ok(self
+            .bind_group_layout_cache
             .lock()
             .entry(key)
             .or_insert(created)
-            .clone()
+            .clone())
     }
 
     /// Create a binding group: build the `wgpu::BindGroup` **once**, against the
@@ -47,7 +57,15 @@ impl WgpuBackend {
         layout: &crate::materials::BindingLayout,
         descriptor: &crate::materials::BindingGroupDescriptor,
     ) -> Result<super::super::GpuBindingGroup, GraphicsError> {
-        let bg_layout = self.get_or_create_bind_group_layout(layout);
+        self.checked(|| self.create_binding_group_inner(layout, descriptor))
+    }
+
+    fn create_binding_group_inner(
+        &self,
+        layout: &crate::materials::BindingLayout,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+    ) -> Result<super::super::GpuBindingGroup, GraphicsError> {
+        let bg_layout = self.get_or_create_bind_group_layout(layout)?;
         let entries = build_wgpu_bind_group_entries(&descriptor.entries)?;
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: descriptor.label.as_deref(),
@@ -59,6 +77,13 @@ impl WgpuBackend {
 
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
+        self.checked(|| self.create_buffer_inner(descriptor))
+    }
+
+    fn create_buffer_inner(
+        &self,
+        descriptor: &BufferDescriptor,
+    ) -> Result<GpuBuffer, GraphicsError> {
         // Acceleration-structure roles are Vulkan-only (#110); the wgpu
         // backend reports `ray_query: false`, so honor that here instead of
         // silently dropping the flags in conversion.
@@ -86,6 +111,13 @@ impl WgpuBackend {
 
     /// Create a texture resource.
     pub fn create_texture(
+        &self,
+        descriptor: &TextureDescriptor,
+    ) -> Result<GpuTexture, GraphicsError> {
+        self.checked(|| self.create_texture_inner(descriptor))
+    }
+
+    fn create_texture_inner(
         &self,
         descriptor: &TextureDescriptor,
     ) -> Result<GpuTexture, GraphicsError> {
@@ -120,6 +152,23 @@ impl WgpuBackend {
 
         let usage = convert_texture_usage(descriptor.usage);
 
+        let features = format.guaranteed_format_features(self.device.features());
+        if !features.allowed_usages.contains(usage)
+            || !features
+                .flags
+                .sample_count_supported(descriptor.sample_count)
+        {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "format {:?} does not support requested usage/sample count",
+                descriptor.format
+            )));
+        }
+        let (bw, bh) = format.block_dimensions();
+        if descriptor.size.width % bw != 0 || descriptor.size.height % bh != 0 {
+            return Err(GraphicsError::InvalidParameter(
+                "wgpu base texture extent must align to compression blocks".into(),
+            ));
+        }
         // WebGPU has no arrayed 1D textures at all; the old mapping created a
         // multi-layer D1 texture with a D1 (non-array) view, which fails
         // bind-group validation on first use. Reject it up front.
@@ -181,6 +230,13 @@ impl WgpuBackend {
         &self,
         descriptor: &SamplerDescriptor,
     ) -> Result<GpuSampler, GraphicsError> {
+        self.checked(|| self.create_sampler_inner(descriptor))
+    }
+
+    fn create_sampler_inner(
+        &self,
+        descriptor: &SamplerDescriptor,
+    ) -> Result<GpuSampler, GraphicsError> {
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: descriptor.label.as_deref(),
             address_mode_u: convert_address_mode(descriptor.address_mode_u),
@@ -204,6 +260,13 @@ impl WgpuBackend {
 
     /// Create a GPU pipeline from a material descriptor.
     pub fn create_pipeline(
+        &self,
+        descriptor: &crate::materials::MaterialDescriptor,
+    ) -> Result<super::super::GpuPipeline, GraphicsError> {
+        self.checked(|| self.create_pipeline_inner(descriptor))
+    }
+
+    fn create_pipeline_inner(
         &self,
         descriptor: &crate::materials::MaterialDescriptor,
     ) -> Result<super::super::GpuPipeline, GraphicsError> {
@@ -295,7 +358,7 @@ impl WgpuBackend {
         // exact same object (wgpu requires the group's layout be compatible).
         let mut bind_group_layouts = Vec::new();
         for bg_layout in &descriptor.binding_layouts {
-            bind_group_layouts.push(self.get_or_create_bind_group_layout(bg_layout));
+            bind_group_layouts.push(self.get_or_create_bind_group_layout(bg_layout)?);
         }
 
         // Pipeline layout
@@ -461,7 +524,7 @@ impl WgpuBackend {
         // exact same object (wgpu requires the group's layout be compatible).
         let mut bind_group_layouts = Vec::new();
         for bg_layout in &descriptor.binding_layouts {
-            bind_group_layouts.push(self.get_or_create_bind_group_layout(bg_layout));
+            bind_group_layouts.push(self.get_or_create_bind_group_layout(bg_layout)?);
         }
 
         let pipeline_layout = {

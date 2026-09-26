@@ -151,7 +151,7 @@ impl Pass {
 /// A draw command with mesh and material.
 ///
 /// Draw commands are submitted to graphics passes to render geometry.
-/// In debug builds, the mesh and material compatibility is verified.
+/// Mesh/material compatibility is verified when the graph is submitted.
 pub struct DrawCommand {
     /// The mesh to render.
     pub mesh: Arc<Mesh>,
@@ -176,15 +176,8 @@ pub struct DrawCommand {
 impl DrawCommand {
     /// Create a new draw command.
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the mesh vertex layout is not compatible with the material's
-    /// expected vertex layout.
+    /// Validated when the containing graph is submitted.
     pub fn new(mesh: Arc<Mesh>, material: Arc<MaterialInstance>) -> Self {
-        // Debug check: verify mesh/material compatibility
-        #[cfg(debug_assertions)]
-        Self::check_compatibility(&mesh, &material);
-
         Self {
             mesh,
             material,
@@ -223,41 +216,11 @@ impl DrawCommand {
 
     /// Check if the mesh and material are compatible.
     ///
-    /// In debug builds, this is called automatically by `new()`.
+    /// Submission checks this before recording GPU commands.
     /// Returns `true` if compatible, `false` otherwise.
     pub fn is_compatible(mesh: &Mesh, material: &MaterialInstance) -> bool {
         let expected_layout = material.material().vertex_layout();
         expected_layout.is_compatible_with(mesh.layout())
-    }
-
-    /// Check compatibility and panic with detailed message if incompatible.
-    #[cfg(debug_assertions)]
-    fn check_compatibility(mesh: &Mesh, material: &MaterialInstance) {
-        let expected_layout = material.material().vertex_layout();
-        if !expected_layout.is_compatible_with(mesh.layout()) {
-            let mesh_semantics: Vec<_> = mesh
-                .layout()
-                .attributes
-                .iter()
-                .map(|a| format!("{:?}", a.semantic))
-                .collect();
-            let expected_semantics: Vec<_> = expected_layout
-                .attributes
-                .iter()
-                .map(|a| format!("{:?}", a.semantic))
-                .collect();
-
-            panic!(
-                "Mesh/Material incompatibility!\n\
-                 Mesh '{}' layout: [{}]\n\
-                 Material '{}' expects: [{}]\n\
-                 The mesh must provide all attributes the material expects.",
-                mesh.label().unwrap_or("unnamed"),
-                mesh_semantics.join(", "),
-                material.label().unwrap_or("unnamed"),
-                expected_semantics.join(", ")
-            );
-        }
     }
 }
 
@@ -296,25 +259,8 @@ pub struct MeshTasksDrawCommand {
 impl MeshTasksDrawCommand {
     /// Create a new mesh-tasks draw command.
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the material has no mesh stage — a classic vertex material
-    /// cannot be dispatched as mesh tasks.
+    /// Validated when the containing graph is submitted.
     pub fn new(material: Arc<MaterialInstance>, group_count: [u32; 3]) -> Self {
-        #[cfg(debug_assertions)]
-        {
-            use crate::materials::ShaderStage;
-            debug_assert!(
-                material
-                    .material()
-                    .shaders()
-                    .iter()
-                    .any(|s| s.stage == ShaderStage::Mesh),
-                "MeshTasksDrawCommand requires a material with a mesh shader stage \
-                 (material {:?})",
-                material.label()
-            );
-        }
         Self {
             material,
             group_count,
@@ -393,29 +339,35 @@ pub struct MeshTasksIndirectDrawCommand {
 }
 
 impl MeshTasksIndirectDrawCommand {
+    /// Validate indirect argument usage, alignment and bounds before encoding.
+    pub(crate) fn validate(&self) -> Result<(), crate::GraphicsError> {
+        let invalid = |message: &str| crate::GraphicsError::InvalidParameter(message.into());
+        let bytes = if self.draw_count == 0 {
+            0
+        } else {
+            u64::from(self.draw_count - 1) * u64::from(self.stride) + 12
+        };
+        if !self
+            .indirect_buffer
+            .descriptor()
+            .usage
+            .contains(crate::BufferUsage::INDIRECT)
+            || self.indirect_offset % 4 != 0
+            || (self.draw_count > 1 && (self.stride < 12 || self.stride % 4 != 0))
+            || self
+                .indirect_offset
+                .checked_add(bytes)
+                .is_none_or(|end| end > self.indirect_buffer.size())
+        {
+            return Err(invalid("invalid indirect mesh task argument range"));
+        }
+        Ok(())
+    }
+
     /// Create a new indirect mesh-tasks draw (a single dispatch).
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the material has no mesh shader stage, or if the indirect
-    /// buffer lacks
-    /// [`BufferUsage::INDIRECT`](crate::types::BufferUsage::INDIRECT).
+    /// Validated when the containing graph is submitted.
     pub fn new(material: Arc<MaterialInstance>, indirect_buffer: Arc<Buffer>) -> Self {
-        #[cfg(debug_assertions)]
-        {
-            use crate::materials::ShaderStage;
-            debug_assert!(
-                material
-                    .material()
-                    .shaders()
-                    .iter()
-                    .any(|s| s.stage == ShaderStage::Mesh),
-                "MeshTasksIndirectDrawCommand requires a material with a mesh shader stage \
-                 (material {:?})",
-                material.label()
-            );
-            Self::check_indirect_buffer(&indirect_buffer);
-        }
         Self {
             material,
             indirect_buffer,
@@ -457,18 +409,6 @@ impl MeshTasksIndirectDrawCommand {
     pub fn with_dynamic_offsets(mut self, offsets: Vec<Vec<u32>>) -> Self {
         self.dynamic_offsets = offsets;
         self
-    }
-
-    /// Check that the buffer has INDIRECT usage flag.
-    #[cfg(debug_assertions)]
-    fn check_indirect_buffer(buffer: &Buffer) {
-        use crate::types::BufferUsage;
-        if !buffer.descriptor().usage.contains(BufferUsage::INDIRECT) {
-            panic!(
-                "Mesh-tasks indirect buffer '{}' must have BufferUsage::INDIRECT flag",
-                buffer.label().unwrap_or("unnamed")
-            );
-        }
     }
 }
 
@@ -617,21 +557,12 @@ impl IndirectDrawCommand {
     /// Creates a single non-indexed indirect draw.
     /// Use builder methods to configure multi-draw or indexed mode.
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the mesh vertex layout is not compatible with the material's
-    /// expected vertex layout.
+    /// Validated when the containing graph is submitted.
     pub fn new(
         mesh: Arc<Mesh>,
         material: Arc<MaterialInstance>,
         indirect_buffer: Arc<Buffer>,
     ) -> Self {
-        #[cfg(debug_assertions)]
-        DrawCommand::check_compatibility(&mesh, &material);
-
-        #[cfg(debug_assertions)]
-        Self::check_indirect_buffer(&indirect_buffer);
-
         Self {
             mesh,
             material,
@@ -648,29 +579,12 @@ impl IndirectDrawCommand {
     /// The mesh must have an index buffer, and arguments are read as
     /// [`DrawIndexedIndirectArgs`](crate::types::DrawIndexedIndirectArgs).
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the mesh has no index buffer, or if mesh/material are incompatible.
+    /// Validated when the containing graph is submitted.
     pub fn new_indexed(
         mesh: Arc<Mesh>,
         material: Arc<MaterialInstance>,
         indirect_buffer: Arc<Buffer>,
     ) -> Self {
-        #[cfg(debug_assertions)]
-        DrawCommand::check_compatibility(&mesh, &material);
-
-        #[cfg(debug_assertions)]
-        Self::check_indirect_buffer(&indirect_buffer);
-
-        #[cfg(debug_assertions)]
-        if !mesh.is_indexed() {
-            panic!(
-                "IndirectDrawCommand::new_indexed requires a mesh with an index buffer, \
-                 but mesh '{}' has no indices",
-                mesh.label().unwrap_or("unnamed")
-            );
-        }
-
         Self {
             mesh,
             material,
@@ -703,18 +617,6 @@ impl IndirectDrawCommand {
     pub fn with_stride(mut self, stride: u32) -> Self {
         self.stride = stride;
         self
-    }
-
-    /// Check that the buffer has INDIRECT usage flag.
-    #[cfg(debug_assertions)]
-    fn check_indirect_buffer(buffer: &Buffer) {
-        use crate::types::BufferUsage;
-        if !buffer.descriptor().usage.contains(BufferUsage::INDIRECT) {
-            panic!(
-                "Indirect draw buffer '{}' must have BufferUsage::INDIRECT flag",
-                buffer.label().unwrap_or("unnamed")
-            );
-        }
     }
 }
 
@@ -825,18 +727,14 @@ impl GraphicsPass {
 
     /// Add a draw command to this pass.
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the mesh and material are incompatible.
+    /// Validated when the containing graph is submitted.
     pub fn add_draw(&mut self, mesh: Arc<Mesh>, material: Arc<MaterialInstance>) {
         self.draw_commands.push(DrawCommand::new(mesh, material));
     }
 
     /// Add a draw command with instancing.
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the mesh and material are incompatible.
+    /// Validated when the containing graph is submitted.
     pub fn add_draw_instanced(
         &mut self,
         mesh: Arc<Mesh>,
@@ -849,9 +747,7 @@ impl GraphicsPass {
 
     /// Add a draw command with a scissor rectangle for clipping.
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the mesh and material are incompatible.
+    /// Validated when the containing graph is submitted.
     pub fn add_draw_with_scissor(
         &mut self,
         mesh: Arc<Mesh>,
@@ -927,9 +823,7 @@ impl GraphicsPass {
     /// there is no [`Mesh`] — the mesh shader fetches geometry from storage
     /// buffers bound through the material instance.
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the material has no mesh shader stage.
+    /// Validated when the containing graph is submitted.
     pub fn add_draw_mesh_tasks(&mut self, material: Arc<MaterialInstance>, group_count: [u32; 3]) {
         self.mesh_tasks_commands
             .push(MeshTasksDrawCommand::new(material, group_count));
@@ -950,10 +844,7 @@ impl GraphicsPass {
     /// [`BufferUsage::INDIRECT`](crate::types::BufferUsage::INDIRECT)) rather
     /// than supplied here. See [`MeshTasksIndirectDrawCommand`].
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if the material has no mesh shader stage, or if the buffer lacks
-    /// the INDIRECT flag.
+    /// Validated when the containing graph is submitted.
     pub fn add_draw_mesh_tasks_indirect(
         &mut self,
         material: Arc<MaterialInstance>,
@@ -988,12 +879,7 @@ impl GraphicsPass {
     /// * `material` - The material instance with bound resources
     /// * `indirect_buffer` - Buffer containing [`DrawIndirectArgs`](crate::types::DrawIndirectArgs)
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if:
-    /// - The mesh and material are incompatible
-    /// - The buffer doesn't have `BufferUsage::INDIRECT` flag
-    ///
+    /// Validated when the containing graph is submitted.
     /// # Example
     ///
     /// ```ignore
@@ -1015,12 +901,7 @@ impl GraphicsPass {
     /// Similar to `add_draw_indirect`, but uses the mesh's index buffer.
     /// The draw parameters are read as [`DrawIndexedIndirectArgs`](crate::types::DrawIndexedIndirectArgs).
     ///
-    /// # Panics (debug builds only)
-    ///
-    /// Panics if:
-    /// - The mesh has no index buffer
-    /// - The mesh and material are incompatible
-    /// - The buffer doesn't have `BufferUsage::INDIRECT` flag
+    /// Validated when the containing graph is submitted.
     pub fn add_draw_indexed_indirect(
         &mut self,
         mesh: Arc<Mesh>,

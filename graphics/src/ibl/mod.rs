@@ -351,7 +351,12 @@ mod tests {
                 ..desc.clone()
             },
         ] {
-            let texture = device.create_texture(&invalid).unwrap();
+            // Keep testing the filter boundary independently of public descriptor validation.
+            let texture = Arc::new(Texture::new(
+                device.clone(),
+                invalid,
+                crate::backend::GpuTexture::Dummy,
+            ));
             assert!(filter.prepare(texture, Default::default()).is_err());
         }
         let other = EnvironmentFilter::new(self::device()).unwrap();
