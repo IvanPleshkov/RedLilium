@@ -23,7 +23,7 @@ mod staging;
 pub mod swapchain;
 mod timestamps;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -469,36 +469,6 @@ fn op_ok_on_coarse_transfer(op: &crate::graph::TransferOperation) -> bool {
         // at all, and already routed to the graphics queue by
         // `RenderGraph::requires_graphics_queue`. Never legal on a transfer queue.
         Op::GenerateMipmaps { .. } => false,
-    }
-}
-
-/// The GPU-side buffer accesses of a transfer op, as `(handle, is_write)`,
-/// for intra-pass hazard tracking (#139).
-///
-/// The staging-belt buffer behind `WriteBuffer` is deliberately absent: it is
-/// host-written before submit and only ever read by the GPU, so it cannot
-/// participate in an intra-pass hazard. `ReadbackBuffer` encodes no GPU work
-/// (drained on the CPU after the fence), and mip generation touches no
-/// buffers.
-fn transfer_op_buffer_accesses(
-    op: &crate::graph::TransferOperation,
-) -> [Option<(vk::Buffer, bool)>; 2] {
-    use crate::graph::TransferOperation as Op;
-    let vk_buffer = |b: &crate::resources::Buffer| match b.gpu_handle() {
-        GpuBuffer::Vulkan { buffer, .. } => Some(*buffer),
-        _ => None,
-    };
-    match op {
-        Op::BufferToBuffer { src, dst, .. } => [
-            vk_buffer(src).map(|b| (b, false)),
-            vk_buffer(dst).map(|b| (b, true)),
-        ],
-        Op::WriteBuffer { dst, .. } => [vk_buffer(dst).map(|b| (b, true)), None],
-        Op::BufferToTexture { src, .. } => [vk_buffer(src).map(|b| (b, false)), None],
-        Op::TextureToBuffer { dst, .. } => [vk_buffer(dst).map(|b| (b, true)), None],
-        Op::ReadbackBuffer { .. } | Op::TextureToTexture { .. } | Op::GenerateMipmaps { .. } => {
-            [None, None]
-        }
     }
 }
 
@@ -3066,16 +3036,19 @@ impl VulkanBackend {
             for (i, handle) in compiled.pass_order().iter().enumerate() {
                 let pass = &passes[handle.index()];
 
-                // Generate barriers from pre-computed resource usage
-                barriers.clear();
-                self.generate_barriers_for_pass(
-                    &mut barriers,
-                    &pass_usages[i],
-                    queue_id,
-                    timeline_value,
-                    &mut waits,
-                );
-                barriers.submit(&self.device, cmd);
+                // Transfer accesses must be applied at each operation, not
+                // collapsed to one layout/access state before the whole pass.
+                if !matches!(pass, Pass::Transfer(_)) {
+                    barriers.clear();
+                    self.generate_barriers_for_pass(
+                        &mut barriers,
+                        &pass_usages[i],
+                        queue_id,
+                        timeline_value,
+                        &mut waits,
+                    );
+                    barriers.submit(&self.device, cmd);
+                }
 
                 // Timestamp the pass's GPU work (begin before, end after).
                 if let Some(rec) = recording.as_mut() {
@@ -3085,7 +3058,7 @@ impl VulkanBackend {
                 if let Some(bc) = breadcrumbs.as_mut() {
                     bc.pass_begin(cmd, i, pass.name());
                 }
-                if let Err(e) = self.encode_pass(cmd, pass) {
+                if let Err(e) = self.encode_pass(cmd, pass, queue_id, timeline_value, &mut waits) {
                     // The command buffer (with its reset + timestamp/breadcrumb
                     // writes) is abandoned; re-arm both so their next use resets.
                     if recording.is_some() {
@@ -3325,7 +3298,7 @@ impl VulkanBackend {
             // destruction would otherwise alias a stale tracked layout).
             let texture_id = TextureId::from_raw(*id);
             let required_layout = decl.access.to_layout();
-            let (current_layout, cross_queue_write) =
+            let (current_layout, foreign_source) =
                 tracker.request_access(texture_id, required_layout, queue, submit_value, waits);
 
             // Determine aspect mask based on access mode and format
@@ -3346,11 +3319,11 @@ impl VulkanBackend {
 
             // Add barrier if layout change is needed (`request_access`
             // already updated the tracked layout and recorded queue
-            // ownership). When the previous write came from the OTHER queue
-            // its availability comes from the timeline wait recorded in
-            // `waits`, so the transition uses an empty source scope on this
-            // queue — the previous layout's own stages may not even exist on
-            // this queue's family (VUID 06461, caught on RDNA4 in #82).
+            // ownership). If the source scope is entirely foreign, its
+            // availability comes from a timeline wait and the barrier uses
+            // an empty source scope — those stages may not even exist on
+            // this queue family (VUID 06461). Local readers must still be
+            // ordered before the transition, even after a foreign write.
             // Destination scope is augmented with the task/mesh stages when
             // mesh shading is on (#114), so a texture sampled from a task/mesh
             // stage gets a wide-enough barrier. A cross-queue transition keeps
@@ -3358,7 +3331,7 @@ impl VulkanBackend {
             // the timeline wait); a same-queue one uses the previous layout's
             // augmented source scope.
             let dst_stage = tracker.dst_stage(required_layout);
-            if cross_queue_write {
+            if foreign_source {
                 batch.add_image_barrier_with_src_scope(
                     texture_id,
                     *image,
@@ -3536,7 +3509,14 @@ impl VulkanBackend {
         Ok(result)
     }
 
-    fn encode_pass(&self, cmd: vk::CommandBuffer, pass: &Pass) -> Result<(), GraphicsError> {
+    fn encode_pass(
+        &self,
+        cmd: vk::CommandBuffer,
+        pass: &Pass,
+        queue: QueueId,
+        submit_value: u64,
+        waits: &mut SubmitWaits,
+    ) -> Result<(), GraphicsError> {
         profile_scope!("encode_pass");
         // Wrap the pass's GPU commands in a named, colour-coded debug region
         // (#123) so RenderDoc and validation output group them by frame-graph
@@ -3544,7 +3524,9 @@ impl VulkanBackend {
         self.begin_debug_label(cmd, pass.name(), pass_label_color(pass));
         let result = match pass {
             Pass::Graphics(graphics_pass) => self.encode_graphics_pass(cmd, graphics_pass),
-            Pass::Transfer(transfer_pass) => self.encode_transfer_pass(cmd, transfer_pass),
+            Pass::Transfer(transfer_pass) => {
+                self.encode_transfer_pass(cmd, transfer_pass, queue, submit_value, waits)
+            }
             Pass::Compute(compute_pass) => self.encode_compute_pass(cmd, compute_pass),
             Pass::AccelerationStructureBuild(build_pass) => {
                 self.encode_acceleration_structure_build_pass(cmd, build_pass)
@@ -4313,60 +4295,27 @@ impl VulkanBackend {
         &self,
         cmd: vk::CommandBuffer,
         pass: &crate::graph::TransferPass,
+        queue: QueueId,
+        submit_value: u64,
+        waits: &mut SubmitWaits,
     ) -> Result<(), GraphicsError> {
         let Some(config) = pass.transfer_config() else {
             return Ok(());
         };
 
-        // Intra-pass buffer hazards (#139): pass-entry barriers are derived
-        // from the declared usage and ORDER THE PASS against other passes —
-        // they cannot order operations within it. A `WriteBuffer` followed by
-        // a copy reading the same buffer (the staged-upload pattern) is a RAW
-        // hazard with no barrier between the two commands. Track each
-        // buffer's last access as ops encode and emit a TRANSFER->TRANSFER
-        // buffer barrier before any op that conflicts (RAW/WAW/WAR). The
-        // barrier uses full transfer scopes, so chained hazards on one buffer
-        // stay covered regardless of the read/write history. Intra-pass
-        // texture write->read is a separate gap (it also needs a layout
-        // change mid-pass) and is not handled here.
-        let mut tracked: HashMap<BufferId, bool> = HashMap::new();
-        let mut hazard_barriers: Vec<vk::BufferMemoryBarrier2> = Vec::new();
+        // Use the same trackers for inter-pass and intra-pass dependencies.
+        // Each operation observes the preceding operation's final state;
+        // cross-queue waits and transaction rollback work exactly as for a
+        // pass boundary. Mip generation restores TRANSFER_DST internally.
+        let mut usage = crate::graph::resource_usage::PassResourceUsage::new();
+        let mut barriers = BarrierBatch::new();
         for operation in &config.operations {
-            hazard_barriers.clear();
-            for (buffer, is_write) in transfer_op_buffer_accesses(operation).into_iter().flatten() {
-                match tracked.entry(BufferId::from(buffer)) {
-                    std::collections::hash_map::Entry::Occupied(mut prev) => {
-                        if *prev.get() || is_write {
-                            hazard_barriers.push(
-                                vk::BufferMemoryBarrier2::default()
-                                    .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
-                                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
-                                    .dst_access_mask(
-                                        vk::AccessFlags2::TRANSFER_READ
-                                            | vk::AccessFlags2::TRANSFER_WRITE,
-                                    )
-                                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                                    .buffer(buffer)
-                                    .offset(0)
-                                    .size(vk::WHOLE_SIZE),
-                            );
-                        }
-                        prev.insert(is_write);
-                    }
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        slot.insert(is_write);
-                    }
-                }
-            }
-            if !hazard_barriers.is_empty() {
-                let dependency_info =
-                    vk::DependencyInfo::default().buffer_memory_barriers(&hazard_barriers);
-                unsafe {
-                    self.device.cmd_pipeline_barrier2(cmd, &dependency_info);
-                }
-            }
+            usage.texture_usages.clear();
+            usage.buffer_usages.clear();
+            operation.add_resource_usage(&mut usage);
+            barriers.clear();
+            self.generate_barriers_for_pass(&mut barriers, &usage, queue, submit_value, waits);
+            barriers.submit(&self.device, cmd);
             self.encode_transfer_operation(cmd, operation)?;
         }
         Ok(())
@@ -4483,8 +4432,8 @@ impl VulkanBackend {
                     return Ok(());
                 };
 
-                // NOTE: Layout transitions are now handled automatically by the barrier
-                // generation system in execute_graph() before each pass is encoded.
+                // The transfer encoder has transitioned the image immediately
+                // before this operation.
 
                 let copy_regions = build_buffer_image_copies(
                     src.format(),
@@ -4517,8 +4466,8 @@ impl VulkanBackend {
                     return Ok(());
                 };
 
-                // NOTE: Layout transitions are now handled automatically by the barrier
-                // generation system in execute_graph() before each pass is encoded.
+                // The transfer encoder has transitioned the image immediately
+                // before this operation.
 
                 let copy_regions = build_buffer_image_copies(
                     dst.format(),
@@ -4551,8 +4500,8 @@ impl VulkanBackend {
                     return Ok(());
                 };
 
-                // NOTE: Layout transitions are now handled automatically by the barrier
-                // generation system in execute_graph() before each pass is encoded.
+                // The transfer encoder has transitioned the image immediately
+                // before this operation.
 
                 // Aspect follows the format (a depth copy with COLOR aspect is
                 // invalid); image-to-image copies may cover both depth and

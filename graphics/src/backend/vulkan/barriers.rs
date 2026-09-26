@@ -121,10 +121,10 @@ struct BufferAccessState {
     visible_stages: vk::PipelineStageFlags2,
     /// Read access types the last write has been made visible to.
     visible_access: vk::AccessFlags2,
-    /// All read stages seen since the last write **on the writing queue**
-    /// (for same-queue write-after-read execution dependencies). Cross-queue
-    /// reads are recorded in `read_submits` instead.
-    reads_since_write: vk::PipelineStageFlags2,
+    /// Read stages since the last write, per queue. A semaphore wait covers
+    /// a foreign writer, but cannot order a read followed by a write on the
+    /// waiting queue itself.
+    reads_since_write: [vk::PipelineStageFlags2; QUEUE_COUNT],
     /// Highest submit timeline value that read this buffer since the last
     /// write, per queue (write-after-read across queues waits on these).
     read_submits: [Option<u64>; QUEUE_COUNT],
@@ -273,16 +273,17 @@ impl BufferAccessTracker {
                 }
             }
 
-            // Same-queue WAW/WAR: barrier from the previous write's scope and
-            // the reads issued since it (execution dependency only, so reads
-            // contribute no source access mask). Skipped when the previous
-            // write was cross-queue — the wait already covers it, and its
-            // scopes belong to the other queue.
+            // Same-queue WAW/WAR: reads contribute execution scope only.
+            // A foreign write is covered by the wait; local reads still need
+            // a barrier even when that write happened on another queue.
             let (src_stage, src_access) = if cross_queue_write {
-                (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE)
+                (
+                    state.reads_since_write[queue as usize],
+                    vk::AccessFlags2::NONE,
+                )
             } else {
                 (
-                    state.last_write_stage | state.reads_since_write,
+                    state.last_write_stage | state.reads_since_write[queue as usize],
                     state.last_write_access,
                 )
             };
@@ -300,15 +301,12 @@ impl BufferAccessTracker {
                 state.read_submits[queue as usize].map_or(submit_value, |v| v.max(submit_value)),
             );
 
+            state.reads_since_write[queue as usize] |= stage;
             if cross_queue_write {
-                // The timeline wait (all-commands scope) makes the write both
-                // available and visible on this queue: no barrier. Same-queue
-                // WAR tracking (`reads_since_write`) stays untouched — it
-                // belongs to the writing queue.
+                // The wait makes the foreign write visible, but retain this
+                // queue's read scope for a later local write-after-read.
                 return None;
             }
-
-            state.reads_since_write |= stage;
 
             if state.last_write_access.is_empty() {
                 // No tracked GPU write: nothing to make visible. Host writes
@@ -1201,6 +1199,44 @@ mod tests {
         assert!(waits.is_empty());
         assert!(barrier.0.contains(vk::PipelineStageFlags2::COMPUTE_SHADER));
         assert!(barrier.1.contains(vk::AccessFlags2::SHADER_WRITE));
+    }
+
+    #[test]
+    fn tracker_foreign_write_then_local_read_write_preserves_war() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::StorageWrite,
+            QueueId::Graphics,
+            1,
+            &mut waits,
+        );
+        tracker.request_access(
+            id,
+            BufferAccessMode::TransferRead,
+            QueueId::Transfer,
+            2,
+            &mut waits,
+        );
+        let scope = tracker
+            .request_access(
+                id,
+                BufferAccessMode::TransferWrite,
+                QueueId::Transfer,
+                2,
+                &mut waits,
+            )
+            .expect("the local read must finish before overwriting its buffer");
+        assert_eq!(
+            scope,
+            (
+                vk::PipelineStageFlags2::ALL_TRANSFER,
+                vk::AccessFlags2::NONE
+            )
+        );
+        assert_eq!(waits.get(QueueId::Graphics), Some(1));
     }
 
     #[test]

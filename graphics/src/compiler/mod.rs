@@ -441,7 +441,7 @@ fn infer_resource_edges(
             .chain(auto_edges.iter())
             .copied()
             .collect();
-        let reach = compute_reachability(n, &combined);
+        let mut reach = compute_reachability(n, &combined);
 
         for (a, b) in waw_pairs {
             let ordered = reach[a.index()][b.index()] || reach[b.index()][a.index()];
@@ -450,6 +450,20 @@ fn infer_resource_edges(
                     RenderGraphCompilationMode::Automatic => {
                         // Lower index pass runs first (preserves addition order)
                         auto_edges.push((b, a));
+
+                        // Keep the closure current for the remaining WAW
+                        // pairs. Otherwise a later addition can close a cycle
+                        // through the edge we just inferred (e.g. C -> A,
+                        // then A -> B, then incorrectly B -> C).
+                        for source in 0..n {
+                            if source == a.index() || reach[source][a.index()] {
+                                for target in 0..n {
+                                    if target == b.index() || reach[b.index()][target] {
+                                        reach[source][target] = true;
+                                    }
+                                }
+                            }
+                        }
                     }
                     RenderGraphCompilationMode::Strict => {
                         return Err(GraphError::AmbiguousOrder {
@@ -828,6 +842,59 @@ mod tests {
             message.contains("first_writer") && message.contains("second_writer"),
             "Display must name both passes: {message}"
         );
+    }
+
+    #[test]
+    fn test_automatic_waw_respects_reverse_explicit_order() {
+        use crate::graph::{TransferConfig, TransferOperation};
+        use crate::{
+            BackendType, BufferDescriptor, BufferUsage, GraphicsInstance, InstanceParameters,
+        };
+
+        let instance = GraphicsInstance::with_parameters(
+            InstanceParameters::new().with_backend(BackendType::Dummy),
+        )
+        .unwrap();
+        let device = instance.create_device().unwrap();
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(16, BufferUsage::COPY_DST))
+            .unwrap();
+
+        // Exercise every reverse explicit edge among four writers. In
+        // particular C -> A must not become C -> A -> B -> C as automatic
+        // edges are added. Strict mode must still reject unordered writers.
+        for before in 1..4 {
+            for after in 0..before {
+                let mut graph = RenderGraph::new();
+                let handles: Vec<_> = (0..4)
+                    .map(|i| {
+                        let mut pass = TransferPass::new(format!("writer_{i}"));
+                        pass.set_transfer_config(TransferConfig::new().with_operation(
+                            TransferOperation::write_buffer(
+                                buffer.clone(),
+                                0,
+                                Arc::from([0u8; 16]),
+                            ),
+                        ));
+                        graph.add_transfer_pass(pass)
+                    })
+                    .collect();
+                graph.add_dependency(handles[after], handles[before]);
+                assert!(matches!(
+                    graph.compile(RenderGraphCompilationMode::Strict),
+                    Err(GraphError::AmbiguousOrder { .. })
+                ));
+                let compiled = graph
+                    .compile(Automatic)
+                    .expect("acyclic writer graph must compile");
+                let order = compiled.pass_order();
+                assert_eq!(order.len(), handles.len());
+                assert!(
+                    order.iter().position(|h| *h == handles[before]).unwrap()
+                        < order.iter().position(|h| *h == handles[after]).unwrap()
+                );
+            }
+        }
     }
 
     #[test]

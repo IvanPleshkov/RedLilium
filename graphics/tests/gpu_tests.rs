@@ -189,8 +189,9 @@ fn test_upload_texture_data_roundtrip(#[case] backend: Backend) {
 /// validation on so a subresource-range barrier mistake in the blit chain is
 /// caught. Skipped where `mip_generation == false` (wgpu/dummy).
 #[rstest]
-#[case::vulkan(Backend::Vulkan)]
-fn test_generate_mipmaps_4x4_average(#[case] backend: Backend) {
+#[case::separate_readback(Backend::Vulkan, false)]
+#[case::inline_readback(Backend::Vulkan, true)]
+fn test_generate_mipmaps_4x4_average(#[case] backend: Backend, #[case] inline_readback: bool) {
     let Some(ctx) = TestContext::new_with_validation(backend) else {
         eprintln!("Skipping test: {backend:?} backend not available");
         return;
@@ -238,33 +239,35 @@ fn test_generate_mipmaps_4x4_average(#[case] backend: Backend) {
         )
         .expect("create mip texture");
 
-    // One pass: upload mip 0, then blit the chain — exercises the intra-pass
-    // upload→blit barrier the op emits internally.
-    let upload = TransferOperation::upload_texture_data(&ctx.device, texture.clone(), &pixels)
-        .expect("stage mip0 upload");
-    let mut graph = RenderGraph::new();
-    let mut pass = TransferPass::new("mipgen".into());
-    pass.set_transfer_config(TransferConfig::new().with_operations(vec![
-        upload,
-        TransferOperation::generate_mipmaps(texture.clone()),
-    ]));
-    graph.add_transfer_pass(pass);
-    ctx.execute_graph(graph);
-
-    // Read back the 1×1 top mip (mip 2).
     let readback = ctx.create_readback_buffer(4);
     let region = BufferTextureCopyRegion::new(
         BufferTextureLayout::packed(),
         TextureCopyLocation::mip(mip_count - 1),
         Extent3d::new_2d(1, 1),
     );
-    let mut read_graph = RenderGraph::new();
-    let mut read_pass = TransferPass::new("read_top_mip".into());
-    read_pass.set_transfer_config(TransferConfig::new().with_operation(
-        TransferOperation::readback_texture(texture.clone(), readback.clone(), vec![region]),
-    ));
-    read_graph.add_transfer_pass(read_pass);
-    ctx.execute_graph(read_graph);
+    let read = TransferOperation::readback_texture(texture.clone(), readback.clone(), vec![region]);
+    let upload = TransferOperation::upload_texture_data(&ctx.device, texture.clone(), &pixels)
+        .expect("stage mip0 upload");
+    let mut config = TransferConfig::new().with_operations(vec![
+        upload,
+        TransferOperation::generate_mipmaps(texture.clone()),
+    ]);
+    if inline_readback {
+        config = config.with_operation(read.clone());
+    }
+    let mut graph = RenderGraph::new();
+    let mut pass = TransferPass::new("mipgen".into());
+    pass.set_transfer_config(config);
+    graph.add_transfer_pass(pass);
+    ctx.execute_graph(graph);
+
+    if !inline_readback {
+        let mut read_graph = RenderGraph::new();
+        let mut read_pass = TransferPass::new("read_top_mip".into());
+        read_pass.set_transfer_config(TransferConfig::new().with_operation(read));
+        read_graph.add_transfer_pass(read_pass);
+        ctx.execute_graph(read_graph);
+    }
 
     let data = ctx.read_buffer(&readback, 4);
     assert_eq!(data.len(), 4, "expected one RGBA texel, got {data:?}");
@@ -3128,6 +3131,77 @@ fn test_sample_uploaded_texture_same_graph(#[case] backend: Backend) {
     }
 }
 
+/// Texture RAW/WAW/WAR hazards must be ordered between operations, even
+/// when upload, image copies, and readbacks all share one transfer pass.
+#[rstest]
+#[case::vulkan(Backend::Vulkan, QueuePreference::Graphics)]
+#[case::vulkan_transfer(Backend::Vulkan, QueuePreference::Transfer)]
+#[case::webgpu(Backend::WebGpu, QueuePreference::Graphics)]
+fn test_transfer_pass_intra_pass_texture_chain(
+    #[case] backend: Backend,
+    #[case] queue: QueuePreference,
+) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+    const W: u32 = 64;
+    const H: u32 = 4;
+    let size = u64::from(W * H * 4);
+    let first = generate_test_pattern(size as usize);
+    let second: Vec<u8> = first.iter().map(|v| !v).collect();
+    let usage = TextureUsage::COPY_SRC | TextureUsage::COPY_DST | TextureUsage::TEXTURE_BINDING;
+    let descriptor =
+        TextureDescriptor::new_2d(W, H, TextureFormat::Rgba8Unorm, usage).with_cross_queue(true);
+    let a = ctx.device.create_texture(&descriptor).unwrap();
+    let b = ctx.device.create_texture(&descriptor).unwrap();
+    let readbacks: Vec<_> = (0..3).map(|_| ctx.create_readback_buffer(size)).collect();
+    let upload = |texture: &Arc<redlilium_graphics::Texture>, data: &[u8]| {
+        TransferOperation::upload_texture_data(&ctx.device, texture.clone(), data).unwrap()
+    };
+    let mut pass = TransferPass::new("texture_chain".into());
+    pass.set_transfer_config(TransferConfig::new().with_operations(vec![
+        upload(&a, &second),
+        upload(&a, &first), // same-layout WAW
+        TransferOperation::copy_texture_whole(a.clone(), b.clone()),
+        TransferOperation::readback_texture_whole(b.clone(), readbacks[0].clone()),
+        upload(&b, &second), // read -> write, with a layout transition
+        TransferOperation::readback_texture_whole(b.clone(), readbacks[1].clone()),
+        TransferOperation::copy_texture_whole(b.clone(), a.clone()),
+        TransferOperation::readback_texture_whole(a.clone(), readbacks[2].clone()),
+    ]));
+    let mut graph = RenderGraph::new();
+    graph.set_queue_preference(queue);
+    graph.add_transfer_pass(pass);
+    ctx.execute_graph(graph);
+    assert_eq!(ctx.read_buffer(&readbacks[0], size), first);
+    for readback in &readbacks[1..] {
+        assert_eq!(ctx.read_buffer(readback, size), second);
+    }
+
+    // A later submission must see the actual final layout of the image.
+    let mut graph = RenderGraph::new();
+    let mut pass = TransferPass::new("texture_chain_followup".into());
+    pass.set_transfer_config(TransferConfig::new().with_operations(vec![
+        upload(&a, &first),
+        TransferOperation::readback_texture_whole(a, readbacks[0].clone()),
+    ]));
+    graph.add_transfer_pass(pass);
+    ctx.execute_graph(graph);
+    assert_eq!(ctx.read_buffer(&readbacks[0], size), first);
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        assert_eq!(
+            redlilium_graphics::backend::vulkan::validation_error_count(),
+            0
+        );
+    }
+}
+
 /// Chained staging inside ONE transfer pass (#139): `WriteBuffer` fills a
 /// staging buffer, `BufferToBuffer` copies it onward, `BufferToTexture` reads
 /// the copy — every op reads what the previous op in the same pass wrote.
@@ -3633,16 +3707,26 @@ fn test_render_contract_indirect(#[case] backend: Backend, #[values(false, true)
 }
 
 #[rstest]
-#[case::vulkan(Backend::Vulkan)]
-#[case::webgpu(Backend::WebGpu)]
-fn test_render_contract_failed_submit_preserves_image(#[case] backend: Backend) {
+#[case::vulkan_attachment(Backend::Vulkan, false)]
+#[case::webgpu_attachment(Backend::WebGpu, false)]
+#[case::vulkan_transfer(Backend::Vulkan, true)]
+#[case::webgpu_transfer(Backend::WebGpu, true)]
+fn test_render_contract_failed_submit_preserves_image(
+    #[case] backend: Backend,
+    #[case] fail_transfer: bool,
+) {
     let Some(ctx) = TestContext::new_with_validation(backend) else {
         eprintln!("Backend {backend:?} not available, skipping");
         return;
     };
     #[cfg(feature = "vulkan-backend")]
     redlilium_graphics::backend::vulkan::reset_validation_error_count();
-    let texture = ctx.create_render_target(64, 64);
+    let texture = ctx.create_texture_2d(
+        64,
+        64,
+        TextureFormat::Rgba8Unorm,
+        TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+    );
     let readback = ctx.create_readback_buffer(64 * 64 * 4);
     let mut graph = RenderGraph::new();
     graph.add_graphics_pass(create_simple_render_pass(
@@ -3657,11 +3741,31 @@ fn test_render_contract_failed_submit_preserves_image(#[case] backend: Backend) 
     graph.add_transfer_pass(copy);
     ctx.execute_graph(graph);
     let mut bad = RenderGraph::new();
-    let mut pass = GraphicsPass::new("invalid_attachment".into());
-    pass.set_render_targets(RenderTargetConfig::new().with_color(ColorAttachment::new(
-        redlilium_graphics::RenderTarget::from_texture_mip(texture.clone(), 9),
-    )));
-    bad.add_graphics_pass(pass);
+    if fail_transfer {
+        // Record several texture transitions before a deliberately unaligned
+        // write aborts the submission. Neither contents nor layout may commit.
+        let upload = TransferOperation::upload_texture_data(
+            &ctx.device,
+            texture.clone(),
+            &vec![255u8; 64 * 64 * 4],
+        )
+        .unwrap();
+        let buffer = ctx.create_buffer(8, BufferUsage::COPY_DST);
+        let mut pass = TransferPass::new("invalid_transfer_chain".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(vec![
+            upload.clone(),
+            TransferOperation::readback_texture_whole(texture.clone(), readback.clone()),
+            upload,
+            TransferOperation::write_buffer(buffer, 1, Arc::from([0u8; 4])),
+        ]));
+        bad.add_transfer_pass(pass);
+    } else {
+        let mut pass = GraphicsPass::new("invalid_attachment".into());
+        pass.set_render_targets(RenderTargetConfig::new().with_color(ColorAttachment::new(
+            redlilium_graphics::RenderTarget::from_texture_mip(texture.clone(), 9),
+        )));
+        bad.add_graphics_pass(pass);
+    }
     {
         let mut pipeline = ctx.pipeline.borrow_mut();
         let mut schedule = pipeline.begin_frame().unwrap();

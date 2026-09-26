@@ -508,7 +508,8 @@ pub struct TextureLayoutTracker {
 struct TrackedTexture {
     /// Current Vulkan image layout.
     layout: TextureLayout,
-    /// Queue and submit timeline value of the last write access.
+    /// Last write or layout transition. Transitions must also finish before
+    /// another queue can use the new layout, even for read-only accesses.
     last_write_submit: Option<(super::barriers::QueueId, u64)>,
     /// Highest submit timeline value that read this texture since the last
     /// write, per queue (a cross-queue write waits on these).
@@ -627,16 +628,15 @@ impl TextureLayoutTracker {
     /// Record an access to a texture from a submit on `queue` with timeline
     /// value `submit_value`, requiring `layout`.
     ///
-    /// Returns the texture's previous layout (the transition source for the
-    /// barrier batch) plus whether the last write came from ANOTHER queue,
-    /// and updates the tracked layout. Cross-queue hazards — the last write
-    /// came from another queue, or this is a write and other queues have read
-    /// since the last write — are pushed into `waits` as timeline waits;
-    /// performed with an all-commands scope they make the prior access
-    /// available and visible here, so the caller's layout transition barrier
-    /// must use an EMPTY source scope on this queue (the flag says when): the
-    /// writer's stages belong to the other queue and may not even exist on
-    /// this queue's family (VUID-vkCmdPipelineBarrier-srcStageMask-06461).
+    /// Returns the previous layout and whether its source scope belongs
+    /// exclusively to another queue. In that case the caller must use an
+    /// empty source scope: timeline waits cover those accesses, and foreign
+    /// pipeline stages might be invalid on this queue family. Local readers
+    /// still require a source scope even if the last writer was foreign.
+    ///
+    /// Writes and layout transitions wait for other queues' outstanding
+    /// readers. A transition also becomes the last writer for queue-ordering
+    /// purposes so other queues cannot observe its new layout prematurely.
     pub fn request_access(
         &mut self,
         id: TextureId,
@@ -651,7 +651,11 @@ impl TextureLayoutTracker {
                 .or_insert_with(|| self.layouts.get(&id).copied());
         }
         let state = self.layouts.entry(id).or_default();
-        let is_write = layout.is_write();
+        // A layout transition is itself a write to image memory. Treat it
+        // as such for queue waits and reader retirement, even when the
+        // operation that follows only reads the texture.
+        let is_write = layout.is_write() || layout != state.layout;
+        let has_local_reads = state.read_submits[queue as usize].is_some();
 
         // Whether the last write came from another queue: its hazard is
         // resolved by a timeline wait, and its stage/access scopes are
@@ -684,7 +688,11 @@ impl TextureLayoutTracker {
 
         (
             std::mem::replace(&mut state.layout, layout),
-            cross_queue_write,
+            // A wait covers a foreign writer, but local reads still need
+            // an execution dependency before a subsequent layout change or
+            // overwrite. All outstanding readers use the current layout:
+            // transitions retire them through barriers/waits above.
+            cross_queue_write && !has_local_reads,
         )
     }
 
@@ -858,6 +866,73 @@ mod tests {
         assert_eq!(waits.get(QueueId::Graphics), Some(6));
         // Its own previous write needs no wait (same queue).
         assert_eq!(waits.get(QueueId::AsyncCompute), None);
+    }
+
+    #[test]
+    fn foreign_write_then_local_transfer_chain_keeps_local_source_scope() {
+        let mut tracker = TextureLayoutTracker::new();
+        let id = TextureId::from_raw(1);
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            TextureLayout::TransferDst,
+            QueueId::Graphics,
+            1,
+            &mut waits,
+        );
+        let (_, foreign) = tracker.request_access(
+            id,
+            TextureLayout::TransferSrc,
+            QueueId::Transfer,
+            2,
+            &mut waits,
+        );
+        assert!(foreign);
+        let (old, foreign) = tracker.request_access(
+            id,
+            TextureLayout::TransferDst,
+            QueueId::Transfer,
+            2,
+            &mut waits,
+        );
+        assert_eq!(old, TextureLayout::TransferSrc);
+        assert!(
+            !foreign,
+            "the local copy needs a source scope before overwriting"
+        );
+        assert_eq!(waits.get(QueueId::Graphics), Some(1));
+    }
+
+    #[test]
+    fn foreign_read_layout_then_local_read_write_keeps_local_source_scope() {
+        let mut tracker = TextureLayoutTracker::new();
+        let id = TextureId::from_raw(1);
+        let mut waits = SubmitWaits::default();
+        // The first queue transitions the image to a read layout. The next
+        // queue must wait for that transition, then order its own read/write.
+        tracker.request_access(
+            id,
+            TextureLayout::TransferSrc,
+            QueueId::Graphics,
+            1,
+            &mut waits,
+        );
+        tracker.request_access(
+            id,
+            TextureLayout::TransferSrc,
+            QueueId::Transfer,
+            2,
+            &mut waits,
+        );
+        let (_, foreign) = tracker.request_access(
+            id,
+            TextureLayout::TransferDst,
+            QueueId::Transfer,
+            2,
+            &mut waits,
+        );
+        assert!(!foreign);
+        assert_eq!(waits.get(QueueId::Graphics), Some(1));
     }
 
     #[test]

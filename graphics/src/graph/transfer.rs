@@ -446,6 +446,45 @@ pub enum TransferOperation {
 }
 
 impl TransferOperation {
+    /// Append the accesses of one ordered transfer operation. The compiler
+    /// aggregates these for pass dependencies; backends can consume them per
+    /// command so a texture's intermediate layouts are not collapsed.
+    pub(crate) fn add_resource_usage(&self, usage: &mut super::resource_usage::PassResourceUsage) {
+        use super::resource_usage::{BufferAccessMode, TextureAccessMode};
+        match self {
+            TransferOperation::TextureToBuffer { src, dst, .. } => {
+                usage.add_texture(Arc::clone(src), TextureAccessMode::TransferRead);
+                usage.add_buffer(Arc::clone(dst), BufferAccessMode::TransferWrite);
+            }
+            TransferOperation::BufferToTexture { src, dst, .. } => {
+                usage.add_buffer(Arc::clone(src), BufferAccessMode::TransferRead);
+                usage.add_texture(Arc::clone(dst), TextureAccessMode::TransferWrite);
+            }
+            TransferOperation::TextureToTexture { src, dst, .. } => {
+                usage.add_texture(Arc::clone(src), TextureAccessMode::TransferRead);
+                usage.add_texture(Arc::clone(dst), TextureAccessMode::TransferWrite);
+            }
+            TransferOperation::BufferToBuffer { src, dst, .. } => {
+                usage.add_buffer(Arc::clone(src), BufferAccessMode::TransferRead);
+                usage.add_buffer(Arc::clone(dst), BufferAccessMode::TransferWrite);
+            }
+            TransferOperation::WriteBuffer { dst, .. } => {
+                usage.add_buffer(Arc::clone(dst), BufferAccessMode::TransferWrite);
+            }
+            // Drained by the frame pipeline after the fence; no GPU work
+            // here, so no barrier. The GPU->src copy is a separate op.
+            TransferOperation::ReadbackBuffer { .. } => {}
+            // Whole-image TransferWrite (#96): the op both reads lower
+            // mips and writes higher ones, but the per-mip transitions
+            // are internal — for hazard purposes the write wins, and the
+            // op starts and ends in TRANSFER_DST so the whole-image
+            // tracker model stays truthful.
+            TransferOperation::GenerateMipmaps { texture } => {
+                usage.add_texture(Arc::clone(texture), TextureAccessMode::TransferWrite);
+            }
+        }
+    }
+
     /// Create a buffer-to-buffer copy operation.
     pub fn copy_buffer(src: Arc<Buffer>, dst: Arc<Buffer>, regions: Vec<BufferCopyRegion>) -> Self {
         Self::BufferToBuffer { src, dst, regions }
