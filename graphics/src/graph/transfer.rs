@@ -448,7 +448,7 @@ pub enum TransferOperation {
 
     /// Generate the full mip chain of `texture` from mip 0 on the GPU (#96).
     ///
-    /// Vulkan uses a linear blit chain; wgpu uses area-weighted shader reduction
+    /// For 2D textures/arrays, Vulkan uses linear blits and wgpu uses area-weighted reduction
     /// with private scratch storage (no hardware float filtering required).
     /// Results can differ for odd dimensions. Both filter sRGB in linear light.
     /// Per-mip transitions stay internal; Vulkan restores the tracker-declared
@@ -461,8 +461,10 @@ pub enum TransferOperation {
     /// usage (generation reads lower mips), and a supported format; the loader
     /// arranges this behind [`DeviceCapabilities::mip_generation`](crate::DeviceCapabilities).
     /// `COPY_DST` is also required. Multiple levels require a single-sampled
-    /// 2D texture or 2D array and backend format support; a single level is a
-    /// no-op. Every array layer is reduced independently across all levels.
+    /// 2D texture, 2D array, cubemap or cube array and backend format support;
+    /// a single level is a no-op. Cubes use a shared cross-face tent shader on
+    /// Vulkan/wgpu; taps outside each face project onto its neighbors. Cube
+    /// array elements remain independent. This is not roughness/IBL filtering.
     GenerateMipmaps {
         /// The texture whose mips 1.. are generated from mip 0.
         texture: Arc<Texture>,

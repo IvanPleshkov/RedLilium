@@ -336,12 +336,18 @@ impl TransferOperation {
                 }
                 if !matches!(
                     target.dimension(),
-                    TextureDimension::D2 | TextureDimension::D2Array
+                    TextureDimension::D2
+                        | TextureDimension::D2Array
+                        | TextureDimension::Cube
+                        | TextureDimension::CubeArray
                 ) || target.sample_count() != 1
                 {
                     return Err(invalid(
-                        "mip generation requires a single-sampled 2D texture or 2D array",
+                        "mip generation requires a single-sampled 2D texture, array, or cubemap",
                     ));
+                }
+                if target.dimension().is_cubemap() && target.width() != target.height() {
+                    return Err(invalid("cubemap faces must be square"));
                 }
                 if !device.supports_mipmap_generation(target.format()) {
                     return Err(GraphicsError::FeatureNotSupported(format!(
@@ -795,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn mip_generation_accepts_arrays_but_still_rejects_cubes_volumes_and_msaa() {
+    fn mip_generation_accepts_arrays_and_cubes_but_rejects_volumes_and_msaa() {
         let d = device();
         let array = tex(
             &d,
@@ -814,12 +820,17 @@ mod tests {
             TransferOperation::generate_mipmaps(array).validate(&d),
             Err(GraphicsError::FeatureNotSupported(_))
         ));
-        for dimension in [
-            TextureDimension::Cube,
-            TextureDimension::CubeArray,
-            TextureDimension::D3,
-            TextureDimension::D1Array,
-        ] {
+        for dimension in [TextureDimension::Cube, TextureDimension::CubeArray] {
+            assert!(matches!(
+                TransferOperation::generate_mipmaps(tex(
+                    &d,
+                    desc(4, 4).with_dimension(dimension).with_mip_levels(3)
+                ))
+                .validate(&d),
+                Err(GraphicsError::FeatureNotSupported(_))
+            ));
+        }
+        for dimension in [TextureDimension::D3, TextureDimension::D1Array] {
             check_bad(
                 TransferOperation::generate_mipmaps(tex(
                     &d,

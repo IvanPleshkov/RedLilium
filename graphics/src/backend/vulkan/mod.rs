@@ -18,6 +18,7 @@ mod instance;
 pub mod layout;
 mod maintenance9;
 mod memory;
+mod mipmaps;
 mod pipeline;
 mod staging;
 pub mod swapchain;
@@ -270,6 +271,7 @@ pub struct VulkanBackend {
     /// to the pool in [`advance_frame`](Self::advance_frame) once the slot's
     /// fence has signalled, so the GPU is guaranteed to be done with them.
     staging_belt: Mutex<staging::StagingBelt>,
+    cube_mips: Mutex<mipmaps::CubeMipState>,
     /// Timeline semaphore for the graphics queue: every `execute_graph`
     /// submit signals the next monotonically increasing value on it. Frame
     /// fences are (this semaphore, value) pairs — see [`GpuFence::Vulkan`].
@@ -1011,6 +1013,7 @@ impl VulkanBackend {
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
             submission_lock: Mutex::new(()),
             staging_belt: Mutex::new(staging_belt),
+            cube_mips: Mutex::new(mipmaps::CubeMipState::default()),
             queue_timeline,
             timeline_next: AtomicU64::new(1),
             async_compute,
@@ -1053,11 +1056,9 @@ impl VulkanBackend {
         self.memory_stats.lock().clone()
     }
 
-    /// Whether `format` supports a `vkCmdBlitImage` mip-generation chain (#96):
-    /// the format's optimal tiling must advertise `BLIT_SRC | BLIT_DST |
-    /// SAMPLED_IMAGE_FILTER_LINEAR`. Block-compressed formats never do. Queried
-    /// straight from the driver — a cheap call made once per texture load.
-    pub fn supports_blit_mipgen(&self, format: crate::types::TextureFormat) -> bool {
+    /// Whether a color format supports both 2D blits and cross-face cubemap
+    /// rendering. The public format-only query conservatively covers both paths.
+    pub fn supports_mipgen(&self, format: crate::types::TextureFormat) -> bool {
         let vk_format = self.vk_texture_format(format);
         let props = unsafe {
             self.instance
@@ -1065,8 +1066,13 @@ impl VulkanBackend {
         };
         let needed = vk::FormatFeatureFlags::BLIT_SRC
             | vk::FormatFeatureFlags::BLIT_DST
-            | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
-        props.optimal_tiling_features.contains(needed)
+            | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR
+            | vk::FormatFeatureFlags::SAMPLED_IMAGE
+            | vk::FormatFeatureFlags::COLOR_ATTACHMENT;
+        !format.is_depth_stencil()
+            && !format.is_compressed()
+            && !format.is_integer()
+            && props.optimal_tiling_features.contains(needed)
     }
 
     /// Re-arm the timestamp query pool for `queue`/`slot` after a recording
@@ -1358,6 +1364,7 @@ impl VulkanBackend {
         self.staging_belt
             .lock()
             .retire_slot(&self.device, &mut self.allocator.lock(), oldest);
+        self.cube_mips.lock().retire_slot(oldest);
 
         // Read back the retiring slot's GPU timestamps (#95). The same fence
         // wait that lets the staging chunks retire guarantees these queries are
@@ -1683,6 +1690,10 @@ impl Drop for VulkanBackend {
         unsafe {
             // Wait for device to be idle before cleanup
             let _ = self.device.device_wait_idle();
+
+            // Internal mip resources contain native handles and must retire
+            // while their allocator, pipeline manager, and device still live.
+            self.cube_mips.lock().clear();
 
             // Destroy pipeline manager resources BEFORE destroying the device.
             // PipelineManager holds Vulkan handles (descriptor pool, pipelines, etc.)
@@ -4549,6 +4560,9 @@ impl VulkanBackend {
                 }
             }
             TransferOperation::GenerateMipmaps { texture } => {
+                if texture.dimension().is_cubemap() {
+                    return self.encode_cube_mipmaps(cmd, texture);
+                }
                 let GpuTexture::Vulkan { image, .. } = texture.gpu_handle() else {
                     return Ok(());
                 };

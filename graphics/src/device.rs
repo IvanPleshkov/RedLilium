@@ -78,8 +78,8 @@ pub struct DeviceCapabilities {
     /// empty result and the editor stats panel degrades to "unavailable".
     pub gpu_timestamps: bool,
     /// Whether the backend can generate mip chains on the GPU via the frame
-    /// graph (`TransferOperation::GenerateMipmaps`). Vulkan uses linear blits;
-    /// wgpu uses shader reduction. Per-format support is a separate query
+    /// graph (`TransferOperation::GenerateMipmaps`). Vulkan uses linear blits
+    /// for 2D and shaders for cubes; wgpu uses shaders. Format support is queried
     /// ([`GraphicsDevice::supports_mipmap_generation`]). False on Dummy;
     /// the asset importer can still generate supported formats on the CPU.
     pub mip_generation: bool,
@@ -386,7 +386,8 @@ impl GraphicsDevice {
 
     /// Whether the GPU can generate a mip chain for `format` (#96).
     ///
-    /// Vulkan requires linear-blit format support. wgpu requires a sampleable,
+    /// Vulkan requires linear-blit and sampled/color-attachment support so the
+    /// format works for both 2D and cross-face cube reduction. wgpu requires a sampleable,
     /// renderable non-integer color format; float filtering is not required.
     /// This queries GPU generation only: the importer has a CPU fallback for
     /// uncompressed color formats. Compressed textures need authored chains.

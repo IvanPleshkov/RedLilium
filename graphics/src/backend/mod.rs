@@ -1154,7 +1154,7 @@ impl GpuBackend {
             #[cfg(feature = "wgpu-backend")]
             Self::Wgpu(backend) => backend.supports_mipgen(format),
             #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan(backend) => backend.supports_blit_mipgen(format),
+            Self::Vulkan(backend) => backend.supports_mipgen(format),
         }
     }
 

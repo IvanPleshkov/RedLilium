@@ -74,7 +74,7 @@ contract includes:
   different resources, even for disjoint buffer ranges or texture subresources.
   In-place texture copies need subresource tracking, which is not implemented.
 - Mip generation requires `COPY_SRC | COPY_DST` and, for multiple levels, a
-  single-sampled 2D texture or 2D array with a supported format. A single level
+  single-sampled 2D texture, 2D array, cubemap or cube array with a supported format. A single level
   is a no-op.
 
 `upload_texture_data` and `upload_texture_level` prepare staging data with the
@@ -84,7 +84,7 @@ required padding; the destination upload is still an ordered graph operation.
 
 `TransferOperation::generate_mipmaps(texture)` generates the allocated levels
 from mip 0 inside the graph. The resource needs only `COPY_SRC | COPY_DST`.
-Vulkan uses linear blits. wgpu uses a cached render pipeline and private scratch
+For 2D textures/arrays, Vulkan uses linear blits. wgpu uses a cached render pipeline and private scratch
 texture, with area-weighted `textureLoad` reduction: float formats do not need
 hardware linear filtering, and odd-size edges contribute to the result. Both
 paths filter sRGB colors in linear light; their kernels may differ for odd sizes.
@@ -106,7 +106,9 @@ the nearest value; depth/stencil is not treated as color.
 
 - `Color`: regular color reduction, with sRGB decoded before averaging.
 - `NormalMap`: CPU reduction of tangent-space XYZ stored in RGB [0, 1], followed
-  by normalization. Ordinary image files are decoded as linear regardless of
+  by normalization. Cubemap normals must use a common basis across faces, such
+  as world space; face-local tangent frames are not converted automatically.
+  Ordinary image files are decoded as linear regardless of
   `srgb`; a cancelling vector becomes +Z. This is not an XY-only normal decoder.
 - `AlphaCoverage`: CPU reduction with per-level alpha scaling toward mip 0's
   fraction of texels passing `alpha >= cutoff / 255`. Cutoff is 1..=254 and should
@@ -121,10 +123,24 @@ layer. A base-only array receives generated mips when `generate_mips` is enabled
 the number of layers stays constant at every level. Uploads for all base layers
 precede the GPU generation operation.
 
+Cubemaps and cube arrays use cross-face tent reduction on CPU, Vulkan, and wgpu.
+Taps outside a face are projected onto neighboring faces, including at corners,
+using the [KTX/Vulkan face convention](https://github.khronos.org/Vulkan-Site/spec/latest/chapters/textures.html)
+`+X, -X, +Y, -Y, +Z, -Z`. Filtering happens in linear light for sRGB. Each cube
+is isolated from other cube-array elements. Alpha coverage uses a single
+correction per cube, so separate face corrections cannot introduce seams.
+Vulkan retains temporary images, views, and descriptors until the frame slot's
+fences retire; wgpu retains them through its command buffers. This costs a
+temporary mip chain per generation operation. Stored base faces remain unchanged.
+
+This is mip downsampling across face boundaries, not specular IBL convolution
+by roughness or a repair for mismatched source faces. No radiance solid-angle
+integration or face-local normal-basis conversion is performed.
+
 Supplied mip chains are preserved, including compressed KTX2 assets. BC/ETC/ASTC
 need precomputed mips; no runtime recompression is performed. Generation remains
-limited to 2D textures and 2D arrays without MSAA. Cubemap and 3D generation
-are deferred. CPU fallback broadens **asset import** support; a
+limited to 2D textures, 2D arrays, cubemaps and cube arrays without MSAA.
+3D generation is deferred. CPU fallback broadens **asset import** support; a
 direct GPU graph operation on an unsupported format still returns an error.
 
 ### Public API boundary

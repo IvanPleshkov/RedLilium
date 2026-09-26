@@ -26,16 +26,23 @@ impl WgpuBackend {
                 )
     }
 
-    fn mip_pipeline(&self, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
+    fn mip_pipeline(&self, format: wgpu::TextureFormat, cube: bool) -> wgpu::RenderPipeline {
         let mut cache = self.mip_pipelines.lock();
         cache
-            .entry(format)
+            .entry((format, cube))
             .or_insert_with(|| {
                 let shader = self
                     .device
                     .create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("mip reduction"),
-                        source: wgpu::ShaderSource::Wgsl(include_str!("mipmaps.wgsl").into()),
+                        source: wgpu::ShaderSource::Wgsl(
+                            if cube {
+                                include_str!("../mipmaps_cube.wgsl")
+                            } else {
+                                include_str!("mipmaps.wgsl")
+                            }
+                            .into(),
+                        ),
                     });
                 let bindings =
                     self.device
@@ -48,7 +55,11 @@ impl WgpuBackend {
                                     sample_type: wgpu::TextureSampleType::Float {
                                         filterable: false,
                                     },
-                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    view_dimension: if cube {
+                                        wgpu::TextureViewDimension::D2Array
+                                    } else {
+                                        wgpu::TextureViewDimension::D2
+                                    },
                                     multisampled: false,
                                 },
                                 count: None,
@@ -99,7 +110,8 @@ impl WgpuBackend {
             return;
         };
         let format = convert_texture_format(target.format());
-        let pipeline = self.mip_pipeline(format);
+        let cube = target.dimension().is_cubemap();
+        let pipeline = self.mip_pipeline(format, cube);
         // Scratch keeps sampled/render-attachment usage private. The public
         // resource needs only COPY_SRC/DST, on both Vulkan and wgpu. wgpu retains
         // all these handles in the command buffer until submission completes.
@@ -133,7 +145,16 @@ impl WgpuBackend {
                         ..Default::default()
                     })
                 };
-                let src = view(mip - 1);
+                let src = if cube {
+                    scratch.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2Array),
+                        base_mip_level: mip - 1,
+                        mip_level_count: Some(1),
+                        ..Default::default()
+                    })
+                } else {
+                    view(mip - 1)
+                };
                 let dst = view(mip);
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("mip source"),
@@ -162,7 +183,7 @@ impl WgpuBackend {
                     });
                     pass.set_pipeline(&pipeline);
                     pass.set_bind_group(0, &bind_group, &[]);
-                    pass.draw(0..3, 0..1);
+                    pass.draw(0..3, layer..layer + 1);
                 }
             }
             encoder.copy_texture_to_texture(
@@ -188,12 +209,17 @@ impl WgpuBackend {
 mod tests {
     #[test]
     fn mip_shader_validates_without_optional_capabilities() {
-        let module = naga::front::wgsl::parse_str(include_str!("mipmaps.wgsl")).unwrap();
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        )
-        .validate(&module)
-        .unwrap();
+        for source in [
+            include_str!("mipmaps.wgsl"),
+            include_str!("../mipmaps_cube.wgsl"),
+        ] {
+            let module = naga::front::wgsl::parse_str(source).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
     }
 }

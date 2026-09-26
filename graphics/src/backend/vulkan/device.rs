@@ -927,9 +927,8 @@ pub fn device_capabilities(
         transfer_queue: plan.transfer.is_some(),
         compute_shaders: true,
         gpu_timestamps,
-        // The Vulkan backend implements GenerateMipmaps via a vkCmdBlitImage
-        // chain (#96); per-format blit eligibility is checked separately at
-        // load time (see `VulkanBackend::supports_blit_mipgen`).
+        // 2D mip blits and cross-face cube shaders; per-format eligibility
+        // is checked by VulkanBackend::supports_mipgen at load/submit time.
         mip_generation: true,
         // VK_EXT_memory_budget, when advertised (#98). Drives per-heap
         // budget/usage in the stats panel; without it heap budget/usage are None.

@@ -332,7 +332,7 @@ impl AssetStage for MakeSolidArrayStage {
 struct UploadTextureStage {
     device: Arc<GraphicsDevice>,
     /// Whether to request GPU mips when the CPU stage has not supplied a chain.
-    /// Still gated by device support and the 2D/2D-array restriction.
+    /// Still gated by device support and the 2D/array/cubemap restriction.
     generate_mips: bool,
 }
 
@@ -358,7 +358,10 @@ impl AssetStage for PrepareMipmapsStage {
             if cpu.mip_level_count == 1
                 && matches!(
                     cpu.dimension,
-                    TextureDimension::D2 | TextureDimension::D2Array
+                    TextureDimension::D2
+                        | TextureDimension::D2Array
+                        | TextureDimension::Cube
+                        | TextureDimension::CubeArray
                 )
                 && (filter != MipmapFilter::Color || !device.supports_mipmap_generation(cpu.format))
             {
@@ -391,19 +394,22 @@ impl AssetStage for UploadTextureStage {
             .map_err(|_| AssetError::Decode("texture: upload stage expected CpuTexture".into()))?;
 
         // Stored mip chains are preserved. Having multiple layers alone does
-        // not imply an authored chain: a base-only 2D array can generate mips.
+        // not imply an authored chain: base-only arrays/cubes can generate mips.
         let stored_chain = cpu.mip_level_count > 1;
         let layered_upload =
             stored_chain || cpu.layer_count() > 1 || cpu.dimension == TextureDimension::D2Array;
 
         // CPU-generated and container-supplied chains arrive complete. GPU
-        // generation handles 2D and 2D-array colors; unsupported compressed
+        // generation handles 2D, arrays and cubemaps; unsupported compressed
         // formats stay as supplied and log once.
         let wants_mips = self.generate_mips
             && !stored_chain
             && matches!(
                 cpu.dimension,
-                TextureDimension::D2 | TextureDimension::D2Array
+                TextureDimension::D2
+                    | TextureDimension::D2Array
+                    | TextureDimension::Cube
+                    | TextureDimension::CubeArray
             )
             && (cpu.width > 1 || cpu.height > 1);
         let can_mip = wants_mips && self.device.supports_mipmap_generation(cpu.format);
@@ -639,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_stage_keeps_container_chains_and_does_not_generate_cube_mips() {
+    fn cpu_stage_keeps_container_chains_and_does_not_generate_volume_mips() {
         let device = dummy_device();
         let stage = PrepareMipmapsStage {
             device: device.clone(),
@@ -653,7 +659,8 @@ mod tests {
             .unwrap();
         assert_eq!(cpu.data, vec![42; 20]);
         let cpu = CpuTexture::new(2, 2, TextureFormat::Rgba8Unorm, vec![42; 16 * 6])
-            .with_dimension(TextureDimension::Cube);
+            .with_dimension(TextureDimension::D3)
+            .with_depth_or_array_layers(6);
         let cpu = ready(stage.run_async(Box::new(cpu))).unwrap();
         let upload = UploadTextureStage {
             device,
@@ -675,9 +682,15 @@ mod tests {
     }
 
     #[test]
-    fn array_cpu_import_uploads_each_mip_and_layer_and_preserves_authored_chain() {
+    fn layered_cpu_import_uploads_each_mip_and_layer_and_preserves_authored_chain() {
         let device = dummy_device();
-        for layers in [1, 3] {
+        for (dimension, count) in [
+            (TextureDimension::D2Array, 1),
+            (TextureDimension::D2Array, 3),
+            (TextureDimension::Cube, 1),
+            (TextureDimension::CubeArray, 2),
+        ] {
+            let layers = dimension.layer_count(count);
             for filter in [
                 MipmapFilter::Color,
                 MipmapFilter::NormalMap,
@@ -693,8 +706,8 @@ mod tests {
                     TextureFormat::Rgba8Unorm,
                     [128, 128, 255, 255].repeat(16 * layers as usize),
                 )
-                .with_dimension(TextureDimension::D2Array)
-                .with_depth_or_array_layers(layers);
+                .with_dimension(dimension)
+                .with_depth_or_array_layers(count);
                 let prepared = ready(stage.run_async(Box::new(cpu))).unwrap();
                 let cpu = prepared.downcast_ref::<CpuTexture>().unwrap();
                 assert_eq!(cpu.mip_level_count, 3);
@@ -712,8 +725,8 @@ mod tests {
                 let (value, operations) = upload.run_gpu(prepared).unwrap();
                 let texture = value.downcast_ref::<Arc<Texture>>().unwrap();
                 assert_eq!(texture.mip_level_count(), 3);
-                assert_eq!(texture.dimension(), TextureDimension::D2Array);
-                assert_eq!(texture.depth(), layers);
+                assert_eq!(texture.dimension(), dimension);
+                assert_eq!(texture.depth(), count);
                 assert_eq!(operations.len(), (3 * layers) as usize);
                 for (index, op) in operations.iter().enumerate() {
                     let TransferOperation::BufferToTexture { regions, .. } = op else {
@@ -728,7 +741,7 @@ mod tests {
 
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
-    fn gpu_array_import_generates_after_all_base_layers_and_honors_opt_out() {
+    fn gpu_layered_import_generates_after_all_base_layers_and_honors_opt_out() {
         let Ok(instance) = redlilium_graphics::GraphicsInstance::with_parameters(
             redlilium_graphics::InstanceParameters::new()
                 .with_backend(redlilium_graphics::BackendType::Wgpu),
@@ -738,7 +751,13 @@ mod tests {
         };
         let device = instance.create_device().unwrap();
         assert!(device.supports_mipmap_generation(TextureFormat::Rgba8Unorm));
-        for layers in [1, 3] {
+        for (dimension, count) in [
+            (TextureDimension::D2Array, 1),
+            (TextureDimension::D2Array, 3),
+            (TextureDimension::Cube, 1),
+            (TextureDimension::CubeArray, 2),
+        ] {
+            let layers = dimension.layer_count(count);
             for generate_mips in [false, true] {
                 let cpu = CpuTexture::new(
                     4,
@@ -746,8 +765,8 @@ mod tests {
                     TextureFormat::Rgba8Unorm,
                     vec![42; 64 * layers as usize],
                 )
-                .with_dimension(TextureDimension::D2Array)
-                .with_depth_or_array_layers(layers);
+                .with_dimension(dimension)
+                .with_depth_or_array_layers(count);
                 let input = if generate_mips {
                     let stage = PrepareMipmapsStage {
                         device: device.clone(),

@@ -4273,3 +4273,238 @@ fn test_generate_array_mipmaps_all_layers_and_levels(#[case] backend: Backend) {
         );
     }
 }
+
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::wgpu(Backend::WebGpu)]
+fn test_cross_face_cube_mips_match_cpu(#[case] backend: Backend) {
+    use redlilium_core::texture::{CpuTexture, MipmapFilter, TextureDimension};
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    #[cfg(feature = "vulkan-backend")]
+    redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
+    for dimension in [TextureDimension::Cube, TextureDimension::CubeArray] {
+        let cubes = if dimension == TextureDimension::Cube {
+            1
+        } else {
+            2
+        };
+        for size in [4u32, 5] {
+            for format in [TextureFormat::Rgba8UnormSrgb, TextureFormat::Rgba32Float] {
+                let mut data = Vec::new();
+                for layer in 0..cubes * 6 {
+                    for y in 0..size {
+                        for x in 0..size {
+                            // Different orientation-sensitive pattern per face/cube.
+                            let rgba = [
+                                20 + layer as u8 * 13,
+                                16 + x as u8 * 31,
+                                32 + y as u8 * 29,
+                                255,
+                            ];
+                            if format == TextureFormat::Rgba32Float {
+                                for value in rgba {
+                                    data.extend_from_slice(
+                                        &(f32::from(value) / 255.0).to_le_bytes(),
+                                    );
+                                }
+                            } else {
+                                data.extend_from_slice(&rgba);
+                            }
+                        }
+                    }
+                }
+                let base = CpuTexture::new(size, size, format, data)
+                    .with_dimension(dimension)
+                    .with_depth_or_array_layers(cubes);
+                let mut expected = base.clone();
+                expected.generate_mipmaps(MipmapFilter::Color).unwrap();
+                let mut descriptor = TextureDescriptor::new_cube(
+                    size,
+                    format,
+                    TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+                )
+                .with_dimension(dimension)
+                .with_mip_levels(expected.mip_level_count);
+                descriptor.size.depth = cubes;
+                let texture = ctx.device.create_texture(&descriptor).unwrap();
+                let mut ops = Vec::new();
+                for layer in 0..cubes * 6 {
+                    ops.push(
+                        TransferOperation::upload_texture_level(
+                            &ctx.device,
+                            texture.clone(),
+                            0,
+                            layer,
+                            &base.data[base.byte_range(0, layer)],
+                        )
+                        .unwrap(),
+                    );
+                }
+                ops.push(TransferOperation::generate_mipmaps(texture.clone()));
+                let mut reads = Vec::new();
+                for mip in 0..expected.mip_level_count {
+                    let w = (size >> mip).max(1);
+                    for layer in 0..cubes * 6 {
+                        let buffer = ctx.create_readback_buffer(u64::from(w * 256));
+                        ops.push(TransferOperation::readback_texture(
+                            texture.clone(),
+                            buffer.clone(),
+                            vec![BufferTextureCopyRegion::new(
+                                BufferTextureLayout::new(0, Some(256), None),
+                                TextureCopyLocation::new(
+                                    mip,
+                                    redlilium_graphics::TextureOrigin::new(0, 0, layer),
+                                ),
+                                Extent3d::new_2d(w, w),
+                            )],
+                        ));
+                        reads.push((buffer, mip, layer, w));
+                    }
+                }
+                let mut pass = TransferPass::new("cross_face_cube_mips".into());
+                pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+                let mut graph = RenderGraph::new();
+                graph.add_transfer_pass(pass);
+                ctx.execute_graph(graph);
+                for (buffer, mip, layer, w) in reads {
+                    let bytes = ctx.read_buffer(&buffer, u64::from(w * 256));
+                    let reference = &expected.data[expected.byte_range(mip, layer)];
+                    let row = (w * format.block_size()) as usize;
+                    for y in 0..w as usize {
+                        let actual = &bytes[y * 256..y * 256 + row];
+                        let expected = &reference[y * row..(y + 1) * row];
+                        if format == TextureFormat::Rgba32Float {
+                            for (a, b) in actual.chunks_exact(4).zip(expected.chunks_exact(4)) {
+                                let a = f32::from_le_bytes(a.try_into().unwrap());
+                                let b = f32::from_le_bytes(b.try_into().unwrap());
+                                assert!(
+                                    (a - b).abs() < 0.002,
+                                    "{backend:?} {dimension:?}, size {size}, mip {mip}, layer {layer}, row {y}: {a} != {b}"
+                                );
+                            }
+                        } else {
+                            for (a, b) in actual.iter().zip(expected) {
+                                assert!(
+                                    (i16::from(*a) - i16::from(*b)).abs() <= 2,
+                                    "{backend:?} {dimension:?}, size {size}, mip {mip}, layer {layer}, row {y}: {a} != {b}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    drop(ctx);
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        assert_eq!(
+            redlilium_graphics::diagnostics::vulkan::validation_error_count(),
+            0
+        );
+    }
+}
+
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::wgpu(Backend::WebGpu)]
+fn test_cube_mips_recover_after_recording_failure_and_regenerate(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    #[cfg(feature = "vulkan-backend")]
+    redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
+    let texture = ctx
+        .device
+        .create_texture(
+            &TextureDescriptor::new_cube(
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::COPY_SRC | TextureUsage::COPY_DST | TextureUsage::RENDER_ATTACHMENT,
+            )
+            .with_mip_levels(3),
+        )
+        .unwrap();
+    // More rounds than frame slots exercise scratch retirement and reuse of
+    // the format pipeline, as well as regeneration on an already-used image.
+    for round in 0..5u8 {
+        let expected = [32 + round * 16, 96, 192, 255];
+        let mut uploads = Vec::new();
+        for face in 0..6 {
+            uploads.push(
+                TransferOperation::upload_texture_level(
+                    &ctx.device,
+                    texture.clone(),
+                    0,
+                    face,
+                    &expected.repeat(16),
+                )
+                .unwrap(),
+            );
+        }
+        let mut pass = TransferPass::new("base_faces".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(uploads));
+        let mut graph = RenderGraph::new();
+        graph.add_transfer_pass(pass);
+        ctx.execute_graph(graph);
+        let mut failed = RenderGraph::new();
+        let mut generate = TransferPass::new("cube_before_error".into());
+        generate.set_transfer_config(
+            TransferConfig::new()
+                .with_operation(TransferOperation::generate_mipmaps(texture.clone())),
+        );
+        let first = failed.add_transfer_pass(generate);
+        let mut bad = GraphicsPass::new("invalid_mip".into());
+        bad.set_render_targets(RenderTargetConfig::new().with_color(ColorAttachment::new(
+            RenderTarget::from_texture_mip(texture.clone(), 99),
+        )));
+        let last = failed.add_graphics_pass(bad);
+        failed.add_dependency(last, first);
+        {
+            let mut pipeline = ctx.pipeline.borrow_mut();
+            let mut schedule = pipeline.begin_frame().unwrap();
+            assert!(schedule.submit(failed).is_err());
+            pipeline.end_frame(schedule);
+        }
+        let mut pass = TransferPass::new("regenerate_cube".into());
+        pass.set_transfer_config(
+            TransferConfig::new()
+                .with_operation(TransferOperation::generate_mipmaps(texture.clone())),
+        );
+        let mut graph = RenderGraph::new();
+        graph.add_transfer_pass(pass);
+        ctx.execute_graph(graph);
+        // Read in a separate graph to check the final whole-image layout.
+        let readback = ctx.create_readback_buffer(6 * 256);
+        let mut pass = TransferPass::new("read_cube".into());
+        pass.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::readback_texture(
+                texture.clone(),
+                readback.clone(),
+                vec![BufferTextureCopyRegion::new(
+                    BufferTextureLayout::new(0, Some(256), Some(1)),
+                    TextureCopyLocation::mip(2),
+                    Extent3d::new_3d(1, 1, 6),
+                )],
+            ),
+        ));
+        let mut graph = RenderGraph::new();
+        graph.add_transfer_pass(pass);
+        ctx.execute_graph(graph);
+        let bytes = ctx.read_buffer(&readback, 6 * 256);
+        for face in 0..6 {
+            assert_eq!(&bytes[face * 256..face * 256 + 4], &expected);
+        }
+    }
+    drop(texture);
+    drop(ctx);
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        assert_eq!(
+            redlilium_graphics::diagnostics::vulkan::validation_error_count(),
+            0
+        );
+    }
+}
