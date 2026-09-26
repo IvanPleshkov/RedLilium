@@ -6,6 +6,8 @@
 //! into `CpuTexture` (#120).
 
 pub mod ktx2;
+mod mipmaps;
+pub use mipmaps::{MipmapError, MipmapFilter};
 
 /// Texture dimension enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

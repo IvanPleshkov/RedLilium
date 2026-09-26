@@ -187,10 +187,12 @@ fn test_upload_texture_data_roundtrip(#[case] backend: Backend) {
 /// colors, then `GenerateMipmaps`, must produce a 1×1 top mip that is the
 /// average of the four colors (two linear blit steps: 4→2→1). Runs with
 /// validation on so a subresource-range barrier mistake in the blit chain is
-/// caught. Skipped where `mip_generation == false` (wgpu/dummy).
+/// caught. Exercises both Vulkan blits and wgpu shader reduction.
 #[rstest]
 #[case::separate_readback(Backend::Vulkan, false)]
 #[case::inline_readback(Backend::Vulkan, true)]
+#[case::wgpu_separate_readback(Backend::WebGpu, false)]
+#[case::wgpu_inline_readback(Backend::WebGpu, true)]
 fn test_generate_mipmaps_4x4_average(#[case] backend: Backend, #[case] inline_readback: bool) {
     let Some(ctx) = TestContext::new_with_validation(backend) else {
         eprintln!("Skipping test: {backend:?} backend not available");
@@ -407,10 +409,8 @@ fn test_upload_texture_level_mips_and_faces(#[case] backend: Backend) {
     }
 }
 
-/// Format gate for mip generation (#96): a blit-eligible color format is
-/// supported on Vulkan; a block-compressed format never is (it cannot be
-/// blit-downsampled). wgpu/dummy report `false` for everything (no blit path),
-/// so the loader keeps a single mip there.
+/// GPU format gate: ordinary color is supported on Vulkan and wgpu;
+/// block compression needs authored mips. Dummy uses CPU import reduction.
 #[rstest]
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
@@ -4026,5 +4026,128 @@ fn test_transfer_preflight_small_texel_and_srgb_copy(#[case] backend: Backend) {
             &ctx.read_buffer(&readback, 4)[..bytes.len()],
             bytes.as_slice()
         );
+    }
+}
+
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::wgpu(Backend::WebGpu)]
+fn test_generate_mipmaps_srgb_and_float(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    #[cfg(feature = "vulkan-backend")]
+    redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
+    for format in [TextureFormat::Rgba8UnormSrgb, TextureFormat::R32Float] {
+        assert!(ctx.device.supports_mipmap_generation(format));
+        // Only copy usages: the backend owns any sampled/attachment scratch.
+        let texture = ctx
+            .device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    2,
+                    1,
+                    format,
+                    TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+                )
+                .with_mip_levels(2),
+            )
+            .unwrap();
+        let (bytes, expected) = if format == TextureFormat::R32Float {
+            (
+                [2.0f32.to_le_bytes(), 10.0f32.to_le_bytes()].concat(),
+                6.0f32,
+            )
+        } else {
+            (vec![0, 0, 0, 255, 255, 255, 255, 255], 188.0)
+        };
+        let readback = ctx.create_readback_buffer(4);
+        let mut pass = TransferPass::new("mip_formats".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(vec![
+            TransferOperation::upload_texture_data(&ctx.device, texture.clone(), &bytes).unwrap(),
+            TransferOperation::generate_mipmaps(texture.clone()),
+            TransferOperation::readback_texture(
+                texture,
+                readback.clone(),
+                vec![BufferTextureCopyRegion::new(
+                    BufferTextureLayout::packed(),
+                    TextureCopyLocation::mip(1),
+                    Extent3d::new_2d(1, 1),
+                )],
+            ),
+        ]));
+        let mut graph = RenderGraph::new();
+        graph.add_transfer_pass(pass);
+        ctx.execute_graph(graph);
+        let result = ctx.read_buffer(&readback, 4);
+        if format == TextureFormat::R32Float {
+            assert!((f32::from_le_bytes(result[..4].try_into().unwrap()) - expected).abs() < 0.001);
+        } else {
+            for &channel in &result[..3] {
+                assert!((f32::from(channel) - expected).abs() <= 1.0);
+            }
+            assert_eq!(result[3], 255);
+        }
+    }
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        assert_eq!(
+            redlilium_graphics::diagnostics::vulkan::validation_error_count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn test_wgpu_mipmaps_include_odd_edges_and_can_regenerate() {
+    let Some(ctx) = TestContext::new_with_validation(Backend::WebGpu) else {
+        return;
+    };
+    for (width, height) in [(3u32, 1u32), (1, 3), (5, 3)] {
+        let levels = 32 - width.max(height).leading_zeros();
+        let texture = ctx
+            .device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    width,
+                    height,
+                    TextureFormat::R32Float,
+                    TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+                )
+                .with_mip_levels(levels),
+            )
+            .unwrap();
+        let readback = ctx.create_readback_buffer(4);
+        // Reuse the format pipeline, regenerate the same texture, and verify
+        // that old mip contents do not leak through the scratch path.
+        for value in [1.0f32, 3.0] {
+            let mut values = vec![0.0f32; (width * height) as usize];
+            *values.last_mut().unwrap() = value;
+            let bytes: Vec<_> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let mut pass = TransferPass::new("odd_mips".into());
+            pass.set_transfer_config(TransferConfig::new().with_operations(vec![
+                    TransferOperation::upload_texture_data(&ctx.device, texture.clone(), &bytes)
+                        .unwrap(),
+                    TransferOperation::generate_mipmaps(texture.clone()),
+                    TransferOperation::readback_texture(
+                        texture.clone(),
+                        readback.clone(),
+                        vec![BufferTextureCopyRegion::new(
+                            BufferTextureLayout::packed(),
+                            TextureCopyLocation::mip(levels - 1),
+                            Extent3d::new_2d(1, 1),
+                        )],
+                    ),
+                ]));
+            let mut graph = RenderGraph::new();
+            graph.add_transfer_pass(pass);
+            ctx.execute_graph(graph);
+            let bytes = ctx.read_buffer(&readback, 4);
+            let result = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+            assert!(
+                (result - value / (width * height) as f32).abs() < 1e-5,
+                "{width}x{height}: {result}"
+            );
+        }
     }
 }

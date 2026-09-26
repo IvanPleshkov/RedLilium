@@ -2073,10 +2073,26 @@ impl VulkanBackend {
                 layer_count,
             });
 
-        let view = unsafe { self.device.create_image_view(&view_info, None) }.map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!("Failed to create image view: {:?}", e))
-        })?;
-        if let Some(label) = &descriptor.label {
+        // Transfer-only images have no legal view usage (VUID 04441), and
+        // copies/blits address the image directly. Do not create a view for them.
+        let view = if usage.intersects(
+            vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+        ) {
+            unsafe { self.device.create_image_view(&view_info, None) }.map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to create image view: {:?}",
+                    e
+                ))
+            })?
+        } else {
+            vk::ImageView::null()
+        };
+        if let Some(label) = &descriptor.label
+            && view != vk::ImageView::null()
+        {
             self.set_object_name(view, &format!("{label} view"));
         }
 

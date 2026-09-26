@@ -78,11 +78,10 @@ pub struct DeviceCapabilities {
     /// empty result and the editor stats panel degrades to "unavailable".
     pub gpu_timestamps: bool,
     /// Whether the backend can generate mip chains on the GPU via the frame
-    /// graph (#96, `TransferOperation::GenerateMipmaps` — a `vkCmdBlitImage`
-    /// chain). This is the format-independent "backend supports the op" bit;
-    /// per-format blit eligibility is a separate query
-    /// ([`GraphicsDevice::supports_mipmap_generation`]). `false` on wgpu/dummy
-    /// (no blit path), so the texture loader falls back to a single mip.
+    /// graph (`TransferOperation::GenerateMipmaps`). Vulkan uses linear blits;
+    /// wgpu uses shader reduction. Per-format support is a separate query
+    /// ([`GraphicsDevice::supports_mipmap_generation`]). False on Dummy;
+    /// the asset importer can still generate supported formats on the CPU.
     pub mip_generation: bool,
     /// Whether `VK_EXT_memory_budget` is enabled on the device (#98). When true,
     /// [`GraphicsDevice::latest_memory_stats`] fills each heap's `budget`/`usage`
@@ -387,13 +386,13 @@ impl GraphicsDevice {
 
     /// Whether the GPU can generate a mip chain for `format` (#96).
     ///
-    /// True only when the backend supports the op
-    /// ([`DeviceCapabilities::mip_generation`]) AND the format is blit-eligible
-    /// (`BLIT_SRC | BLIT_DST | SAMPLED_IMAGE_FILTER_LINEAR` on Vulkan).
-    /// Block-compressed and other non-blittable formats return false; the
-    /// texture loader then keeps a single mip. Always false on wgpu/dummy.
+    /// Vulkan requires linear-blit format support. wgpu requires a sampleable,
+    /// renderable non-integer color format; float filtering is not required.
+    /// This queries GPU generation only: the importer has a CPU fallback for
+    /// uncompressed color formats. Compressed textures need authored chains.
     pub fn supports_mipmap_generation(&self, format: crate::types::TextureFormat) -> bool {
-        self.capabilities.mip_generation && self.instance.backend().supports_blit_mipgen(format)
+        self.capabilities.mip_generation
+            && self.instance.backend().supports_mipmap_generation(format)
     }
 
     /// Create a GPU buffer.

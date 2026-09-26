@@ -4,6 +4,7 @@
 //! Vulkan, Metal, DX12, and WebGPU.
 
 pub(crate) mod conversion;
+mod mipmaps;
 mod pass_encoding;
 mod resources;
 pub mod swapchain;
@@ -74,6 +75,7 @@ pub struct WgpuBackend {
     /// it — the clean way to satisfy wgpu's bind-group/pipeline compatibility.
     // parking_lot: no poisoning.
     bind_group_layout_cache: parking_lot::Mutex<HashMap<BindGroupLayoutKey, wgpu::BindGroupLayout>>,
+    mip_pipelines: parking_lot::Mutex<HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>>,
 }
 
 impl std::fmt::Debug for WgpuBackend {
@@ -302,6 +304,7 @@ impl WgpuBackend {
             wgpu::Features::TEXTURE_COMPRESSION_ETC2,
             wgpu::Features::TEXTURE_COMPRESSION_ASTC,
             wgpu::Features::FLOAT32_FILTERABLE,
+            wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
             wgpu::Features::INDIRECT_FIRST_INSTANCE,
             // Wireframe (`PolygonMode::Line`) is native-only — absent on WebGPU
             // and WebGL. Requesting it unconditionally makes `request_device`
@@ -363,6 +366,7 @@ impl WgpuBackend {
             device: Arc::new(device),
             queue: Arc::new(queue),
             bind_group_layout_cache: parking_lot::Mutex::new(HashMap::new()),
+            mip_pipelines: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -457,6 +461,7 @@ impl WgpuBackend {
         // materials/binding groups recreated against the new device get fresh,
         // compatible layouts.
         self.bind_group_layout_cache.lock().clear();
+        self.mip_pipelines.lock().clear();
 
         Ok(true)
     }
@@ -513,10 +518,8 @@ impl WgpuBackend {
             // Per-pass timestamp collection is wired for the Vulkan backend
             // only (#95); the wgpu pass encoders pass `timestamp_writes: None`.
             gpu_timestamps: false,
-            // No blit path in the wgpu backend (#96); GenerateMipmaps is a no-op
-            // and the loader falls back to a single mip. A wgpu render/compute
-            // downsampler is a named follow-up.
-            mip_generation: false,
+            // Shader downsampling is encoded inside the graph transfer op.
+            mip_generation: true,
             // No VRAM budget API on wgpu (#98); heaps are empty, the panel
             // falls back to the engine's allocator/resource figures.
             memory_budget: false,

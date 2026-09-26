@@ -448,16 +448,17 @@ pub enum TransferOperation {
 
     /// Generate the full mip chain of `texture` from mip 0 on the GPU (#96).
     ///
-    /// A linear blit chain (mip N → N+1) — the simplest correct baseline. The
-    /// per-mip subresource layout transitions are internal to the op: it starts
-    /// from and ends in the tracker-declared whole-image `TransferWrite`
-    /// (`TRANSFER_DST`) layout, so the whole-image layout model stays truthful.
+    /// Vulkan uses a linear blit chain; wgpu uses area-weighted shader reduction
+    /// with private scratch storage (no hardware float filtering required).
+    /// Results can differ for odd dimensions. Both filter sRGB in linear light.
+    /// Per-mip transitions stay internal; Vulkan restores the tracker-declared
+    /// whole-image `TransferWrite` layout before the operation ends.
     ///
     /// `vkCmdBlitImage` is legal only on graphics-capable queues, so a graph
     /// containing this op is never routed to the transfer or async-compute
     /// queue ([`requires_graphics_queue`](crate::graph::RenderGraph::requires_graphics_queue)).
     /// `texture` must have been created with a full `mip_level_count`, `COPY_SRC`
-    /// usage (blit reads lower mips), and a blit-eligible format; the loader
+    /// usage (generation reads lower mips), and a supported format; the loader
     /// arranges this behind [`DeviceCapabilities::mip_generation`](crate::DeviceCapabilities).
     /// `COPY_DST` is also required. Multiple levels require a single-sampled
     /// 2D texture and backend format support; a single level is a no-op.

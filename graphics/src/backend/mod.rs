@@ -100,6 +100,7 @@ pub enum GpuTexture {
     Vulkan {
         device: ash::Device,
         image: vk::Image,
+        /// Null for transfer-only images, which cannot have image views.
         view: vk::ImageView,
         allocation: Mutex<Option<Allocation>>,
         format: vk::Format,
@@ -1146,14 +1147,12 @@ impl GpuBackend {
         }
     }
 
-    /// Whether `format` is blit-eligible for GPU mip generation (#96). Only the
-    /// Vulkan backend queries format features; the others report `false`
-    /// (`mip_generation` is already false there, so this is never reached).
-    pub fn supports_blit_mipgen(&self, format: crate::types::TextureFormat) -> bool {
+    /// Whether the backend can lower graph mip generation for this format.
+    pub fn supports_mipmap_generation(&self, format: crate::types::TextureFormat) -> bool {
         match self {
             Self::Dummy(_) => false,
             #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(_) => false,
+            Self::Wgpu(backend) => backend.supports_mipgen(format),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan(backend) => backend.supports_blit_mipgen(format),
         }

@@ -16,6 +16,7 @@ use redlilium_assets::{
     Guid, LoadEnv, StageFuture,
 };
 use redlilium_core::sampler::{AddressMode, CpuSampler, FilterMode};
+pub use redlilium_core::texture::MipmapFilter;
 use redlilium_core::texture::{CpuTexture, TextureDimension, TextureFormat};
 use redlilium_graphics::{
     Extent3d, GraphicsDevice, Texture, TextureDescriptor, TextureUsage, TransferOperation,
@@ -96,10 +97,15 @@ pub struct TextureSettings {
     /// Maximum anisotropy level (1 = off).
     #[serde(default = "default_anisotropy")]
     pub anisotropy: u16,
-    /// Generate a full GPU mip chain at load time (#96). When the device or
-    /// format cannot blit-downsample, the texture keeps a single mip regardless.
+    /// Generate a full mip chain at load time. Ordinary color uses GPU
+    /// reduction when available; other supported formats use a CPU import stage.
+    /// Compressed textures must supply their own chain.
     #[serde(default = "default_generate_mips")]
     pub generate_mips: bool,
+    /// Content-aware CPU filtering. NormalMap also decodes ordinary images
+    /// as linear data regardless of `srgb`. Stored container chains are preserved.
+    #[serde(default)]
+    pub mip_filter: MipmapFilter,
 }
 
 fn default_srgb() -> bool {
@@ -126,6 +132,7 @@ impl Default for TextureSettings {
             address: default_address(),
             anisotropy: default_anisotropy(),
             generate_mips: default_generate_mips(),
+            mip_filter: MipmapFilter::default(),
         }
     }
 }
@@ -158,6 +165,7 @@ impl AssetLoader for TextureLoader {
         let mut stages: Vec<Box<dyn AssetStage>> = Vec::new();
         // Solid 1×1 defaults never need mips; only file textures opt in (#96).
         let mut generate_mips = false;
+        let mut mip_filter = MipmapFilter::default();
         match source {
             TextureSource::File(_) => {
                 if let Some(path) = &env.path {
@@ -172,6 +180,7 @@ impl AssetLoader for TextureLoader {
                     .and_then(|s| ron::from_str::<TextureSettings>(s).ok())
                     .unwrap_or_default();
                 generate_mips = settings.generate_mips;
+                mip_filter = settings.mip_filter;
                 stages.push(Box::new(DecodeImageStage { settings }));
             }
             TextureSource::Solid(rgba) => {
@@ -190,6 +199,12 @@ impl AssetLoader for TextureLoader {
                 log::error!("virtual texture {guid:?} reached the loader; it must be published");
                 return Vec::new();
             }
+        }
+        if generate_mips {
+            stages.push(Box::new(PrepareMipmapsStage {
+                device: env.device.clone(),
+                filter: mip_filter,
+            }));
         }
         stages.push(Box::new(UploadTextureStage {
             device: env.device.clone(),
@@ -238,7 +253,7 @@ impl AssetStage for DecodeImageStage {
         Executor::Cpu
     }
     fn run_async(&self, input: AnyAsset) -> StageFuture {
-        let srgb = self.settings.srgb;
+        let srgb = self.settings.srgb && self.settings.mip_filter != MipmapFilter::NormalMap;
         Box::pin(async move {
             let bytes = input
                 .downcast::<Vec<u8>>()
@@ -316,9 +331,47 @@ impl AssetStage for MakeSolidArrayStage {
 /// frame graph.
 struct UploadTextureStage {
     device: Arc<GraphicsDevice>,
-    /// Whether to request a full GPU-generated mip chain (#96). Still gated at
-    /// runtime by the device capability and per-format blit eligibility.
+    /// Whether to request GPU mips when the CPU stage has not supplied a chain.
+    /// Still gated by device support and the ordinary 2D restriction.
     generate_mips: bool,
+}
+
+/// CPU work stays on the asset worker, before the GPU upload stage. No GPU
+/// readback is needed for coverage statistics or unsupported GPU formats.
+struct PrepareMipmapsStage {
+    device: Arc<GraphicsDevice>,
+    filter: MipmapFilter,
+}
+
+impl AssetStage for PrepareMipmapsStage {
+    fn executor(&self) -> Executor {
+        Executor::Cpu
+    }
+
+    fn run_async(&self, input: AnyAsset) -> StageFuture {
+        let device = self.device.clone();
+        let filter = self.filter;
+        Box::pin(async move {
+            let mut cpu = input
+                .downcast::<CpuTexture>()
+                .map_err(|_| AssetError::Decode("mip stage expected CpuTexture".into()))?;
+            if cpu.mip_level_count == 1
+                && cpu.dimension == TextureDimension::D2
+                && cpu.depth_or_array_layers == 1
+                && (filter != MipmapFilter::Color || !device.supports_mipmap_generation(cpu.format))
+            {
+                if cpu.format.is_compressed() || cpu.format.is_depth_stencil() {
+                    if filter != MipmapFilter::Color {
+                        return Err(AssetError::Decode("content-aware mip filtering requires uncompressed color data or a precomputed chain".into()));
+                    }
+                } else {
+                    cpu.generate_mipmaps(filter)
+                        .map_err(|e| AssetError::Decode(e.to_string()))?;
+                }
+            }
+            Ok(cpu as AnyAsset)
+        })
+    }
 }
 
 /// Full mip count for a `width × height` 2D image: `floor(log2(max)) + 1`.
@@ -340,13 +393,14 @@ impl AssetStage for UploadTextureStage {
         // (mip, layer) image — and never runs GPU mip generation on top.
         let container_chain = cpu.mip_level_count > 1 || cpu.layer_count() > 1;
 
-        // Mip generation (#96) is requested only when the record asks for it,
-        // the source has no chain of its own, the backend supports the op, the
-        // format is blit-eligible, and the image is larger than 1×1. Otherwise
-        // keep the stored mips exactly as-is — never fail the load. Ineligible
-        // formats log once.
-        let wants_mips =
-            self.generate_mips && !container_chain && (cpu.width > 1 || cpu.height > 1);
+        // CPU-generated and container-supplied chains arrive complete. GPU
+        // generation handles ordinary 2D colors only; unsupported compressed
+        // formats stay as supplied and log once.
+        let wants_mips = self.generate_mips
+            && !container_chain
+            && cpu.dimension == TextureDimension::D2
+            && cpu.depth_or_array_layers == 1
+            && (cpu.width > 1 || cpu.height > 1);
         let can_mip = wants_mips && self.device.supports_mipmap_generation(cpu.format);
         if wants_mips && !can_mip {
             log_mip_fallback(cpu.format);
@@ -420,8 +474,7 @@ impl AssetStage for UploadTextureStage {
     }
 }
 
-/// Log once per format that mip generation was skipped (unsupported device or
-/// non-blittable format) so a load never fails and the log never floods.
+/// Log once per format when no generation path is available.
 fn log_mip_fallback(format: TextureFormat) {
     use std::collections::HashSet;
     use std::sync::{LazyLock, Mutex};
@@ -429,8 +482,7 @@ fn log_mip_fallback(format: TextureFormat) {
         LazyLock::new(|| Mutex::new(HashSet::new()));
     if LOGGED.lock().unwrap().insert(format) {
         log::info!(
-            "texture mip generation unavailable for {format:?} (device or format cannot \
-             blit-downsample); keeping a single mip (#96)"
+            "texture mip generation unavailable for {format:?}; supply a precomputed mip chain"
         );
     }
 }
@@ -450,6 +502,7 @@ mod tests {
         assert_eq!(s.anisotropy, 1);
         // Old records with no `generate_mips` field default to on (#96).
         assert!(s.generate_mips);
+        assert_eq!(s.mip_filter, MipmapFilter::Color);
     }
 
     /// `floor(log2(max(w,h))) + 1` — the full 2D mip count.
@@ -478,5 +531,141 @@ mod tests {
         assert_eq!(cpu.address_mode_u, AddressMode::ClampToEdge);
         assert_eq!(cpu.address_mode_w, AddressMode::ClampToEdge);
         assert_eq!(cpu.anisotropy_clamp, 4);
+    }
+
+    // These CPU stages do not await IO. Poll once so a future that unexpectedly
+    // starts depending on a reactor fails instead of hanging the test.
+    fn ready(mut future: StageFuture) -> Result<AnyAsset, AssetError> {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => panic!("CPU stage unexpectedly pending"),
+        }
+    }
+
+    fn dummy_device() -> Arc<GraphicsDevice> {
+        redlilium_graphics::GraphicsInstance::with_parameters(
+            redlilium_graphics::InstanceParameters::new()
+                .with_backend(redlilium_graphics::BackendType::Dummy),
+        )
+        .unwrap()
+        .create_device()
+        .unwrap()
+    }
+
+    #[test]
+    fn content_filter_settings_roundtrip() {
+        for filter in [
+            MipmapFilter::Color,
+            MipmapFilter::NormalMap,
+            MipmapFilter::AlphaCoverage { cutoff: 128 },
+        ] {
+            let settings = TextureSettings {
+                mip_filter: filter,
+                ..Default::default()
+            };
+            let encoded = ron::to_string(&settings).unwrap();
+            assert_eq!(
+                ron::from_str::<TextureSettings>(&encoded).unwrap(),
+                settings
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_fallback_uploads_the_full_chain_through_graph_operations() {
+        let device = dummy_device();
+        for filter in [
+            MipmapFilter::Color,
+            MipmapFilter::NormalMap,
+            MipmapFilter::AlphaCoverage { cutoff: 128 },
+        ] {
+            let stage = PrepareMipmapsStage {
+                device: device.clone(),
+                filter,
+            };
+            let cpu = CpuTexture::new(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                [128, 128, 255, 255].repeat(16),
+            );
+            let prepared = ready(stage.run_async(Box::new(cpu))).unwrap();
+            let cpu = prepared.downcast_ref::<CpuTexture>().unwrap();
+            assert_eq!(cpu.mip_level_count, 3);
+            let upload = UploadTextureStage {
+                device: device.clone(),
+                generate_mips: true,
+            };
+            let (value, operations) = upload.run_gpu(prepared).unwrap();
+            assert_eq!(
+                value
+                    .downcast_ref::<Arc<Texture>>()
+                    .unwrap()
+                    .mip_level_count(),
+                3
+            );
+            assert_eq!(operations.len(), 3);
+            assert!(
+                operations
+                    .iter()
+                    .all(|op| matches!(op, TransferOperation::BufferToTexture { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn normal_setting_decodes_color_files_as_linear_data() {
+        let img =
+            image::RgbaImage::from_raw(2, 1, vec![255, 128, 128, 255, 128, 255, 128, 255]).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let decode = DecodeImageStage {
+            settings: TextureSettings {
+                mip_filter: MipmapFilter::NormalMap,
+                ..Default::default()
+            },
+        };
+        let cpu = ready(decode.run_async(Box::new(png.into_inner())))
+            .unwrap()
+            .downcast::<CpuTexture>()
+            .unwrap();
+        assert_eq!(cpu.format, TextureFormat::Rgba8Unorm);
+    }
+
+    #[test]
+    fn cpu_stage_keeps_container_chains_and_does_not_generate_array_mips() {
+        let device = dummy_device();
+        let stage = PrepareMipmapsStage {
+            device: device.clone(),
+            filter: MipmapFilter::NormalMap,
+        };
+        let mut cpu = CpuTexture::new(2, 2, TextureFormat::Rgba8UnormSrgb, vec![42; 20]);
+        cpu.mip_level_count = 2;
+        let cpu = ready(stage.run_async(Box::new(cpu)))
+            .unwrap()
+            .downcast::<CpuTexture>()
+            .unwrap();
+        assert_eq!(cpu.data, vec![42; 20]);
+        let cpu = CpuTexture::new(2, 2, TextureFormat::Rgba8Unorm, vec![42; 16])
+            .with_dimension(TextureDimension::D2Array);
+        let cpu = ready(stage.run_async(Box::new(cpu))).unwrap();
+        let upload = UploadTextureStage {
+            device,
+            generate_mips: true,
+        };
+        let (value, operations) = upload.run_gpu(cpu).unwrap();
+        assert_eq!(
+            value
+                .downcast_ref::<Arc<Texture>>()
+                .unwrap()
+                .mip_level_count(),
+            1
+        );
+        assert!(
+            !operations
+                .iter()
+                .any(|op| matches!(op, TransferOperation::GenerateMipmaps { .. }))
+        );
     }
 }

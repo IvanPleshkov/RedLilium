@@ -106,6 +106,7 @@ impl TextureManager {
             anisotropy: 1,
             // Virtual textures are published GPU targets, not blit-generated.
             generate_mips: false,
+            mip_filter: Default::default(),
         };
         let sampler = self.intern_sampler(&settings)?;
         let source = TextureSource::Virtual(guid);

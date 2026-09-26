@@ -4363,6 +4363,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "gltf",
+ "half",
  "image",
  "ktx2",
  "log",

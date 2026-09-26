@@ -79,6 +79,47 @@ contract includes:
 `upload_texture_data` and `upload_texture_level` prepare staging data with the
 required padding; the destination upload is still an ordered graph operation.
 
+### Mip generation
+
+`TransferOperation::generate_mipmaps(texture)` generates the allocated levels
+from mip 0 inside the graph. The resource needs only `COPY_SRC | COPY_DST`.
+Vulkan uses linear blits. wgpu uses a cached render pipeline and private scratch
+texture, with area-weighted `textureLoad` reduction: float formats do not need
+hardware linear filtering, and odd-size edges contribute to the result. Both
+paths filter sRGB colors in linear light; their kernels may differ for odd sizes.
+Check `device.supports_mipmap_generation(format)` before requesting GPU generation.
+
+The ECS texture importer defaults to `generate_mips: true`. It uses GPU generation
+for ordinary supported colors and a CPU worker fallback for other uncompressed
+color formats (including float, normalized, and integer channels). The CPU path
+uploads each finished level through graph transfers. Integer averages round to
+the nearest value; depth/stencil is not treated as color.
+
+`TextureSettings::mip_filter` selects the import filter; old records default to
+`Color`. Example RON settings:
+
+```ron
+(mip_filter: NormalMap)
+(mip_filter: AlphaCoverage(cutoff: 128))
+```
+
+- `Color`: regular color reduction, with sRGB decoded before averaging.
+- `NormalMap`: CPU reduction of tangent-space XYZ stored in RGB [0, 1], followed
+  by normalization. Ordinary image files are decoded as linear regardless of
+  `srgb`; a cancelling vector becomes +Z. This is not an XY-only normal decoder.
+- `AlphaCoverage`: CPU reduction with per-level alpha scaling toward mip 0's
+  fraction of texels passing `alpha >= cutoff / 255`. Cutoff is 1..=254 and should
+  match the material's alpha-test threshold. RGB is unaffected by the correction.
+  Coverage is approximate because texel counts, equal alpha values, and format
+  quantization limit achievable fractions. It does not model filtered sampling
+  or alpha-to-coverage at render time.
+
+Supplied mip chains are preserved, including compressed KTX2 assets. BC/ETC/ASTC
+need precomputed mips; no runtime recompression is performed. Generation remains
+limited to ordinary single-layer 2D textures without MSAA. Arrays, cubemaps, and
+3D generation are deferred. CPU fallback broadens **asset import** support; a
+direct GPU graph operation on an unsupported format still returns an error.
+
 ### Public API boundary
 
 Applications use `GraphicsDevice`, engine resources, `RenderGraph`, and
