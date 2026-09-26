@@ -61,9 +61,29 @@ pub enum StoreOp {
 
 /// A render target that can be rendered to.
 ///
-/// This can be either a texture or a surface texture from the swapchain.
+/// This can be either a texture or an acquired surface texture from the swapchain.
+/// Use the constructors to select a target; its native views stay internal.
+/// [`Self::texture`], [`Self::mip_level`], and [`Self::array_layer`] return
+/// `None` for a surface. The public interface is identical across backends.
+///
+/// ```
+/// use std::sync::Arc;
+/// use redlilium_graphics::{RenderTarget, Texture};
+///
+/// fn mip_target(texture: Arc<Texture>) -> RenderTarget {
+///     let target = RenderTarget::from_texture_layer(texture, 2, 0);
+///     assert!(!target.is_surface());
+///     assert_eq!(target.mip_level(), Some(2));
+///     target
+/// }
+/// ```
 #[derive(Debug, Clone)]
-pub enum RenderTarget {
+pub struct RenderTarget {
+    kind: RenderTargetKind,
+}
+
+#[derive(Debug, Clone)]
+enum RenderTargetKind {
     /// Render to a texture.
     Texture {
         /// The texture to render to.
@@ -93,59 +113,108 @@ pub enum RenderTarget {
 impl RenderTarget {
     /// Create a render target from a texture.
     pub fn from_texture(texture: Arc<Texture>) -> Self {
-        Self::Texture {
-            texture,
-            mip_level: 0,
-            array_layer: 0,
-        }
+        Self::from_texture_layer(texture, 0, 0)
     }
 
     /// Create a render target from a texture with specific mip level.
     pub fn from_texture_mip(texture: Arc<Texture>, mip_level: u32) -> Self {
-        Self::Texture {
-            texture,
-            mip_level,
-            array_layer: 0,
-        }
+        Self::from_texture_layer(texture, mip_level, 0)
     }
 
-    /// Create a render target from a surface texture.
+    /// Create a render target from an acquired surface texture.
     pub fn from_surface(surface_texture: &SurfaceTexture) -> Self {
-        Self::Surface {
-            format: surface_texture.format(),
-            width: surface_texture.width(),
-            height: surface_texture.height(),
-            #[cfg(feature = "wgpu-backend")]
-            view: surface_texture.gpu_texture().and_then(|t| t.wgpu_view()),
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_view: surface_texture.gpu_texture().and_then(|t| t.vulkan_view()),
+        Self {
+            kind: RenderTargetKind::Surface {
+                format: surface_texture.format(),
+                width: surface_texture.width(),
+                height: surface_texture.height(),
+                #[cfg(feature = "wgpu-backend")]
+                view: surface_texture.gpu_texture().and_then(|t| t.wgpu_view()),
+                #[cfg(feature = "vulkan-backend")]
+                vulkan_view: surface_texture.gpu_texture().and_then(|t| t.vulkan_view()),
+            },
         }
     }
 
     /// Select one mip and array layer (or cube face) as an attachment.
     pub fn from_texture_layer(texture: Arc<Texture>, mip_level: u32, array_layer: u32) -> Self {
-        Self::Texture {
-            texture,
-            mip_level,
-            array_layer,
+        Self {
+            kind: RenderTargetKind::Texture {
+                texture,
+                mip_level,
+                array_layer,
+            },
         }
     }
 
+    /// Whether this target refers to an acquired swapchain surface.
+    pub fn is_surface(&self) -> bool {
+        matches!(&self.kind, RenderTargetKind::Surface { .. })
+    }
+
+    /// The engine texture, or `None` for a swapchain surface.
+    pub fn texture(&self) -> Option<&Arc<Texture>> {
+        match &self.kind {
+            RenderTargetKind::Texture { texture, .. } => Some(texture),
+            RenderTargetKind::Surface { .. } => None,
+        }
+    }
+
+    /// Selected mip level, or `None` for a swapchain surface.
+    pub fn mip_level(&self) -> Option<u32> {
+        match &self.kind {
+            RenderTargetKind::Texture { mip_level, .. } => Some(*mip_level),
+            RenderTargetKind::Surface { .. } => None,
+        }
+    }
+
+    /// Selected array layer (or cube face), or `None` for a swapchain surface.
+    pub fn array_layer(&self) -> Option<u32> {
+        match &self.kind {
+            RenderTargetKind::Texture { array_layer, .. } => Some(*array_layer),
+            RenderTargetKind::Surface { .. } => None,
+        }
+    }
+
+    #[cfg(feature = "vulkan-backend")]
+    pub(crate) fn vulkan_surface_view(&self) -> Option<&VulkanSurfaceTextureView> {
+        match &self.kind {
+            RenderTargetKind::Surface { vulkan_view, .. } => vulkan_view.as_ref(),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_surface(format: TextureFormat, width: u32, height: u32) -> Self {
+        Self {
+            kind: RenderTargetKind::Surface {
+                format,
+                width,
+                height,
+                #[cfg(feature = "wgpu-backend")]
+                view: None,
+                #[cfg(feature = "vulkan-backend")]
+                vulkan_view: None,
+            },
+        }
+    }
+
+    /// Number of samples per pixel.
     pub fn sample_count(&self) -> u32 {
-        match self {
-            Self::Texture { texture, .. } => texture.sample_count(),
-            Self::Surface { .. } => 1,
+        match &self.kind {
+            RenderTargetKind::Texture { texture, .. } => texture.sample_count(),
+            RenderTargetKind::Surface { .. } => 1,
         }
     }
 
     pub(crate) fn validate(&self) -> Result<(), crate::GraphicsError> {
-        match self {
-            Self::Texture {
+        match &self.kind {
+            RenderTargetKind::Texture {
                 texture,
                 mip_level,
                 array_layer,
             } => texture.validate_attachment(*mip_level, *array_layer),
-            Self::Surface { width, height, .. } if *width > 0 && *height > 0 => Ok(()),
+            RenderTargetKind::Surface { width, height, .. } if *width > 0 && *height > 0 => Ok(()),
             _ => Err(crate::GraphicsError::InvalidParameter(
                 "empty surface attachment".into(),
             )),
@@ -154,8 +223,8 @@ impl RenderTarget {
 
     #[cfg(feature = "wgpu-backend")]
     pub(crate) fn wgpu_view(&self) -> Result<wgpu::TextureView, crate::GraphicsError> {
-        match self {
-            Self::Texture {
+        match &self.kind {
+            RenderTargetKind::Texture {
                 texture,
                 mip_level,
                 array_layer,
@@ -165,7 +234,7 @@ impl RenderTarget {
                     return Ok(view.clone());
                 }
             }
-            Self::Surface {
+            RenderTargetKind::Surface {
                 view: Some(view), ..
             } => return Ok(view.view().clone()),
             _ => {}
@@ -177,8 +246,8 @@ impl RenderTarget {
 
     #[cfg(feature = "vulkan-backend")]
     pub(crate) fn vulkan_view(&self) -> Result<ash::vk::ImageView, crate::GraphicsError> {
-        match self {
-            Self::Texture {
+        match &self.kind {
+            RenderTargetKind::Texture {
                 texture,
                 mip_level,
                 array_layer,
@@ -188,7 +257,7 @@ impl RenderTarget {
                     return Ok(*view);
                 }
             }
-            Self::Surface {
+            RenderTargetKind::Surface {
                 vulkan_view: Some(view),
                 ..
             } => return Ok(view.view()),
@@ -201,29 +270,29 @@ impl RenderTarget {
 
     /// Get the format of the render target.
     pub fn format(&self) -> TextureFormat {
-        match self {
-            Self::Texture { texture, .. } => texture.format(),
-            Self::Surface { format, .. } => *format,
+        match &self.kind {
+            RenderTargetKind::Texture { texture, .. } => texture.format(),
+            RenderTargetKind::Surface { format, .. } => *format,
         }
     }
 
     /// Get the width of the render target.
     pub fn width(&self) -> u32 {
-        match self {
-            Self::Texture {
+        match &self.kind {
+            RenderTargetKind::Texture {
                 texture, mip_level, ..
             } => texture.width().checked_shr(*mip_level).unwrap_or(0).max(1),
-            Self::Surface { width, .. } => *width,
+            RenderTargetKind::Surface { width, .. } => *width,
         }
     }
 
     /// Get the height of the render target.
     pub fn height(&self) -> u32 {
-        match self {
-            Self::Texture {
+        match &self.kind {
+            RenderTargetKind::Texture {
                 texture, mip_level, ..
             } => texture.height().checked_shr(*mip_level).unwrap_or(0).max(1),
-            Self::Surface { height, .. } => *height,
+            RenderTargetKind::Surface { height, .. } => *height,
         }
     }
 }
@@ -290,10 +359,9 @@ impl ColorAttachment {
     ///
     /// Panics if this is a surface attachment (not a texture).
     pub fn texture(&self) -> &Arc<Texture> {
-        match &self.target {
-            RenderTarget::Texture { texture, .. } => texture,
-            RenderTarget::Surface { .. } => panic!("Cannot get texture from surface attachment"),
-        }
+        self.target
+            .texture()
+            .expect("Cannot get texture from surface attachment")
     }
 
     /// Get the load operation.
@@ -410,10 +478,9 @@ impl DepthStencilAttachment {
     ///
     /// Panics if this is a surface attachment (not a texture).
     pub fn texture(&self) -> &Arc<Texture> {
-        match &self.target {
-            RenderTarget::Texture { texture, .. } => texture,
-            RenderTarget::Surface { .. } => panic!("Cannot get texture from surface attachment"),
-        }
+        self.target
+            .texture()
+            .expect("Cannot get texture from surface attachment")
     }
 
     /// Get the depth load operation.

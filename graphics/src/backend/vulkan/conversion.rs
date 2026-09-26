@@ -2,6 +2,103 @@
 
 use ash::vk;
 
+use super::layout::TextureLayout;
+use crate::graph::resource_usage::{BufferAccessMode, TextureAccessMode};
+
+impl TextureAccessMode {
+    /// Convert to the required Vulkan image layout.
+    pub(super) fn to_layout(self) -> TextureLayout {
+        match self {
+            Self::RenderTargetWrite => TextureLayout::ColorAttachment,
+            Self::DepthStencilWrite => TextureLayout::DepthStencilAttachment,
+            Self::DepthStencilReadOnly => TextureLayout::DepthStencilReadOnly,
+            Self::ShaderRead => TextureLayout::ShaderReadOnly,
+            Self::StorageReadWrite => TextureLayout::General,
+            Self::TransferRead => TextureLayout::TransferSrc,
+            Self::TransferWrite => TextureLayout::TransferDst,
+        }
+    }
+}
+
+impl BufferAccessMode {
+    /// Get the Vulkan access flags for this buffer access mode (as source).
+    pub(super) fn src_access_mask(self) -> ash::vk::AccessFlags2 {
+        use ash::vk::AccessFlags2;
+        match self {
+            Self::VertexBuffer => AccessFlags2::VERTEX_ATTRIBUTE_READ,
+            Self::IndexBuffer => AccessFlags2::INDEX_READ,
+            Self::UniformRead => AccessFlags2::UNIFORM_READ,
+            Self::StorageRead => AccessFlags2::SHADER_READ,
+            Self::StorageWrite => AccessFlags2::SHADER_WRITE,
+            Self::StorageReadWrite => AccessFlags2::SHADER_READ | AccessFlags2::SHADER_WRITE,
+            Self::IndirectRead => AccessFlags2::INDIRECT_COMMAND_READ,
+            Self::TransferRead => AccessFlags2::TRANSFER_READ,
+            Self::TransferWrite => AccessFlags2::TRANSFER_WRITE,
+            // Build inputs are read with plain SHADER_READ at the build stage
+            // (Vulkan sync chapter: input buffers of
+            // vkCmdBuildAccelerationStructuresKHR use SHADER_READ).
+            Self::AccelerationStructureBuildInput => AccessFlags2::SHADER_READ,
+            Self::AccelerationStructureBuildRead => AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR,
+            // Destination AS is written; scratch is read AND written within
+            // the build, so the write mode carries both masks.
+            Self::AccelerationStructureWrite => {
+                AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR
+                    | AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR
+            }
+            Self::AccelerationStructureShaderRead => AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR,
+        }
+    }
+
+    /// Get the Vulkan access flags for this buffer access mode (as destination).
+    pub(super) fn dst_access_mask(self) -> ash::vk::AccessFlags2 {
+        // Source and destination masks coincide for every mode (the
+        // distinction exists for future asymmetric modes).
+        self.src_access_mask()
+    }
+
+    /// Get the Vulkan pipeline stage for this buffer access mode (as source).
+    ///
+    /// `BufferAccessMode` does not record which shader stage performs the
+    /// access, so shader modes return the union of all stages that could —
+    /// including `COMPUTE_SHADER` for uniform reads (a UBO can feed a
+    /// dispatch just as well as a draw).
+    pub(super) fn src_stage(self) -> ash::vk::PipelineStageFlags2 {
+        use ash::vk::PipelineStageFlags2;
+        match self {
+            Self::VertexBuffer => PipelineStageFlags2::VERTEX_INPUT,
+            Self::IndexBuffer => PipelineStageFlags2::VERTEX_INPUT,
+            Self::UniformRead | Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
+                PipelineStageFlags2::VERTEX_SHADER
+                    | PipelineStageFlags2::FRAGMENT_SHADER
+                    | PipelineStageFlags2::COMPUTE_SHADER
+            }
+            Self::IndirectRead => PipelineStageFlags2::DRAW_INDIRECT,
+            Self::TransferRead | Self::TransferWrite => PipelineStageFlags2::ALL_TRANSFER,
+            Self::AccelerationStructureBuildInput
+            | Self::AccelerationStructureBuildRead
+            | Self::AccelerationStructureWrite => {
+                PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
+            }
+            // Ray queries are legal in any shader stage the engine exposes;
+            // like the storage modes, the union covers all of them.
+            Self::AccelerationStructureShaderRead => {
+                PipelineStageFlags2::VERTEX_SHADER
+                    | PipelineStageFlags2::FRAGMENT_SHADER
+                    | PipelineStageFlags2::COMPUTE_SHADER
+            }
+        }
+    }
+
+    /// Get the Vulkan pipeline stage for this buffer access mode (as destination).
+    ///
+    /// See [`src_stage`](Self::src_stage) for why shader modes return the
+    /// union of vertex/fragment/compute stages.
+    pub(super) fn dst_stage(self) -> ash::vk::PipelineStageFlags2 {
+        // Source and destination stages coincide for every mode.
+        self.src_stage()
+    }
+}
+
 use crate::types::{
     AddressMode, BufferUsage, CompareFunction, FilterMode, TextureFormat, TextureUsage,
 };
@@ -440,6 +537,48 @@ pub fn convert_blend_state(
 
 #[cfg(test)]
 mod tests {
+    /// #110: AS modes lower to the acceleration-structure build stage /
+    /// access masks, and traversal reads land on the shader stages.
+    #[test]
+    fn acceleration_structure_modes_vulkan_scopes() {
+        use ash::vk::{AccessFlags2, PipelineStageFlags2};
+
+        for mode in [
+            BufferAccessMode::AccelerationStructureBuildInput,
+            BufferAccessMode::AccelerationStructureBuildRead,
+            BufferAccessMode::AccelerationStructureWrite,
+        ] {
+            assert_eq!(
+                mode.dst_stage(),
+                PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
+            );
+        }
+        assert_eq!(
+            BufferAccessMode::AccelerationStructureBuildInput.dst_access_mask(),
+            AccessFlags2::SHADER_READ
+        );
+        assert_eq!(
+            BufferAccessMode::AccelerationStructureBuildRead.dst_access_mask(),
+            AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR
+        );
+        assert!(
+            BufferAccessMode::AccelerationStructureWrite
+                .dst_access_mask()
+                .contains(AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR)
+        );
+        assert!(
+            BufferAccessMode::AccelerationStructureShaderRead
+                .dst_stage()
+                .contains(
+                    PipelineStageFlags2::FRAGMENT_SHADER | PipelineStageFlags2::COMPUTE_SHADER
+                )
+        );
+        assert_eq!(
+            BufferAccessMode::AccelerationStructureShaderRead.dst_access_mask(),
+            AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR
+        );
+    }
+
     use super::*;
     use crate::graph::LoadOp;
     use crate::types::ClearValue;

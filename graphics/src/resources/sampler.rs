@@ -40,7 +40,7 @@ impl Sampler {
     }
 
     /// Get the GPU handle for this sampler.
-    pub fn gpu_handle(&self) -> &GpuSampler {
+    pub(crate) fn gpu_handle(&self) -> &GpuSampler {
         &self.gpu_handle
     }
 

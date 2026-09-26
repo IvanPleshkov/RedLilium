@@ -83,11 +83,6 @@ impl BufferId {
     pub fn from_raw(handle: u64) -> Self {
         Self(handle)
     }
-
-    /// Get the raw handle value.
-    pub fn raw(&self) -> u64 {
-        self.0
-    }
 }
 
 /// Synchronization state of a single buffer on the GPU timeline.
@@ -392,6 +387,7 @@ impl BarrierBatch {
     /// is kept, the new `new_layout` wins, and access scopes are unioned —
     /// replacing the entry outright would submit a barrier whose
     /// `old_layout` no longer matches the image's actual layout.
+    #[cfg(test)]
     pub fn add_image_barrier(
         &mut self,
         id: TextureId,
@@ -412,37 +408,6 @@ impl BarrierBatch {
         );
     }
 
-    /// Add an image layout transition whose previous access ran on a
-    /// DIFFERENT queue and is ordered by a tracker-emitted timeline wait
-    /// (#47 phase 4).
-    ///
-    /// The wait (all-commands destination scope) already made the other
-    /// queue's access available and visible here, so the transition's source
-    /// scope is empty on this queue: `NONE` stage and no access mask. Using
-    /// the previous layout's own scopes instead would name stages of the
-    /// OTHER queue, which may not exist on this queue's family — e.g.
-    /// `COLOR_ATTACHMENT_OUTPUT` on a dedicated compute family
-    /// (VUID-vkCmdPipelineBarrier2-srcStageMask-03849).
-    pub fn add_image_barrier_cross_queue(
-        &mut self,
-        id: TextureId,
-        image: vk::Image,
-        old_layout: TextureLayout,
-        new_layout: TextureLayout,
-        aspect_mask: vk::ImageAspectFlags,
-    ) {
-        self.add_image_barrier_with_src_scope(
-            id,
-            image,
-            old_layout,
-            new_layout,
-            aspect_mask,
-            vk::PipelineStageFlags2::NONE,
-            vk::AccessFlags2::NONE,
-            new_layout.dst_stage(),
-        );
-    }
-
     /// Add an image layout transition with explicit source and destination
     /// pipeline-stage scopes.
     ///
@@ -450,7 +415,7 @@ impl BarrierBatch {
     /// so the caller can widen a shader-stage scope with the task/mesh stages
     /// when `VK_EXT_mesh_shader` is enabled (#114) — see
     /// [`super::layout::TextureLayoutTracker::dst_stage`]. The public
-    /// [`add_image_barrier`](Self::add_image_barrier) wrappers pass the raw
+    /// test helper wrappers pass the raw
     /// `new_layout.dst_stage()`. Access masks are stage-agnostic, so they stay
     /// derived from the layout.
     #[allow(clippy::too_many_arguments)]
@@ -536,16 +501,19 @@ impl BarrierBatch {
     }
 
     /// Get the number of image barriers in the batch.
+    #[cfg(test)]
     pub fn image_barrier_count(&self) -> usize {
         self.image_barriers.len()
     }
 
     /// Get the number of buffer barriers in the batch.
+    #[cfg(test)]
     pub fn buffer_barrier_count(&self) -> usize {
         self.buffer_barriers.len()
     }
 
     /// Get the total number of barriers in the batch.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.image_barriers.len() + self.buffer_barriers.len()
     }

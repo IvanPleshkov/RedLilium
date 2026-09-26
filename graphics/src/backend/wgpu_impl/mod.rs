@@ -85,11 +85,6 @@ impl std::fmt::Debug for WgpuBackend {
 }
 
 impl WgpuBackend {
-    /// Create a new wgpu backend with default parameters.
-    pub fn new() -> Result<Self, GraphicsError> {
-        Self::with_params(&crate::instance::InstanceParameters::default())
-    }
-
     /// Create a new wgpu backend with custom parameters (blocking).
     ///
     /// Native path: drives `request_adapter`/`request_device` to completion with
@@ -386,8 +381,9 @@ impl WgpuBackend {
         &self.device
     }
 
-    /// Get the wgpu queue.
-    pub fn queue(&self) -> &Arc<wgpu::Queue> {
+    /// Queue used to retire resources through browser completion callbacks.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn queue(&self) -> &Arc<wgpu::Queue> {
         &self.queue
     }
 

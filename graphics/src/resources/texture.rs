@@ -165,7 +165,7 @@ impl Texture {
     }
 
     /// Get the GPU handle for this texture.
-    pub fn gpu_handle(&self) -> &GpuTexture {
+    pub(crate) fn gpu_handle(&self) -> &GpuTexture {
         &self.gpu_handle
     }
 

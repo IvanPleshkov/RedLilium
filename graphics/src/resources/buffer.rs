@@ -50,7 +50,7 @@ impl Buffer {
     }
 
     /// Get the GPU handle for this buffer.
-    pub fn gpu_handle(&self) -> &GpuBuffer {
+    pub(crate) fn gpu_handle(&self) -> &GpuBuffer {
         &self.gpu_handle
     }
 

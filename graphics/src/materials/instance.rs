@@ -325,7 +325,7 @@ impl BindingGroup {
     }
 
     /// The backend GPU handle (descriptor set / bind group), created eagerly.
-    pub fn gpu_handle(&self) -> &GpuBindingGroup {
+    pub(crate) fn gpu_handle(&self) -> &GpuBindingGroup {
         &self.gpu_handle
     }
 

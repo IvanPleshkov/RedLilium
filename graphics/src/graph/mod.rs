@@ -342,11 +342,11 @@ impl RenderGraph {
                 .and_then(|g| g.render_targets())
                 .is_some_and(|targets| {
                     targets.color_attachments.iter().any(|attachment| {
-                        matches!(attachment.target, RenderTarget::Surface { .. })
-                            || matches!(
-                                attachment.resolve_target,
-                                Some(RenderTarget::Surface { .. })
-                            )
+                        attachment.target.is_surface()
+                            || attachment
+                                .resolve_target
+                                .as_ref()
+                                .is_some_and(RenderTarget::is_surface)
                     })
                 })
         })

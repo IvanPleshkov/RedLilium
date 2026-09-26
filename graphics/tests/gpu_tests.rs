@@ -202,7 +202,7 @@ fn test_generate_mipmaps_4x4_average(#[case] backend: Backend, #[case] inline_re
     }
 
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const W: u32 = 4;
@@ -282,7 +282,7 @@ fn test_generate_mipmaps_4x4_average(#[case] backend: Backend, #[case] inline_re
     }
 
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during mip generation"
@@ -714,7 +714,7 @@ fn test_multi_submit_cross_graph_dependency(#[case] backend: Backend) {
     // layers check.
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const WIDTH: u32 = 32;
@@ -763,7 +763,7 @@ fn test_multi_submit_cross_graph_dependency(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during multi-submit cross-graph dependency"
@@ -794,7 +794,7 @@ fn test_gpu_timestamps_two_pass(#[case] backend: Backend) {
     }
 
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     let target_a = ctx.create_render_target(64, 64);
@@ -862,7 +862,7 @@ fn test_gpu_timestamps_two_pass(#[case] backend: Backend) {
     }
 
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during GPU timestamp collection"
@@ -885,7 +885,7 @@ fn test_gpu_memory_stats(#[case] backend: Backend) {
     };
 
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     // A handful of live buffers so the resource counts are non-trivial; keep
@@ -946,7 +946,7 @@ fn test_gpu_memory_stats(#[case] backend: Backend) {
             );
         }
 
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during memory-stats sampling"
@@ -967,7 +967,7 @@ fn test_breadcrumbs_two_pass_encodes_cleanly(#[case] backend: Backend) {
         return;
     };
 
-    redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
 
     let target_a = ctx.create_render_target(64, 64);
     let target_b = ctx.create_render_target(64, 64);
@@ -990,7 +990,7 @@ fn test_breadcrumbs_two_pass_encodes_cleanly(#[case] backend: Backend) {
         ctx.execute_graph(graph);
     }
 
-    let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+    let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
     assert_eq!(
         errors, 0,
         "Vulkan validation reported {errors} error(s) while encoding GPU crash breadcrumbs"
@@ -1021,7 +1021,7 @@ fn test_async_compute_opt_in_cross_queue_dependency(#[case] backend: Backend) {
     // timeline wait the layers get to see.
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const WIDTH: u32 = 32;
@@ -1067,7 +1067,7 @@ fn test_async_compute_opt_in_cross_queue_dependency(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during async compute cross-queue dependency"
@@ -1096,7 +1096,7 @@ fn test_transfer_queue_upload_then_graphics_read(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const SIZE: u64 = 512;
@@ -1139,7 +1139,7 @@ fn test_transfer_queue_upload_then_graphics_read(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during transfer-queue routing"
@@ -1171,7 +1171,7 @@ fn test_transfer_queue_whole_image_upload(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     // 64×64 RGBA8: tight row pitch is 256 (already the 256-byte copy alignment),
@@ -1246,7 +1246,7 @@ fn test_transfer_queue_whole_image_upload(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during transfer-queue image upload"
@@ -1275,7 +1275,7 @@ fn test_async_compute_hint_declined_for_exclusive_texture(#[case] backend: Backe
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const WIDTH: u32 = 32;
@@ -1321,7 +1321,7 @@ fn test_async_compute_hint_declined_for_exclusive_texture(#[case] backend: Backe
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) with the async hint declined"
@@ -1360,7 +1360,7 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const SIZE: u64 = 256;
@@ -1469,7 +1469,7 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during cross-frame cross-queue dependency"
@@ -2327,7 +2327,7 @@ fn test_depth_co_use_read_only_attachment(#[case] backend: Backend) {
     // GPU work below runs on this test's thread.
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const W: u32 = 16;
@@ -2476,7 +2476,7 @@ fn test_depth_co_use_read_only_attachment(#[case] backend: Backend) {
     // functional proof that sampling and depth-testing co-used the same image.
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during depth co-use"
@@ -2867,7 +2867,7 @@ fn test_depth_only_pass_zero_color_attachments(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const W: u32 = 16;
@@ -3001,7 +3001,7 @@ fn test_depth_only_pass_zero_color_attachments(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during the depth-only workload"
@@ -3027,7 +3027,7 @@ fn test_sample_uploaded_texture_same_graph(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const W: u32 = 16;
@@ -3123,7 +3123,7 @@ fn test_sample_uploaded_texture_same_graph(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during the same-graph sample workload"
@@ -3147,7 +3147,7 @@ fn test_transfer_pass_intra_pass_texture_chain(
     };
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
     const W: u32 = 64;
     const H: u32 = 4;
@@ -3196,7 +3196,7 @@ fn test_transfer_pass_intra_pass_texture_chain(
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
         assert_eq!(
-            redlilium_graphics::backend::vulkan::validation_error_count(),
+            redlilium_graphics::diagnostics::vulkan::validation_error_count(),
             0
         );
     }
@@ -3222,7 +3222,7 @@ fn test_transfer_pass_intra_pass_buffer_chain(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     // 64px rows: the tight 256-byte row pitch satisfies the multi-row copy
@@ -3319,7 +3319,7 @@ fn test_transfer_pass_intra_pass_buffer_chain(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during the intra-pass \
@@ -3347,7 +3347,7 @@ fn test_ambiguous_waw_graph_falls_back_and_executes(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const LEN: usize = 16;
@@ -3387,7 +3387,7 @@ fn test_ambiguous_waw_graph_falls_back_and_executes(#[case] backend: Backend) {
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during the ambiguous \
@@ -3423,7 +3423,7 @@ fn test_egui_headless_text_renders_glyphs(
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     }
 
     const W: u32 = 256;
@@ -3533,7 +3533,7 @@ fn test_egui_headless_text_renders_glyphs(
 
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
-        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        let errors = redlilium_graphics::diagnostics::vulkan::validation_error_count();
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during the egui headless render"
@@ -3720,7 +3720,7 @@ fn test_render_contract_failed_submit_preserves_image(
         return;
     };
     #[cfg(feature = "vulkan-backend")]
-    redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
     let texture = ctx.create_texture_2d(
         64,
         64,
@@ -3784,7 +3784,7 @@ fn test_render_contract_failed_submit_preserves_image(
     #[cfg(feature = "vulkan-backend")]
     if backend == Backend::Vulkan {
         assert_eq!(
-            redlilium_graphics::backend::vulkan::validation_error_count(),
+            redlilium_graphics::diagnostics::vulkan::validation_error_count(),
             0
         );
     }

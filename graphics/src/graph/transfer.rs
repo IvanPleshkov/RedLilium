@@ -388,9 +388,8 @@ pub enum TransferOperation {
     /// this transfer pass's position in the graph** on both backends: passes
     /// ordered before it see the old contents, passes after it see the new.
     /// Ordering against neighbouring passes is handled by the automatic
-    /// barrier system (the destination is declared `TransferWrite`), so —
-    /// unlike [`GpuBackend::write_buffer`](crate::backend::GpuBackend) — this
-    /// does not race in-flight frames.
+    /// barrier system (the destination is declared `TransferWrite`), which
+    /// orders the copy against in-flight uses of the destination.
     ///
     /// Requirements: `dst` must have `BufferUsage::COPY_DST`; `dst_offset` and
     /// the written size must be 4-byte aligned (wgpu `COPY_BUFFER_ALIGNMENT`;

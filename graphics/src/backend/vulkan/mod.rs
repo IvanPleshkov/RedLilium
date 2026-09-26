@@ -34,7 +34,7 @@ use gpu_allocator::vulkan::Allocator;
 use parking_lot::Mutex;
 
 use crate::error::GraphicsError;
-use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
+use crate::graph::{CompiledGraph, Pass, RenderGraph};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 use redlilium_core::profiling::profile_scope;
 
@@ -58,7 +58,7 @@ pub(crate) const FENCE_WAIT_TIMEOUT_NS: u64 = 10_000_000_000;
 /// Process-wide source of stable texture ids for the layout tracker. Monotonic
 /// so a destroyed texture's id is never reused (no layout aliasing).
 static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
-pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
+use layout::TextureLayoutTracker;
 pub use pipeline::PersistentDescriptorPools;
 
 /// Handles of destroyed resources awaiting removal from the barrier trackers.
@@ -1222,16 +1222,6 @@ impl VulkanBackend {
         &self.instance
     }
 
-    /// Get the physical device.
-    pub fn physical_device(&self) -> vk::PhysicalDevice {
-        self.physical_device
-    }
-
-    /// Get the graphics queue family index.
-    pub fn graphics_queue_family(&self) -> u32 {
-        self.graphics_queue_family
-    }
-
     /// Get the graphics queue.
     pub fn graphics_queue(&self) -> vk::Queue {
         self.graphics_queue
@@ -1256,11 +1246,6 @@ impl VulkanBackend {
     /// Get the command pool.
     pub fn command_pool(&self) -> vk::CommandPool {
         self.command_pool
-    }
-
-    /// Get the allocator for sharing with GPU resource Drop impls.
-    pub fn allocator(&self) -> &Arc<Mutex<Allocator>> {
-        &self.allocator
     }
 
     /// Registers this frame's swapchain acquire/render-done semaphores.
@@ -1441,11 +1426,6 @@ impl VulkanBackend {
     /// once this advances by `MAX_FRAMES_IN_FLIGHT`.
     pub fn frame_index(&self) -> u64 {
         self.frame_index.load(Ordering::SeqCst)
-    }
-
-    /// Get the layout tracker for direct access (for testing).
-    pub fn layout_tracker(&self) -> &Mutex<TextureLayoutTracker> {
-        &self.layout_tracker
     }
 
     /// Check if the current physical device supports presentation to a surface.
@@ -2802,12 +2782,6 @@ impl VulkanBackend {
         }
     }
 
-    /// Signal a fence (for testing/dummy backend).
-    pub fn signal_fence(&self, _fence: &GpuFence) {
-        // Vulkan fences are signaled by the GPU, not the CPU
-        // This is a no-op for the Vulkan backend
-    }
-
     /// Resolve a graph's [`QueuePreference`] to an actual secondary queue,
     /// or `None` for the graphics queue (#47 phase 4, #89).
     ///
@@ -3440,8 +3414,8 @@ impl VulkanBackend {
         Ok(())
     }
 
-    /// Read a host-visible buffer's mapped memory. See the trait contract on
-    /// [`GpuBackend::read_buffer`](crate::backend::GpuBackend::read_buffer).
+    /// Read host-visible memory after the caller has waited for GPU completion.
+    /// Device-local buffers must first be copied through the render graph.
     /// Non-blocking readback (Vulkan is native-only, so it fills `dst`
     /// synchronously — the caller drains after the frame fence, so the mapped
     /// memory is already GPU-complete — and clears the pending flag).
@@ -3674,11 +3648,7 @@ impl VulkanBackend {
             .iter()
             .flat_map(|a| std::iter::once(&a.target).chain(a.resolve_target.iter()))
         {
-            if let RenderTarget::Surface {
-                vulkan_view: Some(surface_view),
-                ..
-            } = target
-            {
+            if let Some(surface_view) = target.vulkan_surface_view() {
                 let first_write = {
                     let mut sync = self.swapchain_sync.lock();
                     let first = !sync.surface_transitioned;

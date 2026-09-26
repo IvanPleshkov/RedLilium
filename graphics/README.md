@@ -46,6 +46,32 @@ pipeline. `submit_with_mode` selects Strict compilation when ambiguous writers
 should be treated as errors instead of using addition order.
 
 
+### Public API boundary
+
+Applications use `GraphicsDevice`, engine resources, `RenderGraph`, and
+`FramePipeline`/`FrameSchedule`. Backend implementations, native handles, and
+Vulkan layout/access conversions are internal. Uploads, copies, and readbacks
+remain transfer operations in the graph.
+
+`RenderTarget` has a private representation. Construct it with `from_texture`,
+`from_texture_mip`, `from_texture_layer`, or `from_surface`. Inspect it through
+`format`, `width`, `height`, `sample_count`, `is_surface`, `texture`, `mip_level`,
+and `array_layer`. The last three return `None` for a surface target.
+
+Migration from the previous API:
+
+- Replace `RenderTarget::Texture { texture, mip_level, array_layer }` with
+  `RenderTarget::from_texture_layer(texture, mip_level, array_layer)`.
+- Obtain surface targets from an acquired `SurfaceTexture` using
+  `RenderTarget::from_surface(&surface_texture)`.
+- Replace variant matching with the accessors above. Resource `gpu_handle()`
+  methods, `SurfaceTexture::gpu_texture()`, and `Blas::device_address()` are
+  internal; there is currently no public native interop API.
+- Vulkan validation counters are available through
+  `diagnostics::vulkan::{validation_error_count, reset_validation_error_count}`
+  with the `vulkan-backend` feature. They count errors on the calling thread;
+  validation must be enabled and the validation layer available.
+
 ### Backend Support
 
 The render graph supports three backends:
@@ -64,7 +90,8 @@ redlilium-graphics
 │   ├── mod.rs       # Graph builder and compiler
 │   ├── pass.rs      # Render pass definitions
 │   └── resource_usage.rs # Inferred resource access
-├── backend/         # Backend implementations
+├── diagnostics.rs   # Public validation diagnostics
+├── backend/         # Internal backend implementations
 │   ├── mod.rs       # Enum-based backend dispatch
 │   ├── vulkan/      # Vulkan backend (ash)
 │   ├── wgpu_impl/   # wgpu backend

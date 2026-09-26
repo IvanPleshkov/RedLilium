@@ -127,7 +127,7 @@ impl TestContext {
     /// Create a test context with GPU validation layers enabled.
     ///
     /// Used by tests that assert on the Vulkan validation-error counter
-    /// (`redlilium_graphics::backend::vulkan::validation_error_count`): without
+    /// (`redlilium_graphics::diagnostics::vulkan::validation_error_count`): without
     /// validation layers the counter is trivially zero. Falls back gracefully
     /// (with a log warning) if the layers are not installed.
     #[allow(dead_code)]

@@ -12,7 +12,7 @@ use crate::types::{ScissorRect, Viewport};
 use super::resource_usage::{
     BufferAccessMode, PassResourceUsage, SurfaceAccess, TextureAccessMode,
 };
-use super::target::{LoadOp, RenderTarget, RenderTargetConfig};
+use super::target::{LoadOp, RenderTargetConfig};
 use super::transfer::{TransferConfig, TransferOperation};
 
 /// A pass in the render graph.
@@ -1132,35 +1132,30 @@ impl GraphicsPass {
         if let Some(targets) = &self.render_targets {
             // Color attachments
             for color in &targets.color_attachments {
-                match &color.target {
-                    RenderTarget::Texture { texture, .. } => {
+                if let Some(texture) = color.target.texture() {
+                    usage.add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                } else {
+                    let access = if matches!(color.load_op, LoadOp::Load) {
+                        SurfaceAccess::ReadWrite
+                    } else {
+                        SurfaceAccess::Write
+                    };
+                    usage.set_surface_access(access);
+                }
+                // Resolve targets are also written to.
+                if let Some(resolve) = &color.resolve_target {
+                    if let Some(texture) = resolve.texture() {
                         usage
                             .add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                    } else {
+                        usage.set_surface_access(SurfaceAccess::Write);
                     }
-                    RenderTarget::Surface { .. } => {
-                        let access = if matches!(color.load_op, LoadOp::Load) {
-                            SurfaceAccess::ReadWrite
-                        } else {
-                            SurfaceAccess::Write
-                        };
-                        usage.set_surface_access(access);
-                    }
-                }
-                // Resolve targets are also written to
-                match &color.resolve_target {
-                    Some(RenderTarget::Texture { texture, .. }) => {
-                        usage.add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite)
-                    }
-                    Some(RenderTarget::Surface { .. }) => {
-                        usage.set_surface_access(SurfaceAccess::Write)
-                    }
-                    None => {}
                 }
             }
 
             // Depth/stencil attachment
             if let Some(depth) = &targets.depth_stencil_attachment
-                && let RenderTarget::Texture { texture, .. } = &depth.target
+                && let Some(texture) = depth.target.texture()
             {
                 let access = if depth.effective_read_only() {
                     TextureAccessMode::DepthStencilReadOnly

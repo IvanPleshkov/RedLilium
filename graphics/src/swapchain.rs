@@ -469,7 +469,7 @@ impl SurfaceTexture {
     /// This provides access to backend-specific texture views for rendering.
     /// Use `GpuSurfaceTexture::wgpu_view()` or `GpuSurfaceTexture::vulkan_view()`
     /// to get the backend-specific view.
-    pub fn gpu_texture(&self) -> Option<&GpuSurfaceTexture> {
+    pub(crate) fn gpu_texture(&self) -> Option<&GpuSurfaceTexture> {
         self.gpu_texture.as_ref()
     }
 

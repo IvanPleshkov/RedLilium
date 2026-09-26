@@ -187,13 +187,13 @@ pub enum GpuPipeline {
     #[cfg(feature = "wgpu-backend")]
     WgpuGraphics {
         pipeline: wgpu::RenderPipeline,
-        bind_group_layouts: Vec<wgpu::BindGroupLayout>,
+        _bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     },
     /// wgpu backend compute pipeline
     #[cfg(feature = "wgpu-backend")]
     WgpuCompute {
         pipeline: wgpu::ComputePipeline,
-        bind_group_layouts: Vec<wgpu::BindGroupLayout>,
+        _bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     },
     /// Vulkan backend pipeline (graphics or compute)
     #[cfg(feature = "vulkan-backend")]
@@ -1357,17 +1357,6 @@ impl GpuBackend {
         }
     }
 
-    /// Signal a fence (for testing/dummy backend).
-    pub fn signal_fence(&self, fence: &GpuFence) {
-        match self {
-            Self::Dummy(backend) => backend.signal_fence(fence),
-            #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(backend) => backend.signal_fence(fence),
-            #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan(backend) => backend.signal_fence(fence),
-        }
-    }
-
     /// Execute a compiled render graph.
     ///
     /// This records commands from the graph into a command buffer and submits it.
@@ -1428,31 +1417,6 @@ impl GpuBackend {
             Self::Wgpu(backend) => backend.write_buffer(buffer, offset, data),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan(backend) => backend.write_buffer(buffer, offset, data),
-        }
-    }
-
-    /// Read a host-visible buffer's mapped memory into a `Vec`.
-    ///
-    /// Contract (identical on both backends): the buffer must be host-readable
-    /// (`BufferUsage::MAP_READ`) and the caller must ensure the GPU has
-    /// finished writing it — read *after* the frame fence (this is what the
-    /// pipeline's post-fence readback drain does). This method performs **no**
-    /// GPU wait and **no** staging copy of its own: reading a device-local
-    /// buffer is an error, not a silent zero-fill — copy it to a readback
-    /// buffer with [`TransferOperation::ReadbackBuffer`](crate::TransferOperation)
-    /// first.
-    pub fn read_buffer(
-        &self,
-        buffer: &GpuBuffer,
-        offset: u64,
-        size: u64,
-    ) -> Result<Vec<u8>, GraphicsError> {
-        match self {
-            Self::Dummy(backend) => backend.read_buffer(buffer, offset, size),
-            #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(backend) => backend.read_buffer(buffer, offset, size),
-            #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan(backend) => backend.read_buffer(buffer, offset, size),
         }
     }
 
@@ -1637,33 +1601,6 @@ impl GpuBackend {
             )),
         }
     }
-
-    /// Check if the backend is compatible with the given surface without modifying it.
-    pub fn is_compatible_with_surface(&self, surface: &GpuSurface) -> bool {
-        match (self, surface) {
-            (Self::Dummy(_), _) => true,
-
-            #[cfg(feature = "wgpu-backend")]
-            (Self::Wgpu(wgpu_backend), GpuSurface::Wgpu { surface }) => {
-                wgpu_backend.is_adapter_compatible_with_surface(surface)
-            }
-
-            #[cfg(feature = "vulkan-backend")]
-            (Self::Vulkan(vulkan_backend), GpuSurface::Vulkan { surface, .. }) => {
-                vulkan_backend.is_surface_supported(*surface)
-            }
-
-            #[allow(unreachable_patterns)]
-            _ => false,
-        }
-    }
-}
-
-/// Selects and creates the appropriate backend based on available features.
-///
-/// This uses default parameters (auto-select best backend).
-pub fn create_backend() -> Result<GpuBackend, GraphicsError> {
-    create_backend_with_params(&crate::instance::InstanceParameters::default())
 }
 
 /// Serializes GPU backend creation process-wide (#93).
@@ -1798,9 +1735,4 @@ fn create_backend_auto(
     // Fall back to dummy backend
     log::info!("Using dummy backend");
     Ok(GpuBackend::Dummy(dummy::DummyBackend::new()))
-}
-
-/// Check if a real GPU backend is available.
-pub fn has_gpu_backend() -> bool {
-    cfg!(any(feature = "vulkan-backend", feature = "wgpu-backend"))
 }

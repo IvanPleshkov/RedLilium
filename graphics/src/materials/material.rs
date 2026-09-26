@@ -719,7 +719,7 @@ impl Material {
     }
 
     /// Get the GPU pipeline handle.
-    pub fn gpu_handle(&self) -> &GpuPipeline {
+    pub(crate) fn gpu_handle(&self) -> &GpuPipeline {
         &self.gpu_handle
     }
 

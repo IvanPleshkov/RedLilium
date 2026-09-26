@@ -360,14 +360,14 @@ impl Blas {
     }
 
     /// Get the current GPU handle (the compacted structure after a swap).
-    pub fn gpu_handle(&self) -> Arc<GpuAccelerationStructure> {
+    pub(crate) fn gpu_handle(&self) -> Arc<GpuAccelerationStructure> {
         Arc::clone(&self.live.lock().gpu_handle)
     }
 
     /// Current GPU device address — what TLAS instance data references this
     /// BLAS by. Reads through the interior-mutable pair so a post-compaction
     /// [`Tlas::write_instances`] picks up the compacted structure's address.
-    pub fn device_address(&self) -> u64 {
+    pub(crate) fn device_address(&self) -> u64 {
         self.live.lock().gpu_handle.device_address()
     }
 
@@ -550,7 +550,7 @@ impl Tlas {
     }
 
     /// Get the GPU handle.
-    pub fn gpu_handle(&self) -> &GpuAccelerationStructure {
+    pub(crate) fn gpu_handle(&self) -> &GpuAccelerationStructure {
         &self.gpu_handle
     }
 

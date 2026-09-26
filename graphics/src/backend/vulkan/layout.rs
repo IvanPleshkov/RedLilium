@@ -7,31 +7,35 @@
 //!
 //! # Architecture
 //!
-//! The system consists of three main components:
-//!
-//! 1. [`TextureLayout`] - Represents Vulkan image layout states
-//! 2. [`TextureUsageGraph`] - Defines valid transitions based on texture usage flags
-//! 3. [`TextureLayoutTracker`] - Tracks per-frame layout state and generates barriers
+//! [`TextureLayout`] represents image states; [`TextureLayoutTracker`] tracks
+//! them across submissions and derives synchronization. A test-only usage graph
+//! models permitted transitions for selected texture usage combinations.
 //!
 //! # Example
 //!
-//! ```ignore
-//! // The tracker automatically handles layout transitions:
+//! ```text
+//! The tracker automatically handles layout transitions:
 //! // Pass 1: Render to texture (Undefined → ColorAttachment)
 //! // Pass 2: Sample texture (ColorAttachment → ShaderReadOnly)
 //! // Pass 3: Readback texture (ShaderReadOnly → TransferSrc)
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
 use std::sync::Arc;
 
 use ash::vk;
 use ash::vk::Handle;
+#[cfg(test)]
 use parking_lot::RwLock;
 
+#[cfg(test)]
 use crate::types::TextureUsage;
 
 /// Number of distinct texture layout states.
+#[cfg(test)]
 const TEXTURE_LAYOUT_COUNT: usize = 9;
 
 /// Vulkan image layout states that textures can be in.
@@ -57,6 +61,7 @@ pub enum TextureLayout {
     /// Optimal for transfer destination operations.
     TransferDst = 6,
     /// Optimal for presentation to swapchain.
+    #[cfg(test)]
     PresentSrc = 7,
     /// General layout (least optimal but most flexible).
     General = 8,
@@ -73,6 +78,7 @@ impl TextureLayout {
             Self::ShaderReadOnly => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             Self::TransferSrc => vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             Self::TransferDst => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            #[cfg(test)]
             Self::PresentSrc => vk::ImageLayout::PRESENT_SRC_KHR,
             Self::General => vk::ImageLayout::GENERAL,
         }
@@ -88,6 +94,7 @@ impl TextureLayout {
             Self::ShaderReadOnly => vk::AccessFlags2::SHADER_READ,
             Self::TransferSrc => vk::AccessFlags2::TRANSFER_READ,
             Self::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
+            #[cfg(test)]
             Self::PresentSrc => vk::AccessFlags2::NONE,
             Self::General => vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
         }
@@ -116,6 +123,7 @@ impl TextureLayout {
             Self::ShaderReadOnly => vk::AccessFlags2::SHADER_READ,
             Self::TransferSrc => vk::AccessFlags2::TRANSFER_READ,
             Self::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
+            #[cfg(test)]
             Self::PresentSrc => vk::AccessFlags2::NONE,
             Self::General => vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
         }
@@ -147,6 +155,7 @@ impl TextureLayout {
             }
             Self::TransferSrc => vk::PipelineStageFlags2::ALL_TRANSFER,
             Self::TransferDst => vk::PipelineStageFlags2::ALL_TRANSFER,
+            #[cfg(test)]
             Self::PresentSrc => vk::PipelineStageFlags2::ALL_COMMANDS,
             // General layout is used for storage images accessed from any shader stage.
             Self::General => {
@@ -184,6 +193,7 @@ impl TextureLayout {
             }
             Self::TransferSrc => vk::PipelineStageFlags2::ALL_TRANSFER,
             Self::TransferDst => vk::PipelineStageFlags2::ALL_TRANSFER,
+            #[cfg(test)]
             Self::PresentSrc => vk::PipelineStageFlags2::NONE,
             // General layout is used for storage images accessed from any shader stage.
             Self::General => {
@@ -192,14 +202,6 @@ impl TextureLayout {
                     | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
         }
-    }
-
-    /// Check if this is a depth/stencil layout.
-    pub fn is_depth_stencil(self) -> bool {
-        matches!(
-            self,
-            Self::DepthStencilAttachment | Self::DepthStencilReadOnly
-        )
     }
 
     /// Check if a pass using the image in this layout may write it.
@@ -228,14 +230,14 @@ impl TextureLayout {
 /// The graph is built from [`TextureUsage`] flags and defines which layout
 /// transitions are valid for textures with those capabilities.
 #[derive(Debug)]
+#[cfg(test)]
 pub struct TextureUsageGraph {
-    /// The TextureUsage flags this graph was created for.
-    usage: TextureUsage,
     /// Valid transitions from each state.
     /// Indexed by `TextureLayout as usize`.
     transitions: [HashSet<TextureLayout>; TEXTURE_LAYOUT_COUNT],
 }
 
+#[cfg(test)]
 impl TextureUsageGraph {
     /// Create a usage graph from TextureUsage flags.
     pub fn from_usage(usage: TextureUsage) -> Self {
@@ -379,22 +381,12 @@ impl TextureUsageGraph {
             gen_dests.insert(TextureLayout::General); // Stay
         }
 
-        Self { usage, transitions }
-    }
-
-    /// Get the usage flags this graph was created for.
-    pub fn usage(&self) -> TextureUsage {
-        self.usage
+        Self { transitions }
     }
 
     /// Check if a transition is valid.
     pub fn is_valid_transition(&self, from: TextureLayout, to: TextureLayout) -> bool {
         self.transitions[from as usize].contains(&to)
-    }
-
-    /// Get valid destination layouts from a given state.
-    pub fn valid_destinations(&self, from: TextureLayout) -> &HashSet<TextureLayout> {
-        &self.transitions[from as usize]
     }
 }
 
@@ -403,10 +395,12 @@ impl TextureUsageGraph {
 /// Textures with identical usage flags share the same `Arc<TextureUsageGraph>`,
 /// reducing memory allocation and enabling efficient comparison.
 #[derive(Debug, Default)]
+#[cfg(test)]
 pub struct TextureUsageGraphCache {
     cache: RwLock<HashMap<TextureUsage, Arc<TextureUsageGraph>>>,
 }
 
+#[cfg(test)]
 impl TextureUsageGraphCache {
     /// Create a new empty cache.
     pub fn new() -> Self {
@@ -443,11 +437,6 @@ impl TextureId {
     /// Create a texture ID from a raw Vulkan image handle.
     pub fn from_raw(handle: u64) -> Self {
         Self(handle)
-    }
-
-    /// Get the raw handle value.
-    pub fn raw(&self) -> u64 {
-        self.0
     }
 }
 
@@ -489,8 +478,6 @@ pub struct TextureLayoutTracker {
     layouts: HashMap<TextureId, TrackedTexture>,
     journal: HashMap<TextureId, Option<TrackedTexture>>,
     recording: bool,
-    /// Usage graph cache for sharing.
-    usage_graph_cache: TextureUsageGraphCache,
     /// Extra pipeline stages OR'd into every shader-stage layout scope (#114):
     /// `TASK_SHADER_EXT | MESH_SHADER_EXT` when `VK_EXT_mesh_shader` is
     /// enabled, empty otherwise. A texture sampled from a task/mesh stage
@@ -562,7 +549,6 @@ impl TextureLayoutTracker {
             layouts: HashMap::new(),
             journal: HashMap::new(),
             recording: false,
-            usage_graph_cache: TextureUsageGraphCache::new(),
             shader_stage_augment: vk::PipelineStageFlags2::empty(),
         }
     }
@@ -605,12 +591,8 @@ impl TextureLayoutTracker {
         }
     }
 
-    /// Get or create a usage graph for the given usage flags.
-    pub fn get_usage_graph(&self, usage: TextureUsage) -> Arc<TextureUsageGraph> {
-        self.usage_graph_cache.get_or_create(usage)
-    }
-
     /// Get the current layout of a texture, or `Undefined` if not tracked.
+    #[cfg(test)]
     pub fn get_layout(&self, id: TextureId) -> TextureLayout {
         self.layouts
             .get(&id)
@@ -621,6 +603,7 @@ impl TextureLayoutTracker {
     /// state untouched. Prefer [`request_access`](Self::request_access) for
     /// pass encoding — this is for paths that manage their own submit-level
     /// synchronization (tests, swapchain handling).
+    #[cfg(test)]
     pub fn set_layout(&mut self, id: TextureId, layout: TextureLayout) {
         self.layouts.entry(id).or_default().layout = layout;
     }

@@ -426,10 +426,7 @@ fn debug_assert_pipeline_state_matches_targets(graph: &RenderGraph) {
     use crate::graph::RenderTarget;
 
     fn target_samples(t: &RenderTarget) -> u32 {
-        match t {
-            RenderTarget::Texture { texture, .. } => texture.sample_count(),
-            RenderTarget::Surface { .. } => 1,
-        }
+        t.sample_count()
     }
 
     for pass in graph.passes() {
@@ -581,15 +578,7 @@ mod tests {
         use crate::graph::{ColorAttachment, RenderTarget, RenderTargetConfig};
         use crate::types::TextureFormat;
 
-        let target = RenderTarget::Surface {
-            format: TextureFormat::Bgra8UnormSrgb,
-            width: 4,
-            height: 4,
-            #[cfg(feature = "wgpu-backend")]
-            view: None,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_view: None,
-        };
+        let target = RenderTarget::test_surface(TextureFormat::Bgra8UnormSrgb, 4, 4);
         let mut pass = GraphicsPass::new(name.into());
         pass.set_render_targets(RenderTargetConfig::new().with_color(ColorAttachment::new(target)));
         let mut graph = RenderGraph::new();
