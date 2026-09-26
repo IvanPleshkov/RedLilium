@@ -332,7 +332,7 @@ impl AssetStage for MakeSolidArrayStage {
 struct UploadTextureStage {
     device: Arc<GraphicsDevice>,
     /// Whether to request GPU mips when the CPU stage has not supplied a chain.
-    /// Still gated by device support and the ordinary 2D restriction.
+    /// Still gated by device support and the 2D/2D-array restriction.
     generate_mips: bool,
 }
 
@@ -356,8 +356,10 @@ impl AssetStage for PrepareMipmapsStage {
                 .downcast::<CpuTexture>()
                 .map_err(|_| AssetError::Decode("mip stage expected CpuTexture".into()))?;
             if cpu.mip_level_count == 1
-                && cpu.dimension == TextureDimension::D2
-                && cpu.depth_or_array_layers == 1
+                && matches!(
+                    cpu.dimension,
+                    TextureDimension::D2 | TextureDimension::D2Array
+                )
                 && (filter != MipmapFilter::Color || !device.supports_mipmap_generation(cpu.format))
             {
                 if cpu.format.is_compressed() || cpu.format.is_depth_stencil() {
@@ -388,18 +390,21 @@ impl AssetStage for UploadTextureStage {
             .downcast::<CpuTexture>()
             .map_err(|_| AssetError::Decode("texture: upload stage expected CpuTexture".into()))?;
 
-        // Container-supplied chains (#120): a KTX2 with baked mips and/or
-        // layers/faces uploads exactly what's on disk — one operation per
-        // (mip, layer) image — and never runs GPU mip generation on top.
-        let container_chain = cpu.mip_level_count > 1 || cpu.layer_count() > 1;
+        // Stored mip chains are preserved. Having multiple layers alone does
+        // not imply an authored chain: a base-only 2D array can generate mips.
+        let stored_chain = cpu.mip_level_count > 1;
+        let layered_upload =
+            stored_chain || cpu.layer_count() > 1 || cpu.dimension == TextureDimension::D2Array;
 
         // CPU-generated and container-supplied chains arrive complete. GPU
-        // generation handles ordinary 2D colors only; unsupported compressed
+        // generation handles 2D and 2D-array colors; unsupported compressed
         // formats stay as supplied and log once.
         let wants_mips = self.generate_mips
-            && !container_chain
-            && cpu.dimension == TextureDimension::D2
-            && cpu.depth_or_array_layers == 1
+            && !stored_chain
+            && matches!(
+                cpu.dimension,
+                TextureDimension::D2 | TextureDimension::D2Array
+            )
             && (cpu.width > 1 || cpu.height > 1);
         let can_mip = wants_mips && self.device.supports_mipmap_generation(cpu.format);
         if wants_mips && !can_mip {
@@ -446,7 +451,7 @@ impl AssetStage for UploadTextureStage {
         };
         let texture = self.device.create_texture(&descriptor)?;
         let mut ops = Vec::new();
-        if container_chain {
+        if layered_upload {
             for mip in 0..cpu.mip_level_count {
                 for layer in 0..cpu.layer_count() {
                     ops.push(TransferOperation::upload_texture_level(
@@ -464,11 +469,11 @@ impl AssetStage for UploadTextureStage {
                 Arc::clone(&texture),
                 &cpu.data,
             )?);
-            // The blit chain runs after the mip0 upload; flush_gpu routes it to
-            // the graphics queue (blit is illegal on the transfer family).
-            if can_mip {
-                ops.push(TransferOperation::generate_mipmaps(Arc::clone(&texture)));
-            }
+        }
+        // Generate only after every base layer has been uploaded. flush_gpu
+        // routes this op to the graphics queue, ordered after all uploads.
+        if can_mip {
+            ops.push(TransferOperation::generate_mipmaps(Arc::clone(&texture)));
         }
         Ok((Box::new(texture) as GpuValue, ops))
     }
@@ -634,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_stage_keeps_container_chains_and_does_not_generate_array_mips() {
+    fn cpu_stage_keeps_container_chains_and_does_not_generate_cube_mips() {
         let device = dummy_device();
         let stage = PrepareMipmapsStage {
             device: device.clone(),
@@ -647,8 +652,8 @@ mod tests {
             .downcast::<CpuTexture>()
             .unwrap();
         assert_eq!(cpu.data, vec![42; 20]);
-        let cpu = CpuTexture::new(2, 2, TextureFormat::Rgba8Unorm, vec![42; 16])
-            .with_dimension(TextureDimension::D2Array);
+        let cpu = CpuTexture::new(2, 2, TextureFormat::Rgba8Unorm, vec![42; 16 * 6])
+            .with_dimension(TextureDimension::Cube);
         let cpu = ready(stage.run_async(Box::new(cpu))).unwrap();
         let upload = UploadTextureStage {
             device,
@@ -667,5 +672,126 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, TransferOperation::GenerateMipmaps { .. }))
         );
+    }
+
+    #[test]
+    fn array_cpu_import_uploads_each_mip_and_layer_and_preserves_authored_chain() {
+        let device = dummy_device();
+        for layers in [1, 3] {
+            for filter in [
+                MipmapFilter::Color,
+                MipmapFilter::NormalMap,
+                MipmapFilter::AlphaCoverage { cutoff: 128 },
+            ] {
+                let stage = PrepareMipmapsStage {
+                    device: device.clone(),
+                    filter,
+                };
+                let cpu = CpuTexture::new(
+                    4,
+                    4,
+                    TextureFormat::Rgba8Unorm,
+                    [128, 128, 255, 255].repeat(16 * layers as usize),
+                )
+                .with_dimension(TextureDimension::D2Array)
+                .with_depth_or_array_layers(layers);
+                let prepared = ready(stage.run_async(Box::new(cpu))).unwrap();
+                let cpu = prepared.downcast_ref::<CpuTexture>().unwrap();
+                assert_eq!(cpu.mip_level_count, 3);
+                let authored = cpu.data.clone();
+                // A stored chain passes through without a second reduction.
+                let prepared = ready(stage.run_async(prepared)).unwrap();
+                assert_eq!(
+                    prepared.downcast_ref::<CpuTexture>().unwrap().data,
+                    authored
+                );
+                let upload = UploadTextureStage {
+                    device: device.clone(),
+                    generate_mips: true,
+                };
+                let (value, operations) = upload.run_gpu(prepared).unwrap();
+                let texture = value.downcast_ref::<Arc<Texture>>().unwrap();
+                assert_eq!(texture.mip_level_count(), 3);
+                assert_eq!(texture.dimension(), TextureDimension::D2Array);
+                assert_eq!(texture.depth(), layers);
+                assert_eq!(operations.len(), (3 * layers) as usize);
+                for (index, op) in operations.iter().enumerate() {
+                    let TransferOperation::BufferToTexture { regions, .. } = op else {
+                        panic!("expected level upload")
+                    };
+                    assert_eq!(regions[0].texture_location.mip_level, index as u32 / layers);
+                    assert_eq!(regions[0].texture_location.origin.z, index as u32 % layers);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn gpu_array_import_generates_after_all_base_layers_and_honors_opt_out() {
+        let Ok(instance) = redlilium_graphics::GraphicsInstance::with_parameters(
+            redlilium_graphics::InstanceParameters::new()
+                .with_backend(redlilium_graphics::BackendType::Wgpu),
+        ) else {
+            eprintln!("wgpu unavailable");
+            return;
+        };
+        let device = instance.create_device().unwrap();
+        assert!(device.supports_mipmap_generation(TextureFormat::Rgba8Unorm));
+        for layers in [1, 3] {
+            for generate_mips in [false, true] {
+                let cpu = CpuTexture::new(
+                    4,
+                    4,
+                    TextureFormat::Rgba8Unorm,
+                    vec![42; 64 * layers as usize],
+                )
+                .with_dimension(TextureDimension::D2Array)
+                .with_depth_or_array_layers(layers);
+                let input = if generate_mips {
+                    let stage = PrepareMipmapsStage {
+                        device: device.clone(),
+                        filter: MipmapFilter::Color,
+                    };
+                    let input = ready(stage.run_async(Box::new(cpu))).unwrap();
+                    assert_eq!(
+                        input.downcast_ref::<CpuTexture>().unwrap().mip_level_count,
+                        1
+                    );
+                    input
+                } else {
+                    Box::new(cpu) as AnyAsset
+                };
+                let upload = UploadTextureStage {
+                    device: device.clone(),
+                    generate_mips,
+                };
+                let (value, operations) = upload.run_gpu(input).unwrap();
+                let texture = value.downcast_ref::<Arc<Texture>>().unwrap();
+                assert_eq!(texture.mip_level_count(), if generate_mips { 3 } else { 1 });
+                assert_eq!(
+                    operations.len(),
+                    layers as usize + usize::from(generate_mips)
+                );
+                for layer in 0..layers {
+                    let TransferOperation::BufferToTexture { dst, regions, .. } =
+                        &operations[layer as usize]
+                    else {
+                        panic!("expected layer upload")
+                    };
+                    assert!(Arc::ptr_eq(dst, texture));
+                    assert_eq!(regions[0].texture_location.mip_level, 0);
+                    assert_eq!(regions[0].texture_location.origin.z, layer);
+                }
+                if generate_mips {
+                    let Some(TransferOperation::GenerateMipmaps { texture: generated }) =
+                        operations.last()
+                    else {
+                        panic!("expected mip generation after all uploads")
+                    };
+                    assert!(Arc::ptr_eq(generated, texture));
+                }
+            }
+        }
     }
 }

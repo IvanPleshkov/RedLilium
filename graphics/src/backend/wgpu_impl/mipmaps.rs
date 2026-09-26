@@ -122,43 +122,48 @@ impl WgpuBackend {
             texture.size(),
         );
         for mip in 1..target.mip_level_count() {
-            let view = |level| {
-                scratch.create_view(&wgpu::TextureViewDescriptor {
-                    base_mip_level: level,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                })
-            };
-            let src = view(mip - 1);
-            let dst = view(mip);
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mip source"),
-                layout: &pipeline.get_bind_group_layout(0),
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&src),
-                }],
-            });
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("generate mip"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &dst,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
+            for layer in 0..texture.depth_or_array_layers() {
+                let view = |level| {
+                    scratch.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_mip_level: level,
+                        mip_level_count: Some(1),
+                        base_array_layer: layer,
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    })
+                };
+                let src = view(mip - 1);
+                let dst = view(mip);
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mip source"),
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src),
+                    }],
                 });
-                pass.set_pipeline(&pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
-                pass.draw(0..3, 0..1);
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("generate mip"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &dst,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&pipeline);
+                    pass.set_bind_group(0, &bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
             }
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -172,7 +177,7 @@ impl WgpuBackend {
                 wgpu::Extent3d {
                     width: (target.width() >> mip).max(1),
                     height: (target.height() >> mip).max(1),
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: texture.depth_or_array_layers(),
                 },
             );
         }

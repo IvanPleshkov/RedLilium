@@ -4151,3 +4151,125 @@ fn test_wgpu_mipmaps_include_odd_edges_and_can_regenerate() {
         }
     }
 }
+
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::wgpu(Backend::WebGpu)]
+fn test_generate_array_mipmaps_all_layers_and_levels(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    #[cfg(feature = "vulkan-backend")]
+    redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
+    for layers in [1, 3] {
+        for (width, height) in [(4u32, 4u32), (1, 5)] {
+            let levels = 32 - width.max(height).leading_zeros();
+            let texture = ctx
+                .device
+                .create_texture(
+                    &TextureDescriptor::new_2d_array(
+                        width,
+                        height,
+                        layers,
+                        TextureFormat::Rgba8Unorm,
+                        TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+                    )
+                    .with_mip_levels(levels),
+                )
+                .unwrap();
+            for round in [0u8, 1] {
+                let mut operations = Vec::new();
+                for layer in 0..layers {
+                    let mut bytes = Vec::new();
+                    for y in 0..height {
+                        for x in 0..width {
+                            let variation = if width == 4 {
+                                ((x % 2 + y % 2) * 16) as u8
+                            } else {
+                                16
+                            };
+                            bytes.extend_from_slice(&[
+                                layer as u8 * 48 + variation,
+                                240 - layer as u8 * 64,
+                                32 + round * 96,
+                                255,
+                            ]);
+                        }
+                    }
+                    operations.push(
+                        TransferOperation::upload_texture_level(
+                            &ctx.device,
+                            texture.clone(),
+                            0,
+                            layer,
+                            &bytes,
+                        )
+                        .unwrap(),
+                    );
+                }
+                operations.push(TransferOperation::generate_mipmaps(texture.clone()));
+                let mut readbacks = Vec::new();
+                for mip in 0..levels {
+                    let (w, h) = ((width >> mip).max(1), (height >> mip).max(1));
+                    for layer in 0..layers {
+                        let buffer = ctx.create_readback_buffer(u64::from(h * 256));
+                        operations.push(TransferOperation::readback_texture(
+                            texture.clone(),
+                            buffer.clone(),
+                            vec![BufferTextureCopyRegion::new(
+                                BufferTextureLayout::new(0, Some(256), None),
+                                TextureCopyLocation::new(
+                                    mip,
+                                    redlilium_graphics::TextureOrigin::new(0, 0, layer),
+                                ),
+                                Extent3d::new_2d(w, h),
+                            )],
+                        ));
+                        readbacks.push((buffer, mip, layer, w, h));
+                    }
+                }
+                let mut graph = RenderGraph::new();
+                let mut pass = TransferPass::new("array_mips".into());
+                pass.set_transfer_config(TransferConfig::new().with_operations(operations));
+                graph.add_transfer_pass(pass);
+                ctx.execute_graph(graph);
+                for (buffer, mip, layer, w, h) in readbacks {
+                    let bytes = ctx.read_buffer(&buffer, u64::from(h * 256));
+                    for y in 0..h {
+                        for x in 0..w {
+                            let variation = if mip == 0 && width == 4 {
+                                ((x % 2 + y % 2) * 16) as u8
+                            } else {
+                                16
+                            };
+                            let expected = [
+                                layer as u8 * 48 + variation,
+                                240 - layer as u8 * 64,
+                                32 + round * 96,
+                                255,
+                            ];
+                            let offset = (y * 256 + x * 4) as usize;
+                            for channel in 0..4 {
+                                assert!(
+                                    (i16::from(bytes[offset + channel])
+                                        - i16::from(expected[channel]))
+                                    .abs()
+                                        <= 1,
+                                    "{backend:?} round {round}, mip {mip}, layer {layer}, ({x}, {y}): {:?}, expected {expected:?}",
+                                    &bytes[offset..offset + 4]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        assert_eq!(
+            redlilium_graphics::diagnostics::vulkan::validation_error_count(),
+            0
+        );
+    }
+}

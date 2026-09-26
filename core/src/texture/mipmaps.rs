@@ -42,7 +42,9 @@ impl std::fmt::Display for MipmapError {
 impl std::error::Error for MipmapError {}
 
 impl CpuTexture {
-    /// Generate a full chain for a single-level, ordinary 2D color texture.
+    /// Generate a full chain for a single-level 2D color texture or 2D array.
+    /// Layers are filtered independently, including their alpha coverage;
+    /// output remains mip-major with all layers stored within each mip.
     /// Supports every uncompressed color format represented by TextureFormat,
     /// including non-filterable float and integer channels. Integer averages
     /// round to the nearest representable value. Depth/stencil and compressed
@@ -52,14 +54,17 @@ impl CpuTexture {
         if self.mip_level_count > 1 {
             return Ok(());
         }
-        if self.dimension != TextureDimension::D2
-            || self.depth_or_array_layers != 1
+        if !matches!(
+            self.dimension,
+            TextureDimension::D2 | TextureDimension::D2Array
+        ) || self.depth_or_array_layers == 0
+            || (self.dimension == TextureDimension::D2 && self.depth_or_array_layers != 1)
             || self.width == 0
             || self.height == 0
             || self.mip_level_count == 0
         {
             return Err(MipmapError::InvalidTexture(
-                "mip generation requires a nonempty single-layer 2D texture",
+                "mip generation requires a nonempty 2D texture or 2D array",
             ));
         }
         let format = self.format;
@@ -91,68 +96,83 @@ impl CpuTexture {
             _ => {}
         }
         let stride = format.block_size() as usize;
-        let expected = (self.width as usize)
+        let layer_bytes = (self.width as usize)
             .checked_mul(self.height as usize)
             .and_then(|n| n.checked_mul(stride))
             .ok_or(MipmapError::InvalidTexture("mip byte size overflows"))?;
+        let expected = layer_bytes
+            .checked_mul(self.layer_count() as usize)
+            .ok_or(MipmapError::InvalidTexture("mip array byte size overflows"))?;
         if self.data.len() != expected {
             return Err(MipmapError::InvalidTexture(
                 "mip 0 byte count does not match its dimensions",
             ));
         }
-        let mut source: Vec<[f64; 4]> = self
+        let mut sources: Vec<Vec<[f64; 4]>> = self
             .data
-            .chunks_exact(stride)
-            .map(|p| decode(format, p))
+            .chunks_exact(layer_bytes)
+            .map(|layer| {
+                layer
+                    .chunks_exact(stride)
+                    .map(|p| decode(format, p))
+                    .collect()
+            })
             .collect();
-        if source.iter().flatten().any(|v| !v.is_finite()) {
+        if sources.iter().flatten().flatten().any(|v| !v.is_finite()) {
             return Err(MipmapError::InvalidTexture(
                 "mip source contains non-finite values",
             ));
         }
-        let coverage = match filter {
-            MipmapFilter::AlphaCoverage { cutoff } => coverage(&source, f64::from(cutoff) / 255.0),
-            _ => 0.0,
-        };
+        let coverage: Vec<_> = sources
+            .iter()
+            .map(|source| match filter {
+                MipmapFilter::AlphaCoverage { cutoff } => {
+                    coverage(source, f64::from(cutoff) / 255.0)
+                }
+                _ => 0.0,
+            })
+            .collect();
         let mut data = self.data.clone();
         let (mut width, mut height) = (self.width, self.height);
         let mut levels = 1;
         while width > 1 || height > 1 {
             let (w, h) = ((width / 2).max(1), (height / 2).max(1));
-            let mut reduced = reduce(&source, width, height, w, h);
-            if filter == MipmapFilter::NormalMap {
-                for pixel in &mut reduced {
-                    let n = [
-                        pixel[0] * 2.0 - 1.0,
-                        pixel[1] * 2.0 - 1.0,
-                        pixel[2] * 2.0 - 1.0,
-                    ];
-                    let length = n.iter().map(|v| v * v).sum::<f64>().sqrt();
-                    if length > 1e-6 {
-                        for i in 0..3 {
-                            pixel[i] = (n[i] / length + 1.0) * 0.5;
+            for (layer, source) in sources.iter_mut().enumerate() {
+                let mut reduced = reduce(source, width, height, w, h);
+                if filter == MipmapFilter::NormalMap {
+                    for pixel in &mut reduced {
+                        let n = [
+                            pixel[0] * 2.0 - 1.0,
+                            pixel[1] * 2.0 - 1.0,
+                            pixel[2] * 2.0 - 1.0,
+                        ];
+                        let length = n.iter().map(|v| v * v).sum::<f64>().sqrt();
+                        if length > 1e-6 {
+                            for i in 0..3 {
+                                pixel[i] = (n[i] / length + 1.0) * 0.5;
+                            }
+                        } else {
+                            pixel[..3].copy_from_slice(&[0.5, 0.5, 1.0]);
                         }
-                    } else {
-                        pixel[..3].copy_from_slice(&[0.5, 0.5, 1.0]);
                     }
                 }
-            }
-            let scale = match filter {
-                MipmapFilter::AlphaCoverage { cutoff } => {
-                    alpha_scale(&reduced, coverage, cutoff, format)
+                let scale = match filter {
+                    MipmapFilter::AlphaCoverage { cutoff } => {
+                        alpha_scale(&reduced, coverage[layer], cutoff, format)
+                    }
+                    _ => 1.0,
+                };
+                for &pixel in &reduced {
+                    let mut output = pixel;
+                    if matches!(filter, MipmapFilter::AlphaCoverage { .. }) {
+                        output[3] = (output[3] * scale).clamp(0.0, 1.0);
+                    }
+                    encode(format, output, &mut data);
                 }
-                _ => 1.0,
-            };
-            for &pixel in &reduced {
-                let mut output = pixel;
-                if matches!(filter, MipmapFilter::AlphaCoverage { .. }) {
-                    output[3] = (output[3] * scale).clamp(0.0, 1.0);
-                }
-                encode(format, output, &mut data);
+                // Do not feed the alpha correction back into the next reduction:
+                // each level independently targets the original base coverage.
+                *source = reduced;
             }
-            // Do not feed the alpha correction back into the next reduction:
-            // each level independently targets the original base coverage.
-            source = reduced;
             width = w;
             height = h;
             levels += 1;
@@ -499,16 +519,60 @@ mod tests {
         let authored = cpu.data.clone();
         cpu.generate_mipmaps(MipmapFilter::NormalMap).unwrap();
         assert_eq!(cpu.data, authored);
-        for dimension in [
-            TextureDimension::D2Array,
-            TextureDimension::Cube,
-            TextureDimension::D3,
-        ] {
+        for dimension in [TextureDimension::Cube, TextureDimension::D3] {
             let mut cpu =
                 texture(TextureFormat::Rgba8Unorm, 2, 2, &[[1.0; 4]; 4]).with_dimension(dimension);
             assert!(cpu.generate_mipmaps(MipmapFilter::Color).is_err());
         }
         let mut cpu = CpuTexture::new(u32::MAX, u32::MAX, TextureFormat::Rgba32Float, vec![]);
         assert!(cpu.generate_mipmaps(MipmapFilter::Color).is_err());
+    }
+
+    #[test]
+    fn array_layers_match_independent_color_normal_and_coverage_chains() {
+        let alphas = [1.0, 1.0, 1.0, 0.4, 1.0, 0.2, 0.0, 0.0];
+        let a: Vec<_> = alphas.iter().map(|&a| [1.0, 0.5, 0.5, a]).collect();
+        let b = [[0.5, 1.0, 0.5, 0.9]; 8];
+        for filter in [
+            MipmapFilter::Color,
+            MipmapFilter::NormalMap,
+            MipmapFilter::AlphaCoverage { cutoff: 191 },
+        ] {
+            let mut layers = [
+                texture(TextureFormat::Rgba8Unorm, 8, 1, &a),
+                texture(TextureFormat::Rgba8Unorm, 8, 1, &b),
+            ];
+            let base: Vec<_> = layers.iter().flat_map(|t| t.data.iter().copied()).collect();
+            let mut array = CpuTexture::new(8, 1, TextureFormat::Rgba8Unorm, base.clone())
+                .with_dimension(TextureDimension::D2Array)
+                .with_depth_or_array_layers(2);
+            array.generate_mipmaps(filter).unwrap();
+            assert_eq!(array.mip_level_count, 4);
+            assert_eq!(array.layer_count(), 2);
+            assert_eq!(&array.data[..base.len()], &base);
+            assert_eq!(array.data.len(), array.expected_data_len());
+            for (layer, solo) in layers.iter_mut().enumerate() {
+                solo.generate_mipmaps(filter).unwrap();
+                for mip in 0..4 {
+                    assert_eq!(
+                        &array.data[array.byte_range(mip, layer as u32)],
+                        &solo.data[solo.byte_range(mip, 0)],
+                        "{filter:?}, mip {mip}, layer {layer}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn array_rejects_bad_layer_counts_and_incomplete_base_without_mutation() {
+        for (layers, bytes) in [(0, 0), (2, 16), (u32::MAX, 16)] {
+            let mut array = CpuTexture::new(2, 2, TextureFormat::Rgba8Unorm, vec![42; bytes])
+                .with_dimension(TextureDimension::D2Array)
+                .with_depth_or_array_layers(layers);
+            assert!(array.generate_mipmaps(MipmapFilter::Color).is_err());
+            assert_eq!(array.data, vec![42; bytes]);
+            assert_eq!(array.mip_level_count, 1);
+        }
     }
 }

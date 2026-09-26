@@ -461,7 +461,8 @@ pub enum TransferOperation {
     /// usage (generation reads lower mips), and a supported format; the loader
     /// arranges this behind [`DeviceCapabilities::mip_generation`](crate::DeviceCapabilities).
     /// `COPY_DST` is also required. Multiple levels require a single-sampled
-    /// 2D texture and backend format support; a single level is a no-op.
+    /// 2D texture or 2D array and backend format support; a single level is a
+    /// no-op. Every array layer is reduced independently across all levels.
     GenerateMipmaps {
         /// The texture whose mips 1.. are generated from mip 0.
         texture: Arc<Texture>,

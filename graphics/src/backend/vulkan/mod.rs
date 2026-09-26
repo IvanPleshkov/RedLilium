@@ -4561,6 +4561,11 @@ impl VulkanBackend {
 
                 let aspect = image_aspect_mask(texture.format());
                 let extent = texture.size();
+                let layers = if texture.dimension() == crate::TextureDimension::D2Array {
+                    texture.depth().max(1)
+                } else {
+                    1
+                };
                 let mut mip_w = extent.width.max(1) as i32;
                 let mut mip_h = extent.height.max(1) as i32;
 
@@ -4600,7 +4605,7 @@ impl VulkanBackend {
                             aspect_mask: aspect,
                             mip_level: src_level,
                             base_array_layer: 0,
-                            layer_count: 1,
+                            layer_count: layers,
                         })
                         .src_offsets([
                             vk::Offset3D { x: 0, y: 0, z: 0 },
@@ -4614,7 +4619,7 @@ impl VulkanBackend {
                             aspect_mask: aspect,
                             mip_level: i,
                             base_array_layer: 0,
-                            layer_count: 1,
+                            layer_count: layers,
                         })
                         .dst_offsets([
                             vk::Offset3D { x: 0, y: 0, z: 0 },

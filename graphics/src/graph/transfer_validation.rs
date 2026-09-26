@@ -334,9 +334,13 @@ impl TransferOperation {
                 if target.mip_level_count() <= 1 {
                     return Ok(());
                 }
-                if target.dimension() != TextureDimension::D2 || target.sample_count() != 1 {
+                if !matches!(
+                    target.dimension(),
+                    TextureDimension::D2 | TextureDimension::D2Array
+                ) || target.sample_count() != 1
+                {
                     return Err(invalid(
-                        "mip generation currently requires a single-sampled 2D texture",
+                        "mip generation requires a single-sampled 2D texture or 2D array",
                     ));
                 }
                 if !device.supports_mipmap_generation(target.format()) {
@@ -788,5 +792,50 @@ mod tests {
         TransferOperation::generate_mipmaps(tex(&d, desc(1, 1)))
             .validate(&d)
             .unwrap();
+    }
+
+    #[test]
+    fn mip_generation_accepts_arrays_but_still_rejects_cubes_volumes_and_msaa() {
+        let d = device();
+        let array = tex(
+            &d,
+            TextureDescriptor::new_2d_array(
+                4,
+                4,
+                3,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::COPY_SRC | TextureUsage::COPY_DST,
+            )
+            .with_mip_levels(3),
+        );
+        // Dummy has no GPU mip capability: dimension validation must pass and
+        // reach the format gate, not report an invalid texture kind.
+        assert!(matches!(
+            TransferOperation::generate_mipmaps(array).validate(&d),
+            Err(GraphicsError::FeatureNotSupported(_))
+        ));
+        for dimension in [
+            TextureDimension::Cube,
+            TextureDimension::CubeArray,
+            TextureDimension::D3,
+            TextureDimension::D1Array,
+        ] {
+            check_bad(
+                TransferOperation::generate_mipmaps(tex(
+                    &d,
+                    desc(4, 4).with_dimension(dimension).with_mip_levels(3),
+                )),
+                &d,
+                "single-sampled 2D",
+            );
+        }
+        check_bad(
+            TransferOperation::generate_mipmaps(tex(
+                &d,
+                desc(4, 4).with_mip_levels(3).with_sample_count(4),
+            )),
+            &d,
+            "single-sampled 2D",
+        );
     }
 }

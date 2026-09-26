@@ -74,7 +74,8 @@ contract includes:
   different resources, even for disjoint buffer ranges or texture subresources.
   In-place texture copies need subresource tracking, which is not implemented.
 - Mip generation requires `COPY_SRC | COPY_DST` and, for multiple levels, a
-  single-sampled 2D texture with a supported format. A single level is a no-op.
+  single-sampled 2D texture or 2D array with a supported format. A single level
+  is a no-op.
 
 `upload_texture_data` and `upload_texture_level` prepare staging data with the
 required padding; the destination upload is still an ordered graph operation.
@@ -114,10 +115,16 @@ the nearest value; depth/stencil is not treated as color.
   quantization limit achievable fractions. It does not model filtered sampling
   or alpha-to-coverage at render time.
 
+2D arrays generate a chain for each layer on Vulkan, wgpu, and the CPU import
+path. Layers never mix; normal filtering and alpha coverage are computed per
+layer. A base-only array receives generated mips when `generate_mips` is enabled;
+the number of layers stays constant at every level. Uploads for all base layers
+precede the GPU generation operation.
+
 Supplied mip chains are preserved, including compressed KTX2 assets. BC/ETC/ASTC
 need precomputed mips; no runtime recompression is performed. Generation remains
-limited to ordinary single-layer 2D textures without MSAA. Arrays, cubemaps, and
-3D generation are deferred. CPU fallback broadens **asset import** support; a
+limited to 2D textures and 2D arrays without MSAA. Cubemap and 3D generation
+are deferred. CPU fallback broadens **asset import** support; a
 direct GPU graph operation on an unsupported format still returns an error.
 
 ### Public API boundary
