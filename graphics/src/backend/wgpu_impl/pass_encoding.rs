@@ -508,11 +508,7 @@ impl WgpuBackend {
                             },
                             aspect: wgpu::TextureAspect::All,
                         },
-                        wgpu::Extent3d {
-                            width: region.extent.width,
-                            height: region.extent.height,
-                            depth_or_array_layers: region.extent.depth,
-                        },
+                        block_aligned_extent(src.format(), region.extent),
                     );
                 }
             }

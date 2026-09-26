@@ -213,6 +213,11 @@ impl BufferTextureLayout {
         format: TextureFormat,
         extent: Extent3d,
     ) -> Result<ResolvedBufferTextureLayout, GraphicsError> {
+        if extent.width == 0 || extent.height == 0 || extent.depth == 0 {
+            return Err(GraphicsError::InvalidParameter(
+                "texture copy extent must be nonzero".into(),
+            ));
+        }
         // Buffer↔image copies address a single aspect; combined depth-stencil
         // has two and this API has no aspect selector.
         if format.is_depth_stencil() && format.has_stencil() {
@@ -228,7 +233,9 @@ impl BufferTextureLayout {
         let height_blocks = extent.height.div_ceil(block_h);
         let images = extent.depth.max(1);
 
-        let tight_bytes_per_row = row_blocks * block_size;
+        let tight_bytes_per_row = row_blocks
+            .checked_mul(block_size)
+            .ok_or_else(|| GraphicsError::InvalidParameter("texture row pitch overflows".into()))?;
         let bytes_per_row = self.bytes_per_row.unwrap_or(tight_bytes_per_row);
         if bytes_per_row < tight_bytes_per_row {
             return Err(GraphicsError::InvalidParameter(format!(
@@ -243,7 +250,7 @@ impl BufferTextureLayout {
             )));
         }
 
-        let multi_row = height_blocks * images > 1;
+        let multi_row = height_blocks > 1 || images > 1;
         if multi_row && !bytes_per_row.is_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT) {
             return Err(GraphicsError::InvalidParameter(format!(
                 "bytes_per_row {bytes_per_row} must be {COPY_BYTES_PER_ROW_ALIGNMENT}-byte \
@@ -256,7 +263,10 @@ impl BufferTextureLayout {
         // edge mips of compressed formats legally copy extents smaller than a
         // block (a 2×2 BC mip), but the buffer still holds one full block row
         // (#120). An explicit value must be block-aligned by itself.
-        let rows_per_image_texels = self.rows_per_image.unwrap_or(height_blocks * block_h);
+        let tight_rows = height_blocks
+            .checked_mul(block_h)
+            .ok_or_else(|| GraphicsError::InvalidParameter("texture block rows overflow".into()))?;
+        let rows_per_image_texels = self.rows_per_image.unwrap_or(tight_rows);
         if !rows_per_image_texels.is_multiple_of(block_h) {
             return Err(GraphicsError::InvalidParameter(format!(
                 "rows_per_image {rows_per_image_texels} is not a multiple of the format block \
@@ -273,7 +283,11 @@ impl BufferTextureLayout {
         Ok(ResolvedBufferTextureLayout {
             offset: self.offset,
             bytes_per_row,
-            row_length_texels: (bytes_per_row / block_size) * block_w,
+            row_length_texels: (bytes_per_row / block_size)
+                .checked_mul(block_w)
+                .ok_or_else(|| {
+                    GraphicsError::InvalidParameter("texture row length overflows".into())
+                })?,
             rows_per_image_texels,
             rows_per_image_blocks: rows_per_image_texels / block_h,
             multi_row,
@@ -340,6 +354,11 @@ impl BufferTextureCopyRegion {
 }
 
 /// A transfer operation to be executed in a transfer pass.
+///
+/// [`FrameSchedule::submit`](crate::FrameSchedule::submit) validates all graph
+/// transfers before recording commands: resource device/usage, bounds, copy
+/// layouts, and format compatibility. Copies require nonempty regions and
+/// distinct source/destination resources, including disjoint subresources.
 #[derive(Debug, Clone)]
 pub enum TransferOperation {
     /// Copy data between buffers.
@@ -397,7 +416,7 @@ pub enum TransferOperation {
     ///
     /// The `data` source is held by `Arc`, so its memory stays alive for the
     /// duration of the operation (no use-after-free / access violation); the
-    /// backend bounds-checks `src_range` against it.
+    /// graph preflight bounds-checks `src_range` against it.
     WriteBuffer {
         /// Destination GPU buffer.
         dst: Arc<Buffer>,
@@ -416,6 +435,8 @@ pub enum TransferOperation {
     /// into `dst`. The result is therefore available one or more frames later
     /// (poll `dst`). The GPU→`src` copy (e.g. a `TextureToBuffer`) must be a
     /// separate, earlier operation; `src` must be a host-visible readback buffer.
+    /// It requires `MAP_READ`; nonempty ranges need an 8-byte aligned offset
+    /// and a 4-byte aligned size. An empty in-bounds range is a no-op.
     ReadbackBuffer {
         /// Host-visible source buffer the GPU wrote earlier this frame.
         src: Arc<Buffer>,
@@ -438,6 +459,8 @@ pub enum TransferOperation {
     /// `texture` must have been created with a full `mip_level_count`, `COPY_SRC`
     /// usage (blit reads lower mips), and a blit-eligible format; the loader
     /// arranges this behind [`DeviceCapabilities::mip_generation`](crate::DeviceCapabilities).
+    /// `COPY_DST` is also required. Multiple levels require a single-sampled
+    /// 2D texture and backend format support; a single level is a no-op.
     GenerateMipmaps {
         /// The texture whose mips 1.. are generated from mip 0.
         texture: Arc<Texture>,
@@ -641,14 +664,14 @@ impl TransferOperation {
         }
         let base = dst.size();
         let extent = Extent3d {
-            width: (base.width >> mip).max(1),
-            height: (base.height >> mip).max(1),
+            width: base.width.checked_shr(mip).unwrap_or(0).max(1),
+            height: base.height.checked_shr(mip).unwrap_or(0).max(1),
             // 3D mips shrink in depth; array layers are addressed via
             // `origin.z` instead and copy one slice at a time.
             depth: if layers > 1 {
                 1
             } else {
-                (base_depth >> mip).max(1)
+                base_depth.checked_shr(mip).unwrap_or(0).max(1)
             },
         };
         let (staging, bytes_per_row) =
@@ -724,10 +747,15 @@ fn stage_texture_bytes(
     let row_blocks = extent.width.div_ceil(block_w);
     let col_blocks = extent.height.div_ceil(block_h);
     let images = extent.depth.max(1);
-    let tight_bpr = row_blocks * block_size;
-    let total_rows = col_blocks as usize * images as usize;
+    let overflow = || GraphicsError::InvalidParameter(format!("{what}: staging size overflows"));
+    let tight_bpr = row_blocks.checked_mul(block_size).ok_or_else(overflow)?;
+    let total_rows = (col_blocks as usize)
+        .checked_mul(images as usize)
+        .ok_or_else(overflow)?;
 
-    let expected = tight_bpr as usize * total_rows;
+    let expected = (tight_bpr as usize)
+        .checked_mul(total_rows)
+        .ok_or_else(overflow)?;
     if data.len() != expected {
         return Err(GraphicsError::InvalidParameter(format!(
             "{what}: data size {} does not match the tightly-packed size {expected} \
@@ -741,9 +769,14 @@ fn stage_texture_bytes(
 
     let multi_row = total_rows > 1;
     let needs_padding = multi_row && !tight_bpr.is_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
-    let (staging_bytes, bytes_per_row) = if needs_padding {
-        let padded_bpr = tight_bpr.next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
-        let mut padded = vec![0u8; padded_bpr as usize * total_rows];
+    let (mut staging_bytes, bytes_per_row) = if needs_padding {
+        let padded_bpr = tight_bpr
+            .checked_next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT)
+            .ok_or_else(overflow)?;
+        let padded_size = (padded_bpr as usize)
+            .checked_mul(total_rows)
+            .ok_or_else(overflow)?;
+        let mut padded = vec![0u8; padded_size];
         for row in 0..total_rows {
             let src = row * tight_bpr as usize;
             let dst_off = row * padded_bpr as usize;
@@ -754,6 +787,17 @@ fn stage_texture_bytes(
     } else {
         (std::borrow::Cow::Borrowed(data), None)
     };
+
+    // Queue writes into fresh staging buffers need a four-byte size on wgpu,
+    // even when one R8/R16 texel occupies fewer bytes. Padding is outside the
+    // texture-copy footprint and does not change the input data contract.
+    let staging_size = staging_bytes
+        .len()
+        .checked_next_multiple_of(4)
+        .ok_or_else(overflow)?;
+    if staging_size != staging_bytes.len() {
+        staging_bytes.to_mut().resize(staging_size, 0);
+    }
 
     let staging = device.create_buffer(
         &BufferDescriptor::new(

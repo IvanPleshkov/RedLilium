@@ -43,6 +43,7 @@ mod pass;
 pub mod resource_usage;
 mod target;
 mod transfer;
+mod transfer_validation;
 
 pub use pass::{
     AccelerationStructureBuild, AccelerationStructureBuildPass, ComputePass, DispatchCommand,

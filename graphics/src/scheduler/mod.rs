@@ -272,6 +272,10 @@ impl FrameSchedule {
     ///
     /// # Errors
     ///
+    /// Transfer parameters are validated before recording any commands from
+    /// this graph. Invalid transfers report the pass name and operation index;
+    /// the schedule remains usable after rejection.
+    ///
     /// Returns an error if a swapchain-writing graph was already submitted this frame:
     /// the acquire/present semaphore pair exists once per frame, so a second
     /// swapchain writer would run unsynchronized against the presentation
@@ -294,6 +298,7 @@ impl FrameSchedule {
                 "a swapchain-writing graph was already submitted this frame".into(),
             ));
         }
+        graph.validate_transfers(&self.device)?;
         let fence = Fence::new_gpu(Arc::clone(self.device.instance()))?;
 
         #[cfg(debug_assertions)]

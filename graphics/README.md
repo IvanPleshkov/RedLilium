@@ -45,6 +45,39 @@ There is one live frame pipeline per graphics instance and one active schedule p
 pipeline. `submit_with_mode` selects Strict compilation when ambiguous writers
 should be treated as errors instead of using addition order.
 
+### Transfer validation
+
+Before recording commands, `submit` validates every transfer operation in the
+graph on all backends, including Dummy. Invalid parameters return
+`GraphicsError::InvalidParameter` with the pass name and operation index; no
+commands from that graph execute, and the schedule remains usable. Unsupported
+mip generation returns `FeatureNotSupported`.
+
+Validation checks resource ownership, usage flags, pending CPU mappings, buffer
+ranges, mip/layer bounds, formats, sample counts, and copy layouts. The common
+contract includes:
+
+- Buffer copies and nonempty writes require 4-byte aligned offsets and sizes.
+  CPU readback requires `MAP_READ`, an 8-byte aligned offset, and a 4-byte aligned
+  size. Empty writes and readbacks are allowed within buffer bounds.
+- Buffer/texture offsets must be aligned to both 4 bytes and the format block
+  size. Copies spanning multiple block rows or images need a 256-byte aligned
+  row pitch. The last row only needs its actual texel bytes, without trailing
+  padding. Compressed copies may end at a mip edge smaller than a block.
+- Copy regions must be nonempty and have nonzero extents. Array layers do not
+  shrink with mip level; 3D depth does. Buffer/texture copies require one sample.
+  Depth/stencil and multisampled texture copies cover the full mip width and
+  height. Buffer copies of combined depth/stencil or `Depth24Plus`, and uploads
+  of `Depth32Float`, are unsupported by the common contract.
+- Texture copies require matching dimension classes, sample counts, and formats
+  (linear/sRGB counterparts are compatible). Source and destination must be
+  different resources, even for disjoint buffer ranges or texture subresources.
+  In-place texture copies need subresource tracking, which is not implemented.
+- Mip generation requires `COPY_SRC | COPY_DST` and, for multiple levels, a
+  single-sampled 2D texture with a supported format. A single level is a no-op.
+
+`upload_texture_data` and `upload_texture_level` prepare staging data with the
+required padding; the destination upload is still an ordered graph operation.
 
 ### Public API boundary
 
