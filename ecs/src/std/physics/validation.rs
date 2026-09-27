@@ -124,6 +124,9 @@ mod dim2 {
     impl Collider2D {
         pub(in crate::std::physics) fn validate(&self, entity: Entity) -> Result<(), SystemError> {
             material(entity, self.friction, self.restitution, self.density)?;
+            if let Some(settings) = self.contact_force_events {
+                nonnegative(entity, "contact_force_events.min_force", settings.min_force)?;
+            }
             match &self.shape {
                 ColliderShape2D::Ball { radius } => positive(entity, "radius", *radius)?,
                 ColliderShape2D::Cuboid { half_extents } => {
@@ -183,6 +186,9 @@ mod dim3 {
     impl Collider3D {
         pub(in crate::std::physics) fn validate(&self, entity: Entity) -> Result<(), SystemError> {
             material(entity, self.friction, self.restitution, self.density)?;
+            if let Some(settings) = self.contact_force_events {
+                nonnegative(entity, "contact_force_events.min_force", settings.min_force)?;
+            }
             match &self.shape {
                 ColliderShape3D::Ball { radius } => positive(entity, "radius", *radius)?,
                 ColliderShape3D::Cuboid { half_extents } => {

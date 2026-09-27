@@ -13,7 +13,7 @@ use super::world2d::{ImpulseJoint2DHandle, PhysicsWorld2D, RigidBody2DHandle};
 ///
 /// For 2D, the X/Y rapier position maps to the Transform's X/Y translation,
 /// and the rapier rotation angle maps to a Z-axis rotation quaternion.
-/// Publishes collision transitions after the step when the corresponding Events queue
+/// Publishes collision transitions and contact-force events after the step when each Events queue
 /// is registered. Enabled tracking without that queue returns InvalidConfiguration
 /// before simulation advances. See [`super::events2d::CollisionEvent2D`].
 pub struct StepPhysics2D;
@@ -22,10 +22,13 @@ impl crate::System for StepPhysics2D {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) -> Result<(), crate::SystemError> {
         use super::control2d::{KinematicTarget2D, KinematicVelocity2D, PhysicsPose2D};
-        use super::events2d::CollisionEvent2D;
+        use super::events2d::{CollisionEvent2D, ContactForceEvent2D};
         let events_available = ctx
             .raw_world()
             .has_resource::<crate::Events<CollisionEvent2D>>();
+        let force_events_available = ctx
+            .raw_world()
+            .has_resource::<crate::Events<ContactForceEvent2D>>();
         let fixed_dt = {
             let world = ctx.raw_world();
             world
@@ -47,6 +50,11 @@ impl crate::System for StepPhysics2D {
                         message:
                             "collision tracking requires world.add_event::<CollisionEvent2D>()"
                                 .into(),
+                    });
+                }
+                if physics.collision_events.forces.requires_queue() && !force_events_available {
+                    return Err(crate::SystemError::InvalidConfiguration {
+                        message: "contact force tracking requires world.add_event::<ContactForceEvent2D>()".into(),
                     });
                 }
                 // Validate the whole batch before changing motion or advancing time.
@@ -155,6 +163,17 @@ impl crate::System for StepPhysics2D {
             )>()
             .execute(|(mut physics, mut events)| {
                 for event in physics.collision_events.pending.drain(..) {
+                    events.send(event);
+                }
+            });
+        }
+        if force_events_available {
+            ctx.lock::<(
+                crate::ResMut<PhysicsWorld2D>,
+                crate::ResMut<crate::Events<ContactForceEvent2D>>,
+            )>()
+            .execute(|(mut physics, mut events)| {
+                for event in physics.collision_events.forces.pending.drain(..) {
                     events.send(event);
                 }
             });

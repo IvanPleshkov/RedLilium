@@ -19,7 +19,7 @@ use redlilium_core::math::nalgebra::UnitQuaternion;
 ///
 /// Requires a [`PhysicsWorld3D`] resource and entities with
 /// [`RigidBody3DHandle`] + [`Transform`](crate::Transform) components.
-/// Publishes collision transitions after the step when the corresponding Events queue
+/// Publishes collision transitions and contact-force events after the step when each Events queue
 /// is registered. Enabled tracking without that queue returns InvalidConfiguration
 /// before simulation advances. See [`super::events3d::CollisionEvent3D`].
 pub struct StepPhysics3D;
@@ -28,10 +28,13 @@ impl crate::System for StepPhysics3D {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) -> Result<(), crate::SystemError> {
         use super::control3d::{KinematicTarget3D, KinematicVelocity3D, PhysicsPose3D};
-        use super::events3d::CollisionEvent3D;
+        use super::events3d::{CollisionEvent3D, ContactForceEvent3D};
         let events_available = ctx
             .raw_world()
             .has_resource::<crate::Events<CollisionEvent3D>>();
+        let force_events_available = ctx
+            .raw_world()
+            .has_resource::<crate::Events<ContactForceEvent3D>>();
         let fixed_dt = {
             let world = ctx.raw_world();
             world
@@ -53,6 +56,11 @@ impl crate::System for StepPhysics3D {
                         message:
                             "collision tracking requires world.add_event::<CollisionEvent3D>()"
                                 .into(),
+                    });
+                }
+                if physics.collision_events.forces.requires_queue() && !force_events_available {
+                    return Err(crate::SystemError::InvalidConfiguration {
+                        message: "contact force tracking requires world.add_event::<ContactForceEvent3D>()".into(),
                     });
                 }
                 // Validate the whole batch before changing motion or advancing time.
@@ -169,6 +177,17 @@ impl crate::System for StepPhysics3D {
             )>()
             .execute(|(mut physics, mut events)| {
                 for event in physics.collision_events.pending.drain(..) {
+                    events.send(event);
+                }
+            });
+        }
+        if force_events_available {
+            ctx.lock::<(
+                crate::ResMut<PhysicsWorld3D>,
+                crate::ResMut<crate::Events<ContactForceEvent3D>>,
+            )>()
+            .execute(|(mut physics, mut events)| {
+                for event in physics.collision_events.forces.pending.drain(..) {
                     events.send(event);
                 }
             });

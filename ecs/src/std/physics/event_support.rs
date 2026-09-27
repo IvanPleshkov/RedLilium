@@ -1,7 +1,8 @@
 // One implementation instantiated with each Rapier dimension's concrete types.
 macro_rules! collision_events {
     ($participant:ident, $event:ident) => {
-        /// Identity and sensor role captured when tracking the pair starts.
+        /// Identity and sensor role snapshot. Collision transitions retain the
+        /// snapshot from the start of tracking; force events capture it each step.
         /// Handles and the full entity identity may already be dead when this is read.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct $participant {
@@ -48,7 +49,7 @@ macro_rules! collision_events {
 
         // Rapier's handler is Send + Sync and receives &self, including in parallel builds.
         #[derive(Default)]
-        struct Collector(std::sync::Mutex<Vec<RapierEvent>>);
+        struct Collector(std::sync::Mutex<Vec<RapierEvent>>, ForceCollector);
         impl EventHandler for Collector {
             // PhysicsWorld keeps its required soft-body set empty.
             fn handle_soft_body_tear_event(&self, _: &SoftBodySet, _: &SoftBodyTearEvent) {}
@@ -65,17 +66,19 @@ macro_rules! collision_events {
             fn handle_contact_force_event(
                 &self,
                 _: Real,
-                _: &RigidBodySet,
+                bodies: &RigidBodySet,
                 _: &ColliderSet,
-                _: &ContactPair,
+                pair: &ContactPair,
                 _: Real,
             ) {
+                self.1.collect(bodies, pair);
             }
         }
 
         #[derive(Default)]
         pub(super) struct EventState {
             step: u64,
+            pub(super) forces: ForceState,
             // Regular sync allocates Rapier bodies before deferred handle publication.
             // Keep their identities available to events until publication or rollback.
             pub(super) pending_entities: std::collections::HashMap<RigidBodyHandle, crate::Entity>,
@@ -107,6 +110,7 @@ macro_rules! collision_events {
             }
 
             pub(super) fn collider_removed(&mut self, handle: ColliderHandle) {
+                self.forces.remove(handle);
                 if self.enabled.remove(&handle) || self.adjacent.contains_key(&handle) {
                     self.dirty.insert(handle);
                 }
@@ -214,11 +218,20 @@ macro_rules! collision_events {
 
             pub(super) fn finish(
                 &mut self,
+                dt: Real,
                 colliders: &ColliderSet,
                 bodies: &RigidBodySet,
                 narrow: &NarrowPhase,
                 entities: &std::collections::HashMap<RigidBodyHandle, crate::Entity>,
             ) {
+                self.forces.finish(
+                    &mut self.collector.1,
+                    self.step,
+                    dt,
+                    colliders,
+                    entities,
+                    &self.pending_entities,
+                );
                 // Reuse the callback buffer; no world access, user callbacks or queue
                 // mutation is performed inside Rapier's callback.
                 let mut raw = std::mem::take(self.collector.0.get_mut().unwrap());

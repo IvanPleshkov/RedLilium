@@ -205,11 +205,24 @@ impl PhysicsWorld3D {
                 });
                 live.set_collision_groups(groups);
             }
-            live.set_active_events(if collider.collision_events.is_some() {
-                ActiveEvents::COLLISION_EVENTS
-            } else {
-                ActiveEvents::empty()
-            });
+            live.set_active_events(collider.active_events());
+            if old_collider.contact_force_events != collider.contact_force_events {
+                live.set_contact_force_event_threshold(
+                    collider
+                        .contact_force_events
+                        .map_or(0.0, |s| s.min_force as Real),
+                );
+                self.collision_events
+                    .forces
+                    .configure(*collider_handle, live);
+                // Rapier's event flag setter does not dirty existing solver pairs.
+                let groups = live.collision_groups();
+                live.set_collision_groups(InteractionGroups {
+                    filter: groups.filter ^ Group::GROUP_1,
+                    ..groups
+                });
+                live.set_collision_groups(groups);
+            }
             if old_collider.sensor != collider.sensor
                 || old_collider.collision_events != collider.collision_events
                 || old_collider.collision_groups != collider.collision_groups

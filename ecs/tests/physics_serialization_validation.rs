@@ -77,6 +77,7 @@ macro_rules! descriptor_tests {
                     .with_density(2.5)
                     .with_sensor(Some(physics::SensorSettings::default()))
                     .with_collision_events((i % 2 == 0).then(physics::CollisionEventSettings::default))
+                    .with_contact_force_events((i % 2 == 0).then_some(physics::ContactForceSettings { min_force: 42.5 }))
                     .with_collision_types(match i {
                         0 => None,
                         1 => Some(physics::CollisionTypes::none()),
@@ -217,6 +218,7 @@ macro_rules! descriptor_tests {
         fn invalid_settings() -> Vec<(Body, Collider, &'static str)> {
             let mut result = Vec::new();
             for v in [-1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                result.push((Body::default(), Collider::default().with_contact_force_events(Some(physics::ContactForceSettings { min_force: v })), "contact_force_events.min_force"));
                 result.push((
                     Body::dynamic().with_linear_damping(v),
                     Collider::default(),

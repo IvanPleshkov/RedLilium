@@ -131,6 +131,7 @@ All numeric settings must be finite. Additional constraints are:
 | Gravity scale | Any finite value, including negative |
 | Radius, cuboid half extents, cylinder half height | Positive |
 | Capsule half height | Nonnegative (zero gives a sphere/circle) |
+| Contact-force event threshold | Nonnegative |
 | Joint anchors | Finite coordinates |
 | Joint axis | Finite, nonzero direction; normalized during conversion |
 | Joint endpoints | Different entities; unavailable bodies remain pending |
@@ -234,7 +235,7 @@ using `.into()`, including for free-collider builders and scene queries:
 ```rust,ignore
 let filter = QueryFilter::default()
     .groups(CollisionGroups::new(PLAYER, WORLD | ENEMY).into());
-let hit = physics.cast_ray_filtered(origin, direction, max_toi, filter);
+let hit = physics.cast_ray(origin, displacement, RayCastOptions::default(), filter);
 ```
 
 Query masks use the same bilateral rule: the query's memberships must also be
@@ -379,6 +380,63 @@ Tracking keeps snapshots and adjacency only for observed pairs. Configuration
 changes inspect the changed colliders' neighborhoods rather than scanning every
 contact on every step. Collision force, normal and contact-point events are not
 part of this API.
+
+## Contact-force events
+
+Force reporting is independent of collision transitions. Enable it per collider
+and register its own event queue:
+
+```rust,ignore
+use redlilium_ecs::physics::ContactForceSettings;
+use redlilium_ecs::physics::events3d::ContactForceEvent3D;
+
+world.add_event::<ContactForceEvent3D>();
+let collider = Collider3D::ball(0.5)
+    .with_contact_force_events(Some(ContactForceSettings { min_force: 100.0 }));
+```
+
+`None` disables reporting; the default settings enable a threshold of zero.
+The threshold must be finite and nonnegative. Settings are serialized, exposed
+in the inspector, and applied by body sync without replacing handles. Enabled
+reporting without `Events<ContactForceEvent3D>` returns `InvalidConfiguration`
+before any motion is applied or simulation advances. The 2D equivalent is
+`events2d::ContactForceEvent2D`.
+
+Each event describes **one pair over one complete physics step**:
+
+- `step`, `a`, `b`: the same world counter and canonical participant snapshots as
+  collision events, including entity generations. Reading them does not require
+  the bodies or colliders to remain alive.
+- `dt`: the full step duration in seconds.
+- `normal_impulse`: the sum of normal impulse magnitudes across all solver
+  contacts and all internal CCD substeps. Friction impulses are excluded.
+- `average_force()`: `normal_impulse / dt`, compared strictly against the
+  thresholds of the participants that enabled reporting. Exceeding either
+  threshold is sufficient; enabling both sides does not duplicate the event.
+- `strongest_contact`: one representative contact with `point`, `normal`, and
+  `normal_impulse`. It is the largest individual point impulse in any CCD
+  substep, not the sum for a tracked contact point across substeps. The point is
+  the midpoint of the solver's world-space surface points when collected. The
+  normal points from canonical participant `a` toward `b`. Ties choose one of
+  the equally strong contacts, without promising which one.
+
+Scalar measurements use `f64` with either backend precision; points and normals
+use the engine's `Vec2`/`Vec3`. In a scene using meters, kilograms and seconds,
+impulse is measured in N·s and force in N. The force is an average over the
+whole step, not a peak force or a measure of damage.
+
+An awake supporting contact can report every step above threshold, even without
+a new collision. Sensors and sleeping pairs produce no force events. Collision
+groups and body-type filtering still apply. Gameplay decides what constitutes
+an impact and handles sound, damage and cooldowns. There is no force-specific
+`Started`/`Stopped` state.
+
+Events use the usual `Events<T>`/`EventCursor<T>` lifetime, so several fixed steps
+in one frame remain individually readable. Pair order within a step is not
+specified. Standalone colliders may enable Rapier's
+`ActiveEvents::CONTACT_FORCE_EVENTS` and set `contact_force_event_threshold`
+before insertion. The world captures that threshold and uses an internal zero
+threshold to collect every CCD contribution before applying the full-step test.
 
 ## 3D Physics
 
@@ -553,26 +611,99 @@ scene serialization and survive ECS body cleanup. Removal returns `false` for
 stale handles or any collider attached to a body, so it cannot remove an ECS
 body's collider. The physics demo uses this path for its custom terrain.
 
-### Ray queries
+### Spatial queries
 
-`cast_ray(origin, dir, max_toi)` returns `Option<RayHit3D>` / `Option<RayHit2D>`.
-A hit contains the collider handle, optional body handle, optional ECS entity,
-and `toi`. A collider with no entity still produces a hit. `toi` parameterizes
-`origin + dir * toi`; it is a distance only when `dir` has unit length.
+`PhysicsWorld2D/3D` offers three read-only operations with matching semantics:
 
-`cast_ray_filtered` accepts Rapier's `QueryFilter` for groups, body/collider
-exclusions, sensor filtering and custom predicates. Filters run before choosing
-the closest hit. For an ECS-only query:
+```rust,ignore
+use redlilium_ecs::physics::{RayCastOptions, ShapeCastOptions};
+use redlilium_ecs::physics::queries3d::QueryFilter;
+use std::ops::ControlFlow;
+
+let ray_hit = physics.cast_ray(
+    origin, displacement, RayCastOptions::default(), filter,
+)?;
+let shape_hit = physics.cast_shape(
+    &shape, pose, displacement, ShapeCastOptions::default(), filter,
+)?;
+let completed = physics.visit_overlaps(&shape, pose, filter, |target| {
+    targets.push(target); // Reuse a caller-owned buffer, or break on the first hit.
+    ControlFlow::Continue(())
+})?;
+```
+
+`shape` is an existing `ColliderShape2D/3D` descriptor and `pose` is a
+`PhysicsPose2D/3D`, without visual scale. Query primitives are borrowed from
+stack storage; no temporary collider or shared geometry allocation is created.
+They can still hit complex scene geometry, including free terrain colliders.
+
+Casts return `Result<Option<Hit>, PhysicsQueryError>`: `Ok(None)` is a valid
+query with no hit, while malformed input is an error. Origins, translations,
+rotations and displacements must be finite; displacements must be nonzero and
+have finite endpoints. A 3D quaternion must have finite squared norm at least
+`1e-12` and is normalized. Shape dimensions follow the same rules as collider
+descriptors. `target_distance` must be finite and nonnegative. Validation runs
+even in an empty world, before invoking an overlap visitor.
+
+Both casts traverse the finite displacement vector and report a `fraction` in
+`[0, 1]`. The reached translation is `origin + displacement * fraction`; the
+travelled distance is `displacement.norm() * fraction`. There is no direction
+normalization requirement or separate maximum time/distance argument. Shape
+casts hold orientation fixed and treat other colliders at their physical poses,
+without predicting their motion.
+
+Results live in `physics::queries2d/queries3d` and are also re-exported by the
+world modules. `RayHit*` and `ShapeCastHit*` contain a `QueryTarget*` with collider
+handle, optional body handle and optional ECS entity. Free colliders remain
+valid hits with no ECS owner. These are snapshots, not references; handles and
+full entity identities may already be dead when read later.
+
+`RayHit*` contains `fraction`, world-space `point`, and an optional unit
+`normal`. For closed shapes a surface hit's normal points outward, including
+an exit hit; open surfaces use the backend's hit-face orientation. Default
+`RayCastOptions { solid: true }` reports a hit at fraction zero when the origin
+is inside a collider. Its point is the origin and its normal is `None`, since
+there is no unique hit surface. `solid: false` seeks the exit surface instead.
+Degenerate normals are also represented as `None`. For a compound, hollow rays
+select a boundary of an individual part, not the exit from the union of parts.
+
+`ShapeCastHit*` contains `fraction`, `status`, and optional `geometry` with
+world-space `point_on_collider`, `point_on_shape` at impact, and a unit normal
+outward from the obstacle. `ShapeCastOptions` defaults to zero clearance and
+`stop_at_penetration: true`. Positive `target_distance` reports a hit before
+touching, leaving that clearance. `stop_at_penetration: false` permits skipping
+initial contacts when moving apart; it does not discard every initial overlap.
+
+`ShapeCastStatus` distinguishes `Converged`, `InitialContact` (including being
+within clearance), `OutOfIterations`, and `Failed`. The latter two retain the
+backend's conservative hit estimate instead of pretending the way is clear.
+Geometry is optional when the backend cannot supply usable points/normals;
+a nonfinite or out-of-range fraction returns `PhysicsQueryError::InvalidResult`.
+Initial-contact geometry is resolved through a contact query, so the reported
+points are on the surfaces rather than penetration-scaled sweep witnesses.
+
+`visit_overlaps` tests actual geometry, not merely intersecting bounding boxes.
+Each collider is visited once (including compounds), in unspecified order;
+results are not deduplicated by entity. The visitor returns `ControlFlow<()>`,
+and the method returns `Result<ControlFlow<()>, PhysicsQueryError>` to distinguish
+completion from early exit. It does not allocate a result array or sort results.
+
+Every operation takes Rapier's `QueryFilter`, re-exported from each query module.
+It supports groups, body/collider exclusions, sensors, body types and a custom
+predicate. Filtering runs **before** selecting the closest hit. For example:
 
 ```rust,ignore
 let only_ecs = |_: ColliderHandle, collider: &Collider| {
     collider.parent().and_then(|body| physics.entity_for_body(body)).is_some()
 };
-let hit = physics.cast_ray_filtered(
-    origin, dir, max_toi, QueryFilter::default().predicate(&only_ecs),
-);
+let hit = physics.cast_ray(
+    origin, displacement, RayCastOptions::default(),
+    QueryFilter::default().exclude_sensors().predicate(&only_ecs),
+)?;
 ```
 
-Queries use the broad phase from the last physics step. After syncing new
+Queries use the broad phase maintained by the physics step. After syncing new
 objects or requesting teleports, run `StepPhysics*` before querying their new
-positions.
+positions. A query never applies pending commands, updates the search structure,
+or advances simulation. It does not promise a coherent old snapshot if the
+collider data has been edited since that broad phase was updated.

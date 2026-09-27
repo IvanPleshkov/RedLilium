@@ -68,12 +68,15 @@ pub mod control3d;
 
 #[cfg(test)]
 mod boundary_tests;
+#[cfg(test)]
+mod query_tests;
 
 mod event_support;
 mod events;
+mod force_support;
 mod settings;
 pub use events::{CollisionPhase, CollisionStopReason};
-pub use settings::{CcdSettings, CollisionEventSettings, SensorSettings};
+pub use settings::{CcdSettings, CollisionEventSettings, ContactForceSettings, SensorSettings};
 #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
 pub mod events2d;
 #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
@@ -84,3 +87,11 @@ pub use groups::CollisionGroups;
 
 mod collision_types;
 pub use collision_types::CollisionTypes;
+
+mod queries;
+mod query_support;
+pub use queries::{PhysicsQueryError, RayCastOptions, ShapeCastOptions, ShapeCastStatus};
+#[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
+pub mod queries2d;
+#[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
+pub mod queries3d;

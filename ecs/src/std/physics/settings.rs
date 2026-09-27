@@ -62,3 +62,50 @@ optional_settings_field!(
     CcdSettings,
     "Extended CCD for dynamic bodies against non-bullet moving bodies. Automatic CCD against fixed colliders remains active when unchecked."
 );
+
+/// Requests normal contact-force events. `None` on a collider disables reporting.
+/// The finite, nonnegative threshold applies to the mean force over a full physics
+/// step (sum of normal impulse magnitudes / step duration), strictly greater than
+/// `min_force`. Sensors never produce force events. Friction is not included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ContactForceSettings {
+    pub min_force: f32,
+}
+
+impl crate::ComponentField for Option<ContactForceSettings> {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        _: &crate::FieldInspectCtx<'_>,
+    ) -> Option<Self> {
+        ui.push_id(name, |ui| {
+            let mut enabled = self.is_some();
+            let mut changed = ui.checkbox(&mut enabled, name).changed();
+            let mut settings = self.unwrap_or_default();
+            if enabled {
+                ui.horizontal(|ui| {
+                    ui.label("Minimum force");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut settings.min_force).range(0.0..=f32::MAX))
+                        .changed();
+                });
+            }
+            changed.then(|| enabled.then_some(settings))
+        })
+        .inner
+    }
+    fn serialize_field(
+        &self,
+        name: &str,
+        ctx: &mut crate::serialize::SerializeContext<'_>,
+    ) -> Result<(), crate::serialize::SerializeError> {
+        ctx.write_serde(name, self)
+    }
+    fn deserialize_field(
+        name: &str,
+        ctx: &mut crate::serialize::DeserializeContext<'_>,
+    ) -> Result<Self, crate::serialize::DeserializeError> {
+        ctx.read_serde(name)
+    }
+}

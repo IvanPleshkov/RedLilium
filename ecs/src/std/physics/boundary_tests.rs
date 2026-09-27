@@ -64,28 +64,43 @@ macro_rules! world_boundary_tests {
             let mut dir = GameVector::zeros();
             dir.x = 1.0;
             let hit = physics
-                .cast_ray_filtered(
+                .cast_ray(
                     origin,
-                    dir,
-                    10.0,
+                    dir * 10.0,
+                    crate::physics::RayCastOptions::default(),
                     QueryFilter::default().groups(CollisionGroups::new(4, 2).into()),
                 )
+                .unwrap()
                 .unwrap();
-            assert_eq!(hit.collider, collider);
-            assert_eq!(hit.entity, Some(entity));
+            assert_eq!(hit.target.collider, collider);
+            assert_eq!(hit.target.entity, Some(entity));
             // Query membership must also be accepted by the collider.
             assert!(
                 physics
-                    .cast_ray_filtered(
+                    .cast_ray(
                         origin,
-                        dir,
-                        10.0,
+                        dir * 10.0,
+                        crate::physics::RayCastOptions::default(),
                         QueryFilter::default().groups(CollisionGroups::new(8, 2).into()),
                     )
+                    .unwrap()
                     .is_none()
             );
             // Queries without a group filter still see every collider.
-            assert_eq!(physics.cast_ray(origin, dir, 10.0).unwrap().collider, free);
+            assert_eq!(
+                physics
+                    .cast_ray(
+                        origin,
+                        (dir) * 10.0,
+                        crate::physics::RayCastOptions::default(),
+                        QueryFilter::default()
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .target
+                    .collider,
+                free
+            );
         }
 
         #[test]
@@ -94,33 +109,70 @@ macro_rules! world_boundary_tests {
             let origin = GameVector::zeros();
             let mut dir = GameVector::zeros();
             dir.x = 1.0;
-            let hit = physics.cast_ray(origin, dir, 10.0).unwrap();
-            assert_eq!(hit.collider, free);
-            assert_eq!(hit.body, None);
-            assert_eq!(hit.entity, None);
-            assert!((hit.toi - 1.5).abs() < 1e-5);
+            let hit = physics
+                .cast_ray(
+                    origin,
+                    (dir) * 10.0,
+                    crate::physics::RayCastOptions::default(),
+                    QueryFilter::default(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(hit.target.collider, free);
+            assert_eq!(hit.target.body, None);
+            assert_eq!(hit.target.entity, None);
+            assert!((hit.fraction - 0.15).abs() < 1e-5);
             let only_ecs = |_: ColliderHandle, c: &Collider| {
                 c.parent()
                     .and_then(|h| physics.entity_for_body(h))
                     .is_some()
             };
             let hit = physics
-                .cast_ray_filtered(
+                .cast_ray(
                     origin,
-                    dir,
-                    10.0,
+                    dir * 10.0,
+                    crate::physics::RayCastOptions::default(),
                     QueryFilter::default().predicate(&only_ecs),
                 )
+                .unwrap()
                 .unwrap();
-            assert_eq!(hit.collider, collider);
-            assert_eq!(hit.body, Some(body));
-            assert_eq!(hit.entity, Some(entity));
-            assert!((hit.toi - 4.5).abs() < 1e-5);
-            // TOI parameterizes the ray; a non-unit direction is not normalized silently.
-            let hit = physics.cast_ray(origin, dir * 2.0, 10.0).unwrap();
-            assert!((hit.toi - 0.75).abs() < 1e-5);
-            assert!(physics.cast_ray(origin, dir, 1.0).is_none());
-            assert!(physics.cast_ray(origin, -dir, 10.0).is_none());
+            assert_eq!(hit.target.collider, collider);
+            assert_eq!(hit.target.body, Some(body));
+            assert_eq!(hit.target.entity, Some(entity));
+            assert!((hit.fraction - 0.45).abs() < 1e-5);
+            // Doubling displacement halves the hit fraction without changing the surface.
+            let hit = physics
+                .cast_ray(
+                    origin,
+                    (dir * 2.0) * 10.0,
+                    crate::physics::RayCastOptions::default(),
+                    QueryFilter::default(),
+                )
+                .unwrap()
+                .unwrap();
+            assert!((hit.fraction - 0.075).abs() < 1e-5);
+            assert!(
+                physics
+                    .cast_ray(
+                        origin,
+                        (dir) * 1.0,
+                        crate::physics::RayCastOptions::default(),
+                        QueryFilter::default()
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                physics
+                    .cast_ray(
+                        origin,
+                        (-dir) * 10.0,
+                        crate::physics::RayCastOptions::default(),
+                        QueryFilter::default()
+                    )
+                    .unwrap()
+                    .is_none()
+            );
         }
 
         #[test]
@@ -132,10 +184,18 @@ macro_rules! world_boundary_tests {
             physics.step();
             let mut dir = GameVector::zeros();
             dir.x = 1.0;
-            let hit = physics.cast_ray(GameVector::zeros(), dir, 10.0).unwrap();
-            assert_eq!(hit.collider, collider);
-            assert_eq!(hit.body, Some(body));
-            assert_eq!(hit.entity, None);
+            let hit = physics
+                .cast_ray(
+                    GameVector::zeros(),
+                    dir * 10.0,
+                    crate::physics::RayCastOptions::default(),
+                    QueryFilter::default(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(hit.target.collider, collider);
+            assert_eq!(hit.target.body, Some(body));
+            assert_eq!(hit.target.entity, None);
         }
 
         #[test]

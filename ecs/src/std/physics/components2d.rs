@@ -5,7 +5,10 @@
 //! [`SyncPhysicsJoints2D`](super::physics2d::SyncPhysicsJoints2D) systems
 //! to automatically materialize these descriptors into rapier physics objects.
 
-use super::{CcdSettings, CollisionEventSettings, CollisionGroups, CollisionTypes, SensorSettings};
+use super::{
+    CcdSettings, CollisionEventSettings, CollisionGroups, CollisionTypes, ContactForceSettings,
+    SensorSettings,
+};
 use redlilium_core::math::Vec2;
 
 /// 2D collider shape.
@@ -131,6 +134,8 @@ pub struct Collider2D {
     pub sensor: Option<SensorSettings>,
     /// Opt-in collision tracking. Register Events<CollisionEvent2D> before stepping.
     pub collision_events: Option<CollisionEventSettings>,
+    /// Normal contact forces, independently enabled from collision transitions.
+    pub contact_force_events: Option<ContactForceSettings>,
     /// Optional group filtering. None allows all groups; both sides must allow a pair.
     pub collision_groups: Option<CollisionGroups>,
     /// None uses the default dynamic-body pairs. Either collider can enable a pair.
@@ -197,6 +202,26 @@ impl Collider2D {
         self
     }
 
+    pub(super) fn active_events(&self) -> super::rapier2d::prelude::ActiveEvents {
+        use super::rapier2d::prelude::ActiveEvents;
+        let mut flags = ActiveEvents::empty();
+        flags.set(
+            ActiveEvents::COLLISION_EVENTS,
+            self.collision_events.is_some(),
+        );
+        flags.set(
+            ActiveEvents::CONTACT_FORCE_EVENTS,
+            self.contact_force_events.is_some(),
+        );
+        flags
+    }
+
+    /// Enables normal contact-force reporting, or disables it with `None`.
+    pub fn with_contact_force_events(mut self, v: Option<ContactForceSettings>) -> Self {
+        self.contact_force_events = v;
+        self
+    }
+
     /// Opts into pair transitions. Register Events<CollisionEvent2D> before stepping.
     pub fn with_collision_events(mut self, v: Option<CollisionEventSettings>) -> Self {
         self.collision_events = v;
@@ -213,6 +238,7 @@ impl Default for Collider2D {
             density: 1.0,
             sensor: None,
             collision_events: None,
+            contact_force_events: None,
             collision_groups: None,
             collision_types: None,
         }
@@ -372,11 +398,11 @@ impl Collider2D {
                     ActiveHooks::empty()
                 },
             )
-            .active_events(if self.collision_events.is_some() {
-                ActiveEvents::COLLISION_EVENTS
-            } else {
-                ActiveEvents::empty()
-            })
+            .active_events(self.active_events())
+            .contact_force_event_threshold(
+                self.contact_force_events
+                    .map_or(0.0, |s| s.min_force as Real),
+            )
             .build()
     }
 }

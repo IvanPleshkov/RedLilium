@@ -41,15 +41,7 @@ pub struct PhysicsInterpolation {
     pub cur_rotation: redlilium_core::math::Quat,
 }
 
-/// A ray hit independent of whether the collider belongs to an ECS entity.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RayHit3D {
-    pub collider: ColliderHandle,
-    pub body: Option<RigidBodyHandle>,
-    pub entity: Option<crate::Entity>,
-    /// Ray parameter; distance only when the direction has unit length.
-    pub toi: f32,
-}
+pub use super::queries3d::{QueryTarget3D, RayHit3D, ShapeCastGeometry3D, ShapeCastHit3D};
 
 /// Temporary access to a body's motion. Dereferences to a read-only Rapier body;
 /// only the explicit motion methods below can mutate it. Descriptor settings
@@ -139,8 +131,8 @@ impl BodyMotion3D<'_> {
 /// ```ignore
 /// // In a system, cast a ray and get the hit entity:
 /// ctx.lock::<(Res<PhysicsWorld3D>,)>().execute(|(physics,)| {
-///     if let Some(hit) = physics.cast_ray(origin, dir, 100.0) {
-///         // `hit.entity` is Some(entity) for an ECS-managed body
+///     if let Ok(Some(hit)) = physics.cast_ray(origin, displacement, RayCastOptions::default(), QueryFilter::default()) {
+///         // `hit.target.entity` is Some(entity) for an ECS-managed body
 ///     }
 /// });
 /// ```
@@ -285,6 +277,7 @@ impl PhysicsWorld3D {
             self.collision_events.handler(),
         );
         self.collision_events.finish(
+            self.integration_parameters.dt,
             &self.colliders,
             &self.bodies,
             &self.narrow_phase,
@@ -297,6 +290,9 @@ impl PhysicsWorld3D {
     /// The pose is world-space. It is not serialized or removed by ECS body sync.
     pub fn add_free_collider(&mut self, collider: Collider) -> ColliderHandle {
         let handle = self.colliders.insert(collider);
+        self.collision_events
+            .forces
+            .configure(handle, &mut self.colliders[handle]);
         self.collision_events
             .collider_changed(handle, &self.colliders[handle]);
         handle
@@ -338,6 +334,9 @@ impl PhysicsWorld3D {
         let handle = self
             .colliders
             .insert_with_parent(collider, parent, &mut self.bodies);
+        self.collision_events
+            .forces
+            .configure(handle, &mut self.colliders[handle]);
         self.collision_events
             .collider_changed(handle, &self.colliders[handle]);
         handle
@@ -396,49 +395,6 @@ impl PhysicsWorld3D {
             .copied()
             .filter(|handle| self.bodies.contains(*handle))
     }
-
-    /// Returns the nearest solid ray hit, including colliders without an ECS entity.
-    /// `toi` parameterizes `origin + dir * toi`; it is a distance only for unit `dir`.
-    /// Queries use the broad phase from the last physics step: run StepPhysics3D
-    /// after syncing bodies or applying teleports before querying their new positions.
-    pub fn cast_ray(
-        &self,
-        origin: redlilium_core::math::Vec3,
-        dir: redlilium_core::math::Vec3,
-        max_toi: f32,
-    ) -> Option<RayHit3D> {
-        self.cast_ray_filtered(origin, dir, max_toi, QueryFilter::default())
-    }
-
-    /// Like [`Self::cast_ray`], with Rapier collision groups, body/sensor exclusions
-    /// and a custom collider predicate applied before choosing the nearest hit.
-    pub fn cast_ray_filtered(
-        &self,
-        origin: redlilium_core::math::Vec3,
-        dir: redlilium_core::math::Vec3,
-        max_toi: f32,
-        filter: QueryFilter<'_>,
-    ) -> Option<RayHit3D> {
-        let ray = Ray::new(
-            Vector::new(origin.x as Real, origin.y as Real, origin.z as Real),
-            Vector::new(dir.x as Real, dir.y as Real, dir.z as Real),
-        );
-        let query_pipeline = self.broad_phase.as_query_pipeline(
-            self.narrow_phase.query_dispatcher(),
-            &self.bodies,
-            &self.colliders,
-            filter,
-        );
-        let (collider, toi) = query_pipeline.cast_ray(&ray, max_toi as Real, true)?;
-        let body = self.colliders.get(collider)?.parent();
-        let entity = body.and_then(|handle| self.entity_for_body(handle));
-        Some(RayHit3D {
-            collider,
-            body,
-            entity,
-            toi: toi as f32,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -447,6 +403,21 @@ mod tests {
     use redlilium_core::math::Vec3 as GameVector;
     type Physics = PhysicsWorld3D;
     super::super::boundary_tests::world_boundary_tests!();
+    use super::super::components3d::ColliderShape3D as ShapeDesc;
+    use super::super::control3d::PhysicsPose3D as QueryPose;
+    fn query_pose(translation: GameVector, angle: f32) -> QueryPose {
+        QueryPose {
+            translation,
+            rotation: redlilium_core::math::quat_from_rotation_z(angle),
+        }
+    }
+    fn extra_query_shapes(shapes: &mut Vec<ShapeDesc>) {
+        shapes.push(ShapeDesc::Cylinder {
+            half_height: 0.5,
+            radius: 0.5,
+        });
+    }
+    super::super::query_tests::spatial_query_tests!();
 
     #[test]
     fn physics_world_default() {
