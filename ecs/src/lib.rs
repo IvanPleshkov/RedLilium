@@ -82,7 +82,7 @@ pub use commands::CommandBuffer;
 pub use component::Component;
 pub use component_field::{ComponentField, FieldInspectCtx};
 pub use compute::IoRuntime;
-pub use compute::{ComputePool, TaskHandle};
+pub use compute::{ComputePool, QuiesceTimeout, TaskHandle};
 pub use ecs_macro::{Bundle, Component};
 pub use egui;
 pub use entity::Entity;

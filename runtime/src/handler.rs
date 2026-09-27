@@ -384,9 +384,9 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
             redlilium_ecs::EcsRunner::MultiThread(r) => r.compute().quiesce(quiesce_timeout),
         };
 
-        if quiesce_result >= quiesce_timeout {
+        if let Err(error) = quiesce_result {
             log::error!(
-                "Task quiescence timeout: some plugin tasks still executing after {:?}. \
+                "{error}: some plugin tasks still executing after {:?}. \
                  Unloading dylib now would cause UB (tasks jump into unmapped memory). \
                  ABORTING RELOAD and leaking dylib (bounded memory leak vs process UB).",
                 quiesce_timeout

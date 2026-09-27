@@ -92,6 +92,16 @@ Dropping a world stops workers only when it owns the last executor handle; a poo
 
 On WASM, queries run sequentially and create no workers; systems use the single-thread runner.
 
+### Compute task lifetime
+
+`ComputePool::active_count()` includes tasks being constructed, queued, polled by another thread, or destroyed. Admission acquires a lifetime counter before calling the task factory, and a task releases it only after its future and metadata have been destroyed. `pending_count()` remains the queue length; an empty queue does not establish quiescence. Runner `graceful_shutdown` uses the full active count and drains work without implicitly requesting cancellation.
+
+`quiesce(timeout)` returns `Result<(), QuiesceTimeout>`, with the remaining active count on timeout. Callers must stop external producers before waiting and keep them stopped through reload. Tasks spawned by existing tasks, including from their destructors, participate in the same accounting. A timeout leaves the pool usable but forbids unloading the guest. The time budget is cooperative: a blocking poll or destructor cannot be preempted.
+
+Polling and future destruction have generic panic boundaries inside the originating image. Panic payloads are converted into owned strings before returning to the host, and failures remain available through `TaskHandle::panic_message()`. `is_done()` becomes true after future destruction, including cancellation; receiving a result may happen earlier. Quiescence does not destroy results retained by handles or guest thread-local state: those owners must also be released, and guest execution threads joined, before module unload.
+
+Lifetime tracking adds one shared counter allocation per pool and one `Arc` clone per task, with no additional per-task allocation or per-poll counter update. The future remains a single boxed allocation. Wake-driven scheduling and sharing compute work with the system executor remain separate follow-up work.
+
 ### Deferred command failures
 
 Commands from `SystemContext` are collected by the runner and applied before exclusive systems and at the end of a run. Each flush attempts every command in queue order. A panicking command produces a `CommandError` containing its message and enqueue location (`file`, `line`, `column`); later commands and systems continue. Changes made before a panic remain in the world. Command application is not a transaction, and subsequent code sees that partial state.

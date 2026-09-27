@@ -457,14 +457,13 @@ pub fn reload_game(
 
     // 4. Game tasks must finish before the image unmaps (their futures'
     // code lives inside it).
-    let elapsed = runner.compute().quiesce(QUIESCE_TIMEOUT);
-    if elapsed >= QUIESCE_TIMEOUT {
+    if let Err(error) = runner.compute().quiesce(QUIESCE_TIMEOUT) {
         // Fail closed: keep the old module mapped (bounded leak, no UB) and
         // rebuild the world against it so the editor stays usable.
         host.register_into(&mut fresh);
         let restore = restore_into(&mut fresh, &snapshot, opts.aspect);
         let msg = format!(
-            "task quiescence timeout after {QUIESCE_TIMEOUT:?} — reload aborted, \
+            "{error} after {QUIESCE_TIMEOUT:?} — reload aborted, \
              old module kept mapped{}",
             restore
                 .as_ref()

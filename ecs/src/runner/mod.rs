@@ -179,8 +179,9 @@ impl EcsRunner {
 
     /// Gracefully shuts down the runner, completing pending compute tasks.
     ///
-    /// Ticks the compute pool until all tasks are drained or the time
-    /// budget is exceeded.
+    /// Ticks compute until all tasks, including concurrent polls and future
+    /// destructors, are drained or the time budget is exceeded. Stop producers
+    /// first; request cancellation separately when needed.
     pub fn graceful_shutdown(&self, time_budget: Duration) -> Result<(), ShutdownError> {
         match self {
             Self::SingleThread(runner) => runner.graceful_shutdown(time_budget),

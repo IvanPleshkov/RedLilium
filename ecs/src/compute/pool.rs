@@ -1,13 +1,12 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::sync::Mutex;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
-use log::warn;
 use redlilium_core::compute::{CancellationToken, Priority, reset_yield_timer};
 
 use crate::compute::EcsComputeContext;
@@ -22,7 +21,7 @@ use crate::compute::IoRuntime;
 struct TaskState {
     completed: AtomicBool,
     token: CancellationToken,
-    /// Panic message if the task panicked during polling.
+    /// Panic message if the task panicked during polling or destruction.
     panicked: Mutex<Option<String>>,
 }
 
@@ -77,7 +76,8 @@ impl<T> TaskHandle<T> {
         self.receiver.try_recv().ok()
     }
 
-    /// Returns whether the task has completed (non-destructive).
+    /// Returns whether the task future has been destroyed after completion,
+    /// cancellation, panic, or pool drop (non-destructive). A result may arrive earlier.
     ///
     /// Does not consume the result value. Use `try_recv()` or `recv()`
     /// to actually retrieve it.
@@ -98,11 +98,10 @@ impl<T> TaskHandle<T> {
         self.state.token.clone()
     }
 
-    /// Returns whether the task panicked during execution.
+    /// Returns whether the task panicked during polling or future destruction.
     ///
-    /// If true, [`try_recv()`](TaskHandle::try_recv) will return `None`
-    /// and [`panic_message()`](TaskHandle::panic_message) contains the
-    /// panic payload.
+    /// [`panic_message()`](TaskHandle::panic_message) contains the owned panic
+    /// message. A result received before a destruction failure remains valid.
     pub fn is_panicked(&self) -> bool {
         self.state.panicked.lock().is_some()
     }
@@ -174,16 +173,85 @@ impl<T> Future for TaskHandle<T> {
     }
 }
 
+/// A timeout leaves the pool usable, but does not authorize module unload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuiesceTimeout {
+    pub remaining_tasks: usize,
+}
+impl std::fmt::Display for QuiesceTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "compute quiescence timed out with {} active tasks",
+            self.remaining_tasks
+        )
+    }
+}
+impl std::error::Error for QuiesceTimeout {}
+
+// These generic methods execute in the future's originating image. Both
+// polling and destruction must consume panic payloads before crossing back
+// into the host; catching a guest unwind in the host is too late.
+trait TaskFuture: Send {
+    fn poll_guarded(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Result<Poll<()>, String>;
+    fn dispose(self: Pin<Box<Self>>) -> Result<(), String>;
+}
+impl<F: Future<Output = ()> + Send> TaskFuture for F {
+    fn poll_guarded(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Result<Poll<()>, String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.poll(cx)))
+            .map_err(|payload| crate::system::panic_payload_to_string(&*payload))
+    }
+    fn dispose(self: Pin<Box<Self>>) -> Result<(), String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(self)))
+            .map_err(|payload| crate::system::panic_payload_to_string(&*payload))
+    }
+}
+
+// One counter allocation per pool, one Arc clone per task. The lease is
+// acquired before constructing/publishing a task and released after its
+// erased future and task metadata have been destroyed, including on unwind.
+struct TaskLifetime(Arc<AtomicUsize>);
+impl TaskLifetime {
+    fn new(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(counter.clone())
+    }
+}
+impl Drop for TaskLifetime {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// A pending async compute task stored in the pool.
 struct PendingTask {
     priority: Priority,
-    future: Pin<Box<dyn Future<Output = ()> + Send>>,
+    future: Option<Pin<Box<dyn TaskFuture>>>,
     /// Insertion order for stable sorting within the same priority.
     id: u64,
     /// Shared state for completion/cancellation tracking.
     state: Arc<TaskState>,
     /// The fairness round this task was last polled in (see [`TaskQueue`]).
     last_polled_round: u64,
+    // Must be last: quiescence includes destruction of all preceding fields.
+    _lifetime: TaskLifetime,
+}
+
+impl Drop for PendingTask {
+    fn drop(&mut self) {
+        if let Some(future) = self.future.take()
+            && let Err(message) = future.dispose()
+        {
+            let mut error = self.state.panicked.lock();
+            if let Some(previous) = error.as_mut() {
+                previous.push_str("; during task destruction: ");
+                previous.push_str(&message);
+            } else {
+                *error = Some(message);
+            }
+        }
+        self.state.completed.store(true, Ordering::Release);
+    }
 }
 
 /// The pool's task list plus the fairness round counter.
@@ -224,10 +292,8 @@ pub struct ComputePool {
     queue: Mutex<TaskQueue>,
     next_id: Mutex<u64>,
     io: IoRuntime,
-    /// Counter of active tasks spawned on this pool (Phase 6: boundary guards).
-    /// Incremented at spawn, decremented when task completes.
-    /// Used by quiesce() to wait for all pending tasks.
-    active_tasks: AtomicU64,
+    /// Counts construction, queued/polled tasks, and their destruction.
+    active_tasks: Arc<AtomicUsize>,
 }
 
 impl ComputePool {
@@ -244,7 +310,7 @@ impl ComputePool {
             }),
             next_id: Mutex::new(0),
             io,
-            active_tasks: AtomicU64::new(0),
+            active_tasks: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -260,9 +326,9 @@ impl ComputePool {
         Fut: Future<Output = T> + Send + 'static,
         F: FnOnce(EcsComputeContext) -> Fut + Send + 'static,
     {
+        let lifetime = TaskLifetime::new(&self.active_tasks);
         let (sender, receiver) = std::sync::mpsc::channel();
         let state = Arc::new(TaskState::new());
-        let task_state = state.clone();
 
         let ctx = EcsComputeContext::new(self.io.clone(), state.token.clone());
         let future = f(ctx);
@@ -270,7 +336,6 @@ impl ComputePool {
         let wrapped = async move {
             let result = future.await;
             let _ = sender.send(result);
-            task_state.completed.store(true, Ordering::Release);
         };
 
         let id = {
@@ -282,41 +347,32 @@ impl ComputePool {
 
         let task = PendingTask {
             priority,
-            future: Box::pin(wrapped),
+            future: Some(Box::pin(wrapped)),
             id,
             state: state.clone(),
             last_polled_round: 0,
+            _lifetime: lifetime,
         };
 
         self.queue.lock().tasks.push(task);
-        // Increment active tasks counter (Phase 6: boundary guards)
-        self.active_tasks.fetch_add(1, Ordering::AcqRel);
 
         TaskHandle { receiver, state }
     }
 
-    /// Polls a task once, catching panics (Phase 6: decrements active_tasks on completion).
-    ///
-    /// Returns `true` if the task should be removed from the pool
-    /// (completed, cancelled after grace poll, or panicked).
+    /// Poll once through the originating image's panic boundary. Completion
+    /// accounting happens only when PendingTask is actually destroyed.
     fn poll_task_guarded(&self, task: &mut PendingTask, cx: &mut Context<'_>) -> bool {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            task.future.as_mut().poll(cx)
-        })) {
-            Ok(Poll::Ready(())) => {
-                self.active_tasks.fetch_sub(1, Ordering::AcqRel);
-                true
-            }
-            Ok(Poll::Pending) if task.state.token.is_cancelled() => {
-                self.active_tasks.fetch_sub(1, Ordering::AcqRel);
-                true
-            }
-            Ok(Poll::Pending) => false,
-            Err(payload) => {
-                let msg = crate::system::panic_payload_to_string(&*payload);
-                task.state.set_panicked(msg);
-                task.state.completed.store(true, Ordering::Release);
-                self.active_tasks.fetch_sub(1, Ordering::AcqRel);
+        match task
+            .future
+            .as_mut()
+            .expect("live task")
+            .as_mut()
+            .poll_guarded(cx)
+        {
+            Ok(Poll::Ready(())) => true,
+            Ok(Poll::Pending) => task.state.token.is_cancelled(),
+            Err(message) => {
+                task.state.set_panicked(message);
                 true
             }
         }
@@ -557,34 +613,36 @@ impl ComputePool {
         self.queue.lock().tasks.len()
     }
 
-    /// Quiescence: blocks until all spawned tasks complete (Phase 6: boundary guards).
+    /// Number of tasks still being constructed, queued, polled, or destroyed.
+    /// Unlike `pending_count`, includes tasks extracted by concurrent tick calls.
+    pub fn active_count(&self) -> usize {
+        self.active_tasks.load(Ordering::Acquire)
+    }
+
+    /// Drive compute until every admitted task and its future are destroyed.
+    /// Stop external producers before calling, and keep them stopped through
+    /// module unload. Child tasks spawned by existing tasks are included.
+    /// This does not drain results retained by TaskHandles or thread-local data;
+    /// release guest handles/results and join guest execution threads separately.
     ///
-    /// Continuously polls the pool until `active_tasks == 0`. This is used before
-    /// unloading a dylib generation to ensure async tasks don't outlive the code.
-    ///
-    /// If `timeout` is exceeded, logs a warning about stuck tasks and returns anyway —
-    /// this signals that a task is problematic (not properly yielding/cooperating).
-    /// The expectation is that all tasks use `yield_now()` and don't block on IO.
-    ///
-    /// # Returns
-    ///
-    /// - Time spent quiescing (useful for diagnostics)
-    /// - Note: if timeout expired, logs warn but still completes
-    pub fn quiesce(&self, timeout: Duration) -> Duration {
+    /// Returns an explicit timeout error while work remains. The deadline is
+    /// checked between polls: a blocking poll or destructor cannot be preempted.
+    pub fn quiesce(&self, timeout: Duration) -> Result<(), QuiesceTimeout> {
         let start = Instant::now();
-        while self.active_tasks.load(Ordering::Acquire) > 0 {
-            if start.elapsed() > timeout {
-                warn!(
-                    "ComputePool::quiesce timeout: {} tasks still active after {:?}. \
-                    Check for tasks that don't yield properly.",
-                    self.active_tasks.load(Ordering::Acquire),
-                    timeout
-                );
-                break;
+        loop {
+            let remaining_tasks = self.active_count();
+            if remaining_tasks == 0 {
+                return Ok(());
             }
-            self.tick();
+            if start.elapsed() >= timeout {
+                return Err(QuiesceTimeout { remaining_tasks });
+            }
+            if self.tick() == 0 {
+                // Another caller may own all tasks, including their destructors.
+                #[cfg(not(target_arch = "wasm32"))]
+                std::thread::yield_now();
+            }
         }
-        start.elapsed()
     }
 }
 

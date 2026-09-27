@@ -627,13 +627,14 @@ impl EcsRunnerMultiThread {
         thread_errors.into_inner()
     }
 
-    /// Cancels all pending compute tasks and ticks until drained or timeout.
+    /// Drains compute tasks, including concurrent polls and destructors.
+    /// Request cancellation separately; stop task producers before shutdown.
     pub fn graceful_shutdown(&self, time_budget: Duration) -> Result<(), ShutdownError> {
         let start = Instant::now();
-        while self.compute.pending_count() > 0 {
+        while self.compute.active_count() > 0 {
             if start.elapsed() >= time_budget {
                 return Err(ShutdownError::Timeout {
-                    remaining_tasks: self.compute.pending_count(),
+                    remaining_tasks: self.compute.active_count(),
                 });
             }
             self.compute.tick_all();

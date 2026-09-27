@@ -368,16 +368,17 @@ impl EcsRunnerSingleThread {
         }
     }
 
-    /// Cancels all pending compute tasks and ticks until drained or timeout.
+    /// Drains compute tasks, including concurrent polls and destructors.
+    /// Request cancellation separately; stop task producers before shutdown.
     pub fn graceful_shutdown(&self, _time_budget: Duration) -> Result<(), ShutdownError> {
         #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
 
-        while self.compute.pending_count() > 0 {
+        while self.compute.active_count() > 0 {
             #[cfg(not(target_arch = "wasm32"))]
             if start.elapsed() >= _time_budget {
                 return Err(ShutdownError::Timeout {
-                    remaining_tasks: self.compute.pending_count(),
+                    remaining_tasks: self.compute.active_count(),
                 });
             }
             self.compute.tick_all();
