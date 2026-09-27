@@ -90,7 +90,6 @@ Overlapping incompatible accesses in a graphics/compute pass are rejected;
 read-only depth co-attachment still uses its explicit sampled-depth layout.
 Disjoint subresources can be sampled and rendered in the same pass. Vulkan
 conservatively tracks depth/stencil aspects together; D3 tracking is per mip.
-The implementation and scope are described in [the design](TEXTURE_VIEWS_DESIGN.md).
 
 ### Readback results
 
