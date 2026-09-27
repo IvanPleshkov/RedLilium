@@ -7,7 +7,7 @@
 
 use super::{
     CcdSettings, CollisionEventSettings, CollisionGroups, CollisionTypes, ContactForceSettings,
-    SensorSettings,
+    LockedAxes2D, SensorSettings,
 };
 use redlilium_core::math::Vec2;
 
@@ -54,6 +54,8 @@ pub struct RigidBody2D {
     pub gravity_scale: f32,
     /// Extended CCD for dynamic bodies. None keeps automatic CCD against fixed colliders.
     pub ccd: Option<CcdSettings>,
+    /// Optional world-axis locks for dynamic motion. None leaves all axes free.
+    pub locked_axes: Option<LockedAxes2D>,
 }
 
 impl RigidBody2D {
@@ -101,6 +103,12 @@ impl RigidBody2D {
         self
     }
 
+    /// Sets dynamic world-axis constraints; None restores all degrees of freedom.
+    pub fn with_locked_axes(mut self, v: Option<LockedAxes2D>) -> Self {
+        self.locked_axes = v;
+        self
+    }
+
     pub fn with_gravity_scale(mut self, v: f32) -> Self {
         self.gravity_scale = v;
         self
@@ -115,6 +123,7 @@ impl Default for RigidBody2D {
             angular_damping: 0.0,
             gravity_scale: 1.0,
             ccd: None,
+            locked_axes: None,
         }
     }
 }
@@ -360,6 +369,7 @@ impl RigidBody2D {
             .angular_damping(self.angular_damping as Real)
             .gravity_scale(self.gravity_scale as Real)
             .ccd_enabled(self.ccd.is_some())
+            .locked_axes(self.locked_axes.unwrap_or_default().into())
             .build()
     }
 }

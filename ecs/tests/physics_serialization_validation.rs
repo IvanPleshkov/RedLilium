@@ -68,7 +68,13 @@ macro_rules! descriptor_tests {
                     .with_linear_damping(0.3)
                     .with_angular_damping(0.7)
                     .with_gravity_scale(-0.5)
-                    .with_ccd((i % 2 == 0).then(physics::CcdSettings::default));
+                    .with_ccd((i % 2 == 0).then(physics::CcdSettings::default))
+                    .with_locked_axes(match i {
+                        0 => None,
+                        1 => Some(Locks::default()),
+                        2 => Some(Locks::all()),
+                        _ => Some(Locks { translation_x: true, ..Locks::rotations() }),
+                    });
                 let shapes = shapes();
                 let collider = shapes[i % shapes.len()]
                     .clone()
@@ -163,6 +169,7 @@ macro_rules! descriptor_tests {
                     let entity = named(&target, &entities, &format!("body{i}"));
                     let handle = physics.body_for_entity(entity).unwrap();
                     assert_eq!(physics.bodies()[handle].is_ccd_enabled(), body.ccd.is_some());
+                    assert_eq!(physics.bodies()[handle].locked_axes(), body.locked_axes.unwrap_or_default().into());
                     let ch = physics.bodies()[handle].colliders()[0];
                     assert_eq!(physics.colliders()[ch].active_collision_types(), collider.collision_types.unwrap_or_default().into());
                 }
@@ -466,6 +473,7 @@ macro_rules! descriptor_tests {
 mod two_d {
     use super::*;
     use redlilium_core::math::Vec2 as Vector;
+    use redlilium_ecs::physics::LockedAxes2D as Locks;
     use redlilium_ecs::physics::rapier2d::prelude::Vector as RapierVector;
     #[allow(deprecated)]
     use redlilium_ecs::physics::{
@@ -527,6 +535,7 @@ mod two_d {
 mod three_d {
     use super::*;
     use redlilium_core::math::Vec3 as Vector;
+    use redlilium_ecs::physics::LockedAxes3D as Locks;
     use redlilium_ecs::physics::rapier3d::prelude::Vector as RapierVector;
     #[allow(deprecated)]
     use redlilium_ecs::physics::{

@@ -95,3 +95,6 @@ pub use queries::{PhysicsQueryError, RayCastOptions, ShapeCastOptions, ShapeCast
 pub mod queries2d;
 #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
 pub mod queries3d;
+
+mod locked_axes;
+pub use locked_axes::{LockedAxes2D, LockedAxes3D};

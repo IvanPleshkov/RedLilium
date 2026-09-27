@@ -13,7 +13,7 @@
             guid: ("548da5e1-2292-5a93-a2fd-4630b1b9535d"),
             path: "scenes/level1.scene",
             kind: "scene",
-            source_hash: 17137381955699228579,
+            source_hash: 15303362226236569209,
             settings: None,
             references: {},
         ),

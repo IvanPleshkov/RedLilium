@@ -78,6 +78,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (
@@ -148,6 +149,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (
@@ -239,6 +241,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (
@@ -330,6 +333,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (
@@ -421,6 +425,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (
@@ -512,6 +517,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (
@@ -603,6 +609,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (
@@ -694,6 +701,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (
@@ -785,6 +793,7 @@
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
+                        ("locked_axes", Null),
                     ]),
                 ),
                 (

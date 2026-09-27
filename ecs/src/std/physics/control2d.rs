@@ -145,6 +145,8 @@ impl PhysicsWorld2D {
                         .collider_changed(*collider_handle, live);
                 }
             }
+            body.set_locked_axes(desc.locked_axes.unwrap_or_default().into(), true);
+            super::locked_axes::dim2::clamp_velocity(body);
             body.enable_ccd(desc.ccd.is_some());
             body.set_linear_damping(desc.linear_damping as Real);
             body.set_angular_damping(desc.angular_damping as Real);

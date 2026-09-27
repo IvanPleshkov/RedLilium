@@ -114,6 +114,57 @@ change. Other bodies and joints remain intact. If an endpoint is unavailable,
 the old joint is removed and creation waits for valid endpoints. Physics-world
 caches retain the last applied descriptors to avoid rebuilding unchanged objects.
 
+### Axis locks
+
+`RigidBody2D/3D::with_locked_axes` accepts `Option<LockedAxes2D/3D>`. `None`
+leaves all degrees of freedom available. In a settings value, `true` means
+locked; `Default::default()` leaves every axis free.
+
+```rust,ignore
+use redlilium_ecs::physics::LockedAxes3D;
+
+// Keep a dynamic character upright while allowing yaw around world Y.
+let body = RigidBody3D::dynamic().with_locked_axes(Some(LockedAxes3D {
+    rotation_x: true,
+    rotation_z: true,
+    ..Default::default()
+}));
+
+// Or prohibit every rotation while leaving translation available.
+let body = RigidBody3D::dynamic()
+    .with_locked_axes(Some(LockedAxes3D::rotations()));
+```
+
+3D settings have `translation_x/y/z` and `rotation_x/y/z`. The 2D settings
+have `translation_x`, `translation_y`, and `rotation` (around Z). Both types
+provide `all()`, `translations()`, and `rotations()` presets. These are world
+axes, independent of body orientation. Rotation locks constrain angular
+velocity, not individual Euler angles or an absolute orientation target.
+
+Locks affect **dynamic** simulation, including forces, impulses, gravity and
+contacts. Sync updates them on the existing body, preserving its collider and
+joints. Enabling a lock discards the corresponding current velocity component;
+other components and the pose stay unchanged. `BodyMotion::set_linvel` and
+`set_angvel` also discard locked components for dynamic bodies. Removing a
+lock does not restore discarded velocity. Persistent forces/torques are kept
+and can accelerate the body after unlocking, until explicitly reset.
+
+Fixed transforms, both kinematic control modes and explicit teleports keep
+their existing pose ownership. Locks are retained on non-dynamic descriptors
+and become effective when the body changes to dynamic; that transition also
+discards forbidden velocities. A teleport can move a locked body to a new pose:
+locks do not bind it to a previous world position.
+
+Settings are serialized with the body and editable in the inspector. Changed
+descriptors wake the body; syncing an unchanged descriptor preserves sleep.
+Every boolean combination is valid, without additional numeric validation.
+
+Rapier 0.36's gyroscopic correction can inject angular velocity on a locked axis
+of an asymmetric 3D body. The integration therefore disables gyroscopic forces
+while any rotation axis is locked and re-enables them when all rotation locks
+are removed. Translation-only locks keep gyroscopic forces enabled. This avoids
+per-frame correction passes or forbidden rotation inside solver substeps.
+
 ### Validation
 
 Both regular and exclusive sync systems validate descriptors before changing

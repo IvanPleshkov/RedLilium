@@ -66,13 +66,20 @@ impl std::ops::Deref for BodyMotion3D<'_> {
 }
 
 impl BodyMotion3D<'_> {
-    /// Sets world-space linear velocity.
+    /// Sets world-space linear velocity, discarding locked axes on dynamic bodies.
     pub fn set_linvel(&mut self, velocity: Vector, wake_up: bool) {
-        self.body.set_linvel(velocity, wake_up);
+        self.body.set_linvel(
+            super::locked_axes::dim3::linear(self.body, velocity),
+            wake_up,
+        );
     }
-    /// Sets angular velocity in radians per second.
+    /// Sets world-space angular velocity in radians per second, discarding
+    /// locked axes on dynamic bodies.
     pub fn set_angvel(&mut self, velocity: Vector, wake_up: bool) {
-        self.body.set_angvel(velocity, wake_up);
+        self.body.set_angvel(
+            super::locked_axes::dim3::angular(self.body, velocity),
+            wake_up,
+        );
     }
     /// Adds a persistent world-space force.
     pub fn add_force(&mut self, force: Vector, wake_up: bool) {
