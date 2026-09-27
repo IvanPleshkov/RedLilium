@@ -5,7 +5,7 @@
 //! [`SyncPhysicsJoints3D`](super::physics3d::SyncPhysicsJoints3D) systems
 //! to automatically materialize these descriptors into rapier physics objects.
 
-use super::{CollisionEventSettings, CollisionGroups, SensorSettings};
+use super::{CcdSettings, CollisionEventSettings, CollisionGroups, CollisionTypes, SensorSettings};
 use redlilium_core::math::Vec3;
 
 /// 3D collider shape.
@@ -54,6 +54,8 @@ pub struct RigidBody3D {
     pub angular_damping: f32,
     /// Gravity multiplier (1.0 = normal, 0.0 = no gravity).
     pub gravity_scale: f32,
+    /// Extended CCD for dynamic bodies. None keeps automatic CCD against fixed colliders.
+    pub ccd: Option<CcdSettings>,
 }
 
 impl RigidBody3D {
@@ -95,6 +97,12 @@ impl RigidBody3D {
         self
     }
 
+    /// Some enables extended CCD; None restores Rapier's automatic fixed-target CCD.
+    pub fn with_ccd(mut self, v: Option<CcdSettings>) -> Self {
+        self.ccd = v;
+        self
+    }
+
     pub fn with_gravity_scale(mut self, v: f32) -> Self {
         self.gravity_scale = v;
         self
@@ -108,6 +116,7 @@ impl Default for RigidBody3D {
             linear_damping: 0.0,
             angular_damping: 0.0,
             gravity_scale: 1.0,
+            ccd: None,
         }
     }
 }
@@ -130,6 +139,8 @@ pub struct Collider3D {
     pub collision_events: Option<CollisionEventSettings>,
     /// Optional group filtering. None allows all groups; both sides must allow a pair.
     pub collision_groups: Option<CollisionGroups>,
+    /// None uses the default dynamic-body pairs. Either collider can enable a pair.
+    pub collision_types: Option<CollisionTypes>,
 }
 
 impl Collider3D {
@@ -190,6 +201,12 @@ impl Collider3D {
         self
     }
 
+    /// Selects body-type pairs; None restores the default pairs involving dynamic bodies.
+    pub fn with_collision_types(mut self, v: Option<CollisionTypes>) -> Self {
+        self.collision_types = v;
+        self
+    }
+
     /// Some enables sensor behavior; None restores a solid collider.
     pub fn with_sensor(mut self, v: Option<SensorSettings>) -> Self {
         self.sensor = v;
@@ -213,6 +230,7 @@ impl Default for Collider3D {
             sensor: None,
             collision_events: None,
             collision_groups: None,
+            collision_types: None,
         }
     }
 }
@@ -434,6 +452,7 @@ impl RigidBody3D {
             .linear_damping(self.linear_damping as Real)
             .angular_damping(self.angular_damping as Real)
             .gravity_scale(self.gravity_scale as Real)
+            .ccd_enabled(self.ccd.is_some())
             .build()
     }
 }
@@ -466,6 +485,18 @@ impl Collider3D {
             .density(self.density as Real)
             .sensor(self.sensor.is_some())
             .collision_groups(self.collision_groups.unwrap_or_default().into())
+            .active_collision_types(self.collision_types.unwrap_or_default().into())
+            .active_hooks(
+                if self
+                    .collision_types
+                    .unwrap_or_default()
+                    .restricts_dynamic_pairs()
+                {
+                    ActiveHooks::FILTER_CONTACT_PAIRS
+                } else {
+                    ActiveHooks::empty()
+                },
+            )
             .active_events(if self.collision_events.is_some() {
                 ActiveEvents::COLLISION_EVENTS
             } else {

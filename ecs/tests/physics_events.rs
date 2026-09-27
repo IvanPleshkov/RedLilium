@@ -77,6 +77,302 @@ macro_rules! event_tests {
         }
 
         #[test]
+        fn collision_type_matrix_covers_both_kinematic_modes_and_either_side() {
+            use physics::CollisionTypes as Types;
+            let options = [
+                None,
+                Some(Types::none()),
+                Some(Types::all()),
+                Some(Types {
+                    dynamic_dynamic: true,
+                    ..Types::none()
+                }),
+                Some(Types {
+                    dynamic_kinematic: true,
+                    ..Types::none()
+                }),
+                Some(Types {
+                    dynamic_fixed: true,
+                    ..Types::none()
+                }),
+                Some(Types {
+                    kinematic_kinematic: true,
+                    ..Types::none()
+                }),
+                Some(Types {
+                    kinematic_fixed: true,
+                    ..Types::none()
+                }),
+                Some(Types {
+                    fixed_fixed: true,
+                    ..Types::none()
+                }),
+            ];
+            for regular in [false, true] {
+                for (i, a_body) in [
+                    Body::dynamic(),
+                    Body::fixed(),
+                    Body::kinematic_position(),
+                    Body::kinematic_velocity(),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    for (j, b_body) in [
+                        Body::dynamic(),
+                        Body::fixed(),
+                        Body::kinematic_position(),
+                        Body::kinematic_velocity(),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        for option in options {
+                            let t = option.unwrap_or_default();
+                            let allowed = match (i, j) {
+                                (0, 0) => t.dynamic_dynamic,
+                                (0, 1) | (1, 0) => t.dynamic_fixed,
+                                (0, _) | (_, 0) => t.dynamic_kinematic,
+                                (1, 1) => t.fixed_fixed,
+                                (1, _) | (_, 1) => t.kinematic_fixed,
+                                _ => t.kinematic_kinematic,
+                            };
+                            let mut w = World::new();
+                            register_std_components(&mut w);
+                            w.insert_resource(Physics::default());
+                            w.resource_mut::<Physics>().gravity = Default::default();
+                            w.add_event::<Collision>();
+                            // Alternate which collider requests detection. The other enables no pairs.
+                            let (at, bt) = if regular {
+                                (Some(Types::none()), option)
+                            } else {
+                                (option, Some(Types::none()))
+                            };
+                            let a = w
+                                .spawn_with((
+                                    Transform::IDENTITY,
+                                    a_body.clone(),
+                                    Collider::ball(1.0)
+                                        .with_sensor(Some(SensorSettings::default()))
+                                        .with_collision_events(Some(
+                                            CollisionEventSettings::default(),
+                                        ))
+                                        .with_collision_types(at),
+                                ))
+                                .unwrap();
+                            let b = w
+                                .spawn_with((
+                                    Transform::IDENTITY,
+                                    b_body.clone(),
+                                    Collider::ball(0.5).with_collision_types(bt),
+                                ))
+                                .unwrap();
+                            sync(&mut w, regular);
+                            advance(&mut w);
+                            let cursor = EventCursor::new();
+                            let events = read(&w, &cursor);
+                            assert_eq!(
+                                events.len(),
+                                usize::from(allowed),
+                                "types={option:?}, bodies={i}/{j}, regular={regular}"
+                            );
+                            let p = w.resource::<Physics>();
+                            let ac = p.bodies()[p.body_for_entity(a).unwrap()].colliders()[0];
+                            let bc = p.bodies()[p.body_for_entity(b).unwrap()].colliders()[0];
+                            assert_eq!(
+                                p.narrow_phase().intersection_pair(ac, bc).unwrap_or(false),
+                                allowed
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn live_type_rules_refilter_stationary_overlaps_without_recreating_colliders() {
+            use physics::CollisionTypes as Types;
+            let kinematic_fixed = Some(Types {
+                kinematic_fixed: true,
+                ..Types::default()
+            });
+            for regular in [false, true] {
+                let (mut w, a, b) = setup(true, true, regular);
+                w.insert(b, Body::kinematic_position()).unwrap();
+                sync(&mut w, regular);
+                let cursor = EventCursor::new();
+                advance(&mut w);
+                assert!(read(&w, &cursor).is_empty());
+                w.get_mut::<Collider>(a).unwrap().collision_types = kinematic_fixed;
+                sync(&mut w, regular);
+                assert!(read(&w, &cursor).is_empty());
+                advance(&mut w);
+                let started = read(&w, &cursor);
+                assert_eq!(phases(&started), [Phase::Started]);
+                w.get_mut::<Collider>(b).unwrap().collision_types = kinematic_fixed;
+                sync(&mut w, regular);
+                w.get_mut::<Collider>(a).unwrap().collision_types = None;
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert!(read(&w, &cursor).is_empty()); // the other collider still requests this pair
+                w.get_mut::<Collider>(b).unwrap().collision_types = None;
+                sync(&mut w, regular);
+                advance(&mut w);
+                let stopped = read(&w, &cursor);
+                assert_eq!(phases(&stopped), [Phase::Stopped(Reason::FilteredOut)]);
+                assert_eq!((started[0].a, started[0].b), (stopped[0].a, stopped[0].b));
+                w.get_mut::<Collider>(a).unwrap().collision_types = kinematic_fixed;
+                sync(&mut w, regular);
+                advance(&mut w);
+                let restarted = read(&w, &cursor);
+                assert_eq!(phases(&restarted), [Phase::Started]);
+                assert_eq!(
+                    (started[0].a, started[0].b),
+                    (restarted[0].a, restarted[0].b)
+                );
+                // Group rejection still wins even though type rules allow the pair.
+                w.get_mut::<Collider>(b).unwrap().collision_groups =
+                    Some(physics::CollisionGroups::new(1, 0));
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(
+                    phases(&read(&w, &cursor)),
+                    [Phase::Stopped(Reason::FilteredOut)]
+                );
+                w.get_mut::<Collider>(b).unwrap().collision_groups = None;
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(phases(&read(&w, &cursor)), [Phase::Started]);
+            }
+        }
+
+        #[test]
+        fn fixed_sensor_pairs_can_be_enabled_after_creation_and_keep_tracking_on_unrelated_edits() {
+            for regular in [false, true] {
+                let (mut w, a, b) = setup(true, true, regular);
+                w.insert(b, Body::fixed()).unwrap();
+                sync(&mut w, regular);
+                let cursor = EventCursor::new();
+                advance(&mut w);
+                assert!(read(&w, &cursor).is_empty());
+                w.get_mut::<Collider>(a).unwrap().collision_types =
+                    Some(physics::CollisionTypes::all());
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(phases(&read(&w, &cursor)), [Phase::Started]);
+                w.get_mut::<Collider>(a)
+                    .unwrap()
+                    .collision_types
+                    .as_mut()
+                    .unwrap()
+                    .dynamic_dynamic = false;
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert!(read(&w, &cursor).is_empty());
+                w.get_mut::<Collider>(a).unwrap().collision_types = None;
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(
+                    phases(&read(&w, &cursor)),
+                    [Phase::Stopped(Reason::FilteredOut)]
+                );
+            }
+        }
+
+        #[test]
+        fn changing_body_types_closes_late_enabled_tracking_and_reopens_it() {
+            for regular in [false, true] {
+                let (mut w, a, b) = setup(false, true, regular);
+                advance(&mut w); // Native contact starts with no event tracking.
+                w.get_mut::<Collider>(a).unwrap().collision_events =
+                    Some(CollisionEventSettings::default());
+                sync(&mut w, regular);
+                let cursor = EventCursor::new();
+                advance(&mut w);
+                let start = read(&w, &cursor);
+                assert_eq!(phases(&start), [Phase::Started]);
+                w.insert(b, Body::fixed()).unwrap();
+                sync(&mut w, regular);
+                advance(&mut w);
+                let stopped = read(&w, &cursor);
+                assert_eq!(phases(&stopped), [Phase::Stopped(Reason::FilteredOut)]);
+                assert_eq!((start[0].a, start[0].b), (stopped[0].a, stopped[0].b));
+                w.insert(b, Body::dynamic()).unwrap();
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(phases(&read(&w, &cursor)), [Phase::Started]);
+            }
+        }
+
+        #[test]
+        fn type_rules_disable_and_restore_solid_contacts() {
+            for regular in [false, true] {
+                let (mut w, a, b) = setup(true, true, regular);
+                w.get_mut::<Collider>(a).unwrap().sensor = None;
+                sync(&mut w, regular);
+                let cursor = EventCursor::new();
+                advance(&mut w);
+                let started = read(&w, &cursor);
+                assert_eq!(phases(&started), [Phase::Started]);
+                // Both colliders must stop requesting the pair to reject it by type.
+                for entity in [a, b] {
+                    w.get_mut::<Collider>(entity).unwrap().collision_types =
+                        Some(physics::CollisionTypes::none());
+                }
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(
+                    phases(&read(&w, &cursor)),
+                    [Phase::Stopped(Reason::FilteredOut)]
+                );
+                {
+                    let p = w.resource::<Physics>();
+                    assert!(
+                        !p.narrow_phase()
+                            .contact_pair(started[0].a.collider, started[0].b.collider)
+                            .is_some_and(|pair| pair.has_any_active_contact())
+                    );
+                }
+                w.get_mut::<Collider>(a).unwrap().collision_types = None;
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(phases(&read(&w, &cursor)), [Phase::Started]);
+            }
+        }
+
+        #[test]
+        fn free_colliders_use_fixed_type_for_kinematic_triggers() {
+            let (mut w, a, b) = setup(false, true, false);
+            w.despawn(a);
+            w.insert(b, Body::kinematic_velocity()).unwrap();
+            sync(&mut w, false);
+            let free = w.resource_mut::<Physics>().add_free_collider(
+                RapierCollider::ball(1.0)
+                    .sensor(true)
+                    .active_collision_types(
+                        physics::CollisionTypes {
+                            kinematic_fixed: true,
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .active_events(ActiveEvents::COLLISION_EVENTS)
+                    .build(),
+            );
+            let cursor = EventCursor::new();
+            advance(&mut w);
+            let started = read(&w, &cursor);
+            assert_eq!(phases(&started), [Phase::Started]);
+            assert!(started[0].a.collider == free || started[0].b.collider == free);
+            w.resource_mut::<Physics>().remove_free_collider(free);
+            advance(&mut w);
+            assert_eq!(
+                phases(&read(&w, &cursor)),
+                [Phase::Stopped(Reason::Removed)]
+            );
+        }
+
+        #[test]
         fn collision_readers_observe_each_transition_once_with_stable_participants() {
             for regular in [false, true] {
                 let (mut w, a, b) = setup(true, true, regular);

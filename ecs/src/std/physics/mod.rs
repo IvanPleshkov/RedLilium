@@ -71,7 +71,9 @@ mod boundary_tests;
 
 mod event_support;
 mod events;
-pub use events::{CollisionEventSettings, CollisionPhase, CollisionStopReason, SensorSettings};
+mod settings;
+pub use events::{CollisionPhase, CollisionStopReason};
+pub use settings::{CcdSettings, CollisionEventSettings, SensorSettings};
 #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
 pub mod events2d;
 #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
@@ -79,3 +81,6 @@ pub mod events3d;
 
 mod groups;
 pub use groups::CollisionGroups;
+
+mod collision_types;
+pub use collision_types::CollisionTypes;

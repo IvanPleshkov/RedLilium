@@ -67,7 +67,8 @@ macro_rules! descriptor_tests {
                 let body = body
                     .with_linear_damping(0.3)
                     .with_angular_damping(0.7)
-                    .with_gravity_scale(-0.5);
+                    .with_gravity_scale(-0.5)
+                    .with_ccd((i % 2 == 0).then(physics::CcdSettings::default));
                 let shapes = shapes();
                 let collider = shapes[i % shapes.len()]
                     .clone()
@@ -76,6 +77,12 @@ macro_rules! descriptor_tests {
                     .with_density(2.5)
                     .with_sensor(Some(physics::SensorSettings::default()))
                     .with_collision_events((i % 2 == 0).then(physics::CollisionEventSettings::default))
+                    .with_collision_types(match i {
+                        0 => None,
+                        1 => Some(physics::CollisionTypes::none()),
+                        2 => Some(physics::CollisionTypes::all()),
+                        _ => Some(physics::CollisionTypes { kinematic_fixed: true, ..Default::default() }),
+                    })
                     .with_collision_groups(match i {
                         0 => None,
                         1 => Some(physics::CollisionGroups::default()),
@@ -150,7 +157,15 @@ macro_rules! descriptor_tests {
                 }
                 assert!(sync(&mut target, true, false).is_empty());
                 assert!(sync(&mut target, true, true).is_empty());
-                assert_eq!(target.resource::<Physics>().bodies().len(), bodies.len());
+                let physics = target.resource::<Physics>();
+                for (i, (_, body, collider)) in bodies.iter().enumerate() {
+                    let entity = named(&target, &entities, &format!("body{i}"));
+                    let handle = physics.body_for_entity(entity).unwrap();
+                    assert_eq!(physics.bodies()[handle].is_ccd_enabled(), body.ccd.is_some());
+                    let ch = physics.bodies()[handle].colliders()[0];
+                    assert_eq!(physics.colliders()[ch].active_collision_types(), collider.collision_types.unwrap_or_default().into());
+                }
+                assert_eq!(physics.bodies().len(), bodies.len());
                 assert_eq!(
                     target.resource::<Physics>().impulse_joints().len(),
                     joints.len()
@@ -367,7 +382,7 @@ macro_rules! descriptor_tests {
                     let p = w.resource::<Physics>();
                     assert_eq!(p.joint_for_entity(j).unwrap(), h);
                     assert_eq!(p.impulse_joints().len(), 1);
-                    assert_eq!(p.impulse_joints().get(h).unwrap().body2, p.body_for_entity(b).unwrap());
+                    assert_eq!(p.impulse_joints().get(h).unwrap().body2(), p.body_for_entity(b).unwrap());
                     // Creation must reject the same descriptor too.
                     let mut fresh = world();
                     fresh.spawn_with((bad,)).unwrap();

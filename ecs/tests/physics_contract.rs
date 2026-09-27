@@ -260,7 +260,7 @@ macro_rules! contract_tests {
                 assert_eq!(p.bodies().len(), 3);
                 assert_eq!(p.impulse_joints().len(), 1);
                 assert_eq!(
-                    p.impulse_joints().get(new).unwrap().body2,
+                    p.impulse_joints().get(new).unwrap().body2(),
                     p.body_for_entity(c).unwrap()
                 );
             }

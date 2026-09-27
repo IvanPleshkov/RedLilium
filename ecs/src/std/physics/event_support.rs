@@ -34,10 +34,25 @@ macro_rules! collision_events {
             c.active_events().contains(ActiveEvents::COLLISION_EVENTS)
         }
 
+        fn allowed(a: &Collider, b: &Collider, bodies: &RigidBodySet) -> bool {
+            let kind = |c: &Collider| {
+                c.parent()
+                    .and_then(|h| bodies.get(h))
+                    .map_or(RigidBodyType::Fixed, |body| body.body_type())
+            };
+            let (ak, bk) = (kind(a), kind(b));
+            a.collision_groups().test(b.collision_groups())
+                && (a.active_collision_types().test(ak, bk)
+                    || b.active_collision_types().test(ak, bk))
+        }
+
         // Rapier's handler is Send + Sync and receives &self, including in parallel builds.
         #[derive(Default)]
         struct Collector(std::sync::Mutex<Vec<RapierEvent>>);
         impl EventHandler for Collector {
+            // PhysicsWorld keeps its required soft-body set empty.
+            fn handle_soft_body_tear_event(&self, _: &SoftBodySet, _: &SoftBodyTearEvent) {}
+
             fn handle_collision_event(
                 &self,
                 _: &RigidBodySet,
@@ -121,6 +136,7 @@ macro_rules! collision_events {
                 &mut self,
                 pair: PairKey,
                 colliders: &ColliderSet,
+                bodies: &RigidBodySet,
                 entities: &std::collections::HashMap<RigidBodyHandle, crate::Entity>,
             ) {
                 if self.active.contains_key(&pair) {
@@ -129,8 +145,7 @@ macro_rules! collision_events {
                 let (Some(a), Some(b)) = (colliders.get(pair.0), colliders.get(pair.1)) else {
                     return;
                 };
-                if (!enabled(a) && !enabled(b)) || !a.collision_groups().test(b.collision_groups())
-                {
+                if (!enabled(a) && !enabled(b)) || !allowed(a, b, bodies) {
                     return;
                 }
                 let capture = |handle, c: &Collider| $participant {
@@ -157,7 +172,7 @@ macro_rules! collision_events {
                 });
             }
 
-            pub(super) fn prepare(&mut self, colliders: &ColliderSet) {
+            pub(super) fn prepare(&mut self, colliders: &ColliderSet, bodies: &RigidBodySet) {
                 self.step = self
                     .step
                     .checked_add(1)
@@ -181,7 +196,7 @@ macro_rules! collision_events {
                         {
                             Some(super::CollisionStopReason::Reconfigured)
                         }
-                        (Some(a), Some(b)) if !a.collision_groups().test(b.collision_groups()) => {
+                        (Some(a), Some(b)) if !allowed(a, b, bodies) => {
                             Some(super::CollisionStopReason::FilteredOut)
                         }
                         (Some(_), Some(_)) => None,
@@ -200,6 +215,7 @@ macro_rules! collision_events {
             pub(super) fn finish(
                 &mut self,
                 colliders: &ColliderSet,
+                bodies: &RigidBodySet,
                 narrow: &NarrowPhase,
                 entities: &std::collections::HashMap<RigidBodyHandle, crate::Entity>,
             ) {
@@ -215,7 +231,7 @@ macro_rules! collision_events {
                                 && (a.is_sensor() || b.is_sensor())
                                     == flags.contains(CollisionEventFlags::SENSOR)
                             {
-                                self.start(pair, colliders, entities);
+                                self.start(pair, colliders, bodies, entities);
                             }
                         }
                         RapierEvent::Stopped(_, _, flags) => {
@@ -253,7 +269,7 @@ macro_rules! collision_events {
                     }
                 }
                 for pair in touching {
-                    self.start(pair, colliders, entities);
+                    self.start(pair, colliders, bodies, entities);
                 }
             }
         }

@@ -3,14 +3,31 @@
 macro_rules! world_boundary_tests {
     () => {
         #[test]
-        #[ignore = "Rapier 0.32 panics after manually sleeping an active body; independent of groups"]
-        fn manual_sleep_does_not_panic_on_next_step() {
-            let mut physics = Physics::default();
-            let body = physics.add_body(RigidBodyBuilder::dynamic().build());
-            physics.add_collider(ColliderBuilder::ball(0.5).build(), body);
-            physics.step();
-            physics.body_motion(body).unwrap().sleep();
-            physics.step();
+        fn manual_sleep_holds_pose_until_explicit_wake() {
+            for reposition in [false, true] {
+                let mut physics = Physics::default();
+                let body = physics.add_body(RigidBodyBuilder::dynamic().build());
+                physics.add_collider(ColliderBuilder::ball(0.5).build(), body);
+                physics.step();
+                assert_ne!(physics.bodies[body].linvel(), Vector::ZERO);
+                if reposition {
+                    let mut position = physics.bodies[body].translation();
+                    position.x += 2.0;
+                    physics.bodies[body].set_translation(position, true);
+                }
+                physics.body_motion(body).unwrap().sleep();
+                let pose = *physics.bodies[body].position();
+                for _ in 0..5 {
+                    physics.step();
+                    assert!(physics.bodies[body].is_sleeping());
+                    assert_eq!(*physics.bodies[body].position(), pose);
+                    assert_eq!(physics.bodies[body].linvel(), Vector::ZERO);
+                }
+                physics.body_motion(body).unwrap().wake_up(true);
+                physics.step();
+                assert!(!physics.bodies[body].is_sleeping());
+                assert!(physics.bodies[body].translation().y < pose.translation.y);
+            }
         }
 
         fn ray_fixture() -> (
@@ -41,8 +58,7 @@ macro_rules! world_boundary_tests {
             use crate::physics::CollisionGroups;
             let (mut physics, entity, free, _, collider) = ray_fixture();
             physics.colliders[free].set_collision_groups(CollisionGroups::new(1, 4).into());
-            physics.colliders[collider]
-                .set_collision_groups(CollisionGroups::new(2, 4).into());
+            physics.colliders[collider].set_collision_groups(CollisionGroups::new(2, 4).into());
             physics.step();
             let origin = GameVector::zeros();
             let mut dir = GameVector::zeros();

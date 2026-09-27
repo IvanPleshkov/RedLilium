@@ -2,6 +2,13 @@
 
 RedLilium integrates the [Rapier](https://rapier.rs/) physics engine via feature flags. Both 2D and 3D physics are supported.
 
+The backend uses Rapier 0.36 and its default integration parameters. In
+particular, fast dynamic bodies use CCD against fixed colliders by default;
+Rapier's per-body CCD flag additionally enables sweeps against moving bodies.
+`integration_parameters.max_ccd_substeps = 0` disables CCD entirely. The ECS
+integration currently exposes rigid bodies only; Rapier's required soft-body
+set remains internal and empty.
+
 ## Feature Flags
 
 Enable physics in your `Cargo.toml`:
@@ -149,6 +156,42 @@ checkpoint: runtime velocities, contacts and solver state are not preserved.
 Bodies loaded as children of a prefab root must be detached before physics sync,
 as required by the root-body contract above.
 
+## Continuous collision detection (CCD)
+
+`RigidBody2D` and `RigidBody3D` expose `ccd: Option<CcdSettings>`:
+
+```rust,ignore
+use redlilium_ecs::physics::CcdSettings;
+
+let projectile = RigidBody3D::dynamic()
+    .with_ccd(Some(CcdSettings::default()));
+```
+
+- `None` keeps Rapier's automatic CCD for fast dynamic bodies against fixed
+  colliders. It does **not** disable all continuous collision detection.
+- `Some(CcdSettings::default())` enables the extended ("bullet") mode, adding
+  sweeps against kinematic and non-bullet dynamic bodies.
+- `physics.integration_parameters.max_ccd_substeps = 0` disables CCD globally,
+  regardless of the per-body setting.
+
+`CcdSettings` currently has no fields. The option is serialized with the body,
+editable in the inspector, and applied by either body-sync system in place.
+Changing it preserves handles, joints, pose and velocities and wakes the body;
+syncing an unchanged descriptor does not wake it. The setting can be stored on
+any body type, but it only acts on dynamic bodies. Switching a configured body
+back to dynamic makes it effective again.
+
+Rapier 0.36 does not perform CCD sweeps between two bullet bodies. Enable this
+mode selectively for fast objects; enabling it on every body does not give
+universal CCD coverage. Collision groups and body-type rules still apply.
+CCD limits motion at an impact; it does not guarantee that contact velocities
+are fully resolved in that same step.
+
+Sensor crossings detected by CCD can publish `Started` and `Stopped(Separated)`
+within the same physics step, even when there is no overlap at either endpoint.
+Sensors do not stop the moving body. Register the collision-event queue and opt
+in on a participating collider as described below.
+
 ## Collision groups
 
 `Collider2D` and `Collider3D` share `Option<CollisionGroups>`. Each setting has
@@ -174,7 +217,7 @@ Both sides must accept the pair:
 `None` and `Some(CollisionGroups::default())` both mean all memberships and
 all accepted groups. A zero mask in either field rejects every pair. Masks
 apply to solid contacts and sensor intersections alike. They do not override
-Rapier's body-type rules (for example, fixed–fixed pairs remain excluded).
+the body-type rules (for example, fixed–fixed pairs are excluded by default).
 This configures collision detection, not just solver forces.
 
 Groups are serialized and editable in the inspector as hexadecimal masks.
@@ -183,7 +226,7 @@ At the next successful step, a newly rejected tracked pair closes with
 `Stopped(FilteredOut)`; a newly allowed active pair emits `Started`.
 An edit that keeps the pair allowed does not force a stop/start.
 If several settings change together, removal takes priority, then disabling
-tracking, then a sensor-role change, then group filtering.
+tracking, then a sensor-role change, then group/type filtering.
 
 The shared settings convert into either dimension's Rapier `InteractionGroups`
 using `.into()`, including for free-collider builders and scene queries:
@@ -197,6 +240,57 @@ let hit = physics.cast_ray_filtered(origin, direction, max_toi, filter);
 Query masks use the same bilateral rule: the query's memberships must also be
 accepted by the collider. `cast_ray` and a default `QueryFilter` do not filter
 by groups, so they can still hit colliders whose masks reject all collisions.
+
+## Collision types
+
+`Collider2D` and `Collider3D` expose `collision_types: Option<CollisionTypes>`.
+The six boolean fields select unordered body-type pairs. Both kinematic modes
+use the same kinematic flags; standalone colliders count as fixed.
+
+| Field | Default |
+|---|---|
+| `dynamic_dynamic` | true |
+| `dynamic_kinematic` | true |
+| `dynamic_fixed` | true |
+| `kinematic_kinematic` | false |
+| `kinematic_fixed` | false |
+| `fixed_fixed` | false |
+
+`None` uses these defaults, just like `Some(CollisionTypes::default())`.
+`CollisionTypes::all()` enables all six pairs; `CollisionTypes::none()` requests
+none. Following Rapier, **either collider** can enable detection for a pair.
+Thus `Some(CollisionTypes::none())` on one collider alone does not prevent
+collisions: the other collider may still request them. Use group masks to
+unconditionally reject a pair from one side; groups must allow both directions.
+
+For example, a fixed trigger can detect a kinematic character:
+
+```rust,ignore
+use redlilium_ecs::physics::{CollisionTypes, SensorSettings};
+
+let trigger = Collider3D::ball(2.0)
+    .with_sensor(Some(SensorSettings::default()))
+    .with_collision_types(Some(CollisionTypes {
+        kinematic_fixed: true,
+        ..Default::default()
+    }));
+```
+
+These flags enable contact/intersection detection; they do not make fixed or
+kinematic bodies respond to impulses. A kinematic character still needs its
+own movement/controller logic to stop at walls. Event tracking remains a
+separate collider option, and the event queue must be registered before Step.
+
+Rules are serialized, editable in the inspector, and applied by body sync
+without recreating colliders. Changes to either the rules or the body's type
+are observed on the next successful Step: rejected tracked pairs emit
+`Stopped(FilteredOut)`, and newly allowed active pairs emit `Started`. Pairs
+that remain allowed keep their tracking. Unchanged descriptors do not wake
+bodies or force pair recomputation.
+
+The shared settings convert to either dimension's Rapier `ActiveCollisionTypes`
+via `.into()` for free-collider builders. Ray queries use their own `QueryFilter`;
+these body-pair rules do not hide colliders from queries.
 
 ## Collision events and triggers
 
@@ -248,7 +342,7 @@ reasons are:
 | Reason | Meaning |
 |---|---|
 | `Separated` | The reported contact/intersection ended |
-| `FilteredOut` | The current collision groups reject the pair |
+| `FilteredOut` | The current collision groups or body-type rules reject the pair |
 | `Removed` | At least one collider was removed, including ECS despawn/exclusion or loss of a required component |
 | `TrackingDisabled` | Neither participant requests collision events anymore |
 | `Reconfigured` | A participant changed its sensor role |
@@ -434,6 +528,11 @@ impulses and sleeping. It cannot replace the body or change descriptor-owned
 settings. Teleports go through `PhysicsWorld::teleport`; kinematic motion uses
 the target/velocity components described above. Stepping goes through the ECS
 step system so input handling and transform synchronization happen together.
+
+`body_motion(handle).sleep()` zeros velocities and requests sleep. An isolated
+body holds its pose across subsequent steps despite gravity, until woken with
+`wake_up(true)`, a waking motion input, or an interaction with an awake body.
+Connected/contacting bodies follow Rapier's island sleep and wake rules.
 
 ```rust,ignore
 ctx.lock::<(ResMut<PhysicsWorld3D>,)>()

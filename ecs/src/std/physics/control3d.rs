@@ -158,7 +158,12 @@ impl PhysicsWorld3D {
                     true,
                 );
                 self.pose_resets.insert(handle);
+                if let Some(live) = self.colliders.get(*collider_handle) {
+                    self.collision_events
+                        .collider_changed(*collider_handle, live);
+                }
             }
+            body.enable_ccd(desc.ccd.is_some());
             body.set_linear_damping(desc.linear_damping as Real);
             body.set_angular_damping(desc.angular_damping as Real);
             body.set_gravity_scale(desc.gravity_scale as Real, true);
@@ -176,6 +181,30 @@ impl PhysicsWorld3D {
             live.set_restitution(collider.restitution as Real);
             live.set_sensor(collider.sensor.is_some());
             live.set_collision_groups(collider.collision_groups.unwrap_or_default().into());
+            let types = collider.collision_types.unwrap_or_default().into();
+            if live.active_collision_types() != types {
+                live.set_active_collision_types(types);
+                live.set_active_hooks(
+                    if collider
+                        .collision_types
+                        .unwrap_or_default()
+                        .restricts_dynamic_pairs()
+                    {
+                        ActiveHooks::FILTER_CONTACT_PAIRS
+                    } else {
+                        ActiveHooks::empty()
+                    },
+                );
+                // Rapier 0.36's type setter does not invalidate cached pairs. Mark
+                // GROUPS through its public API to refilter broad/narrow phases,
+                // restoring the original mask before any simulation observes it.
+                let groups = live.collision_groups();
+                live.set_collision_groups(InteractionGroups {
+                    filter: groups.filter ^ Group::GROUP_1,
+                    ..groups
+                });
+                live.set_collision_groups(groups);
+            }
             live.set_active_events(if collider.collision_events.is_some() {
                 ActiveEvents::COLLISION_EVENTS
             } else {
@@ -184,6 +213,7 @@ impl PhysicsWorld3D {
             if old_collider.sensor != collider.sensor
                 || old_collider.collision_events != collider.collision_events
                 || old_collider.collision_groups != collider.collision_groups
+                || old_collider.collision_types != collider.collision_types
             {
                 self.collision_events
                     .collider_changed(*collider_handle, live);

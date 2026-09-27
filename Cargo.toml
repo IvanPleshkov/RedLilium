@@ -97,10 +97,10 @@ clap = { version = "4.5", features = ["derive"] }
 
 # Physics
 nalgebra = { version = "0.33", features = ["convert-bytemuck", "serde-serialize"] }
-rapier3d = "0.32"
-rapier3d-f64 = { package = "rapier3d-f64", version = "0.32" }
-rapier2d = "0.32"
-rapier2d-f64 = { package = "rapier2d-f64", version = "0.32" }
+rapier3d = "0.36"
+rapier3d-f64 = { package = "rapier3d-f64", version = "0.36" }
+rapier2d = "0.36"
+rapier2d-f64 = { package = "rapier2d-f64", version = "0.36" }
 
 # Async IO runtime
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "io-util", "sync"] }

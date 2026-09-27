@@ -141,6 +141,8 @@ pub struct PhysicsWorld2D {
     pub(super) impulse_joints: ImpulseJointSet,
     pub(super) multibody_joints: MultibodyJointSet,
     pub(super) ccd_solver: CCDSolver,
+    // Required by Rapier; soft bodies are not exposed by the ECS integration.
+    soft_bodies: SoftBodySet,
 
     /// Maps ECS entity → rapier body handle.
     pub(super) entity_to_body: HashMap<crate::Entity, RigidBodyHandle>,
@@ -169,6 +171,7 @@ impl Default for PhysicsWorld2D {
             impulse_joints: ImpulseJointSet::new(),
             multibody_joints: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
+            soft_bodies: SoftBodySet::new(),
             entity_to_body: HashMap::new(),
             body_to_entity: HashMap::new(),
             entity_to_joint: HashMap::new(),
@@ -231,7 +234,7 @@ impl PhysicsWorld2D {
     /// Steps the physics simulation by one timestep.
     pub(super) fn step(&mut self) {
         redlilium_core::profile_scope!("rapier2d: step");
-        self.collision_events.prepare(&self.colliders);
+        self.collision_events.prepare(&self.colliders, &self.bodies);
         self.pipeline.step(
             self.gravity,
             &self.integration_parameters,
@@ -242,12 +245,17 @@ impl PhysicsWorld2D {
             &mut self.colliders,
             &mut self.impulse_joints,
             &mut self.multibody_joints,
+            &mut self.soft_bodies,
             &mut self.ccd_solver,
-            &(),
+            &super::collision_types::CollisionTypeHooks,
             self.collision_events.handler(),
         );
-        self.collision_events
-            .finish(&self.colliders, &self.narrow_phase, &self.body_to_entity);
+        self.collision_events.finish(
+            &self.colliders,
+            &self.bodies,
+            &self.narrow_phase,
+            &self.body_to_entity,
+        );
     }
 
     /// Inserts a standalone static collider (e.g. terrain) with no ECS owner.
@@ -272,7 +280,13 @@ impl PhysicsWorld2D {
         }
         self.collision_events.collider_removed(handle);
         self.colliders
-            .remove(handle, &mut self.island_manager, &mut self.bodies, true)
+            .remove(
+                handle,
+                &mut self.island_manager,
+                &mut self.bodies,
+                &mut self.soft_bodies,
+                true,
+            )
             .is_some()
     }
 
@@ -322,6 +336,7 @@ impl PhysicsWorld2D {
             &mut self.colliders,
             &mut self.impulse_joints,
             &mut self.multibody_joints,
+            &mut self.soft_bodies,
             true,
         );
     }
