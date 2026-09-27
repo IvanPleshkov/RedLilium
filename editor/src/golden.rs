@@ -23,7 +23,7 @@
 #![cfg(test)]
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use redlilium_core::color::{f16_to_f32, srgb_encode};
 use redlilium_core::math::{Vec3, quat_looking_along};
@@ -1570,7 +1570,7 @@ fn read_back_texture(
             BufferUsage::COPY_DST | BufferUsage::MAP_READ,
         ))
         .expect("readback buffer");
-    let result = Arc::new(Mutex::new(Vec::new()));
+    let result = redlilium_graphics::Readback::new();
     let mut transfer = TransferPass::new("golden_readback".into());
     transfer.set_transfer_config(
         TransferConfig::new()
@@ -1601,7 +1601,10 @@ fn read_back_texture(
         pipeline.wait_idle().expect("drain wait_idle");
     }
 
-    let data = result.lock().unwrap().clone();
+    let data = result
+        .take_result()
+        .expect("readback pending")
+        .expect("readback failed");
     assert_eq!(data.len(), byte_size as usize, "readback size");
     data
 }

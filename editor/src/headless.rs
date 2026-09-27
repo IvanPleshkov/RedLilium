@@ -429,10 +429,16 @@ fn tick(
 
     // Resolve last tick's pick readback into its remote response.
     if let Some(hit) = scene_view.resolve_pick() {
-        remote_commands::complete_point_pick(rc, &ew.world, &hit);
+        match hit {
+            Ok(hit) => remote_commands::complete_point_pick(rc, &ew.world, &hit),
+            Err(error) => remote_commands::fail_pick(rc, &ew.world, &error.to_string()),
+        }
     }
     if let Some(indices) = scene_view.resolve_rect_pick() {
-        remote_commands::complete_rect_pick(rc, &ew.world, &indices);
+        match indices {
+            Ok(indices) => remote_commands::complete_rect_pick(rc, &ew.world, &indices),
+            Err(error) => remote_commands::fail_pick(rc, &ew.world, &error.to_string()),
+        }
     }
 
     // Actions queued by last tick's remote commands apply here…

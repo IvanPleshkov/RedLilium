@@ -27,7 +27,7 @@ mod common;
 
 use rstest::rstest;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use common::{
     Backend, CENTERED_QUAD_VERTICES, ExpectedPixel, FULLSCREEN_QUAD_VERTICES,
@@ -1371,8 +1371,8 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
     let gfx_written = ctx.create_buffer(SIZE, BufferUsage::COPY_DST | BufferUsage::COPY_SRC);
     let readback_a = ctx.create_readback_buffer(SIZE);
     let readback_b = ctx.create_readback_buffer(SIZE);
-    let dst_a = Arc::new(Mutex::new(Vec::new()));
-    let dst_b = Arc::new(Mutex::new(Vec::new()));
+    let dst_a = redlilium_graphics::Readback::new();
+    let dst_b = redlilium_graphics::Readback::new();
 
     // Dedicated pipeline with 2 frames in flight (the shared TestContext
     // pipeline uses 1, which would serialize frames on the fence).
@@ -1457,12 +1457,20 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
     }
 
     assert_eq!(
-        dst_a.lock().unwrap().as_slice(),
+        dst_a
+            .take_result()
+            .expect("readback pending")
+            .expect("readback failed")
+            .as_slice(),
         &pattern_a[..],
         "graphics-read data must match the async-written pattern (frame 1 -> 2)"
     );
     assert_eq!(
-        dst_b.lock().unwrap().as_slice(),
+        dst_b
+            .take_result()
+            .expect("readback pending")
+            .expect("readback failed")
+            .as_slice(),
         &pattern_b[..],
         "async-read data must match the graphics-written pattern (frame 2 -> 3)"
     );
@@ -3837,7 +3845,11 @@ fn test_transfer_preflight_rejects_before_submission(#[case] backend: Backend) {
             vec![BufferCopyRegion::new(0, 12, 8)],
         ),
         TransferOperation::copy_buffer_whole(destination.clone(), destination.clone()),
-        TransferOperation::readback_buffer(source.clone(), 0..4, Arc::new(Mutex::new(vec![]))),
+        TransferOperation::readback_buffer(
+            source.clone(),
+            0..4,
+            redlilium_graphics::Readback::new(),
+        ),
         TransferOperation::copy_texture_whole(texture.clone(), texture.clone()),
         TransferOperation::upload_texture(
             source.clone(),
@@ -4807,4 +4819,401 @@ fn wgpu_recording_validation_returns_error_and_recovers() {
     schedule.submit(graph(valid)).unwrap();
     pipeline.end_frame(schedule);
     pipeline.wait_idle().unwrap();
+}
+
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn multiple_readbacks_and_empty_read_complete(
+    #[case] backend: Backend,
+    #[values(false, true)] recycle_all: bool,
+) {
+    use redlilium_graphics::{Readback, ReadbackStatus};
+    let Some(ctx) = TestContext::new(backend) else {
+        return;
+    };
+    let source = ctx.create_gpu_buffer(32, BufferUsage::STORAGE);
+    ctx.write_buffer(&source, &(0u8..32).collect::<Vec<_>>());
+    let buffer = ctx.create_readback_buffer(32);
+    let results = [Readback::new(), Readback::new(), Readback::new()];
+    let mut pass = TransferPass::new("several readbacks".into());
+    pass.set_transfer_config(
+        TransferConfig::new()
+            .with_operation(TransferOperation::copy_buffer_whole(source, buffer.clone()))
+            .with_operation(TransferOperation::readback_buffer(
+                buffer.clone(),
+                0..16,
+                results[0].clone(),
+            ))
+            .with_operation(TransferOperation::readback_buffer(
+                buffer.clone(),
+                8..32,
+                results[1].clone(),
+            ))
+            .with_operation(TransferOperation::readback_buffer(
+                buffer,
+                32..32,
+                results[2].clone(),
+            )),
+    );
+    let mut graph = RenderGraph::new();
+    graph.add_transfer_pass(pass);
+    ctx.execute_graph(graph);
+    if recycle_all {
+        ctx.pipeline.borrow_mut().recycle_all_graphs();
+    }
+    ctx.execute_graph(RenderGraph::new());
+    for result in &results {
+        assert_eq!(result.status(), ReadbackStatus::Ready);
+    }
+    let a = results[0].take_result().unwrap().unwrap();
+    let b = results[1].take_result().unwrap().unwrap();
+    if backend != Backend::Dummy {
+        assert_eq!(a, (0u8..16).collect::<Vec<_>>());
+        assert_eq!(b, (8u8..32).collect::<Vec<_>>());
+    }
+    assert!(results[2].take_result().unwrap().unwrap().is_empty());
+    assert_eq!(results[2].status(), ReadbackStatus::Consumed);
+    assert!(results[2].take_result().is_none());
+}
+
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn texture_views_read_previous_mip_write_next_and_copy_same_texture(#[case] backend: Backend) {
+    use redlilium_graphics::{
+        TextureCopyRegion, TextureViewDescriptor as View, TextureViewDimension as Dim,
+    };
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::diagnostics::vulkan::reset_validation_error_count();
+    }
+    let texture = ctx
+        .device
+        .create_texture(
+            &TextureDescriptor::new_2d_array(
+                8,
+                8,
+                2,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING
+                    | TextureUsage::RENDER_ATTACHMENT
+                    | TextureUsage::COPY_SRC
+                    | TextureUsage::COPY_DST,
+            )
+            .with_mip_levels(4)
+            .with_cross_queue(true),
+        )
+        .unwrap();
+    let mesh = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &mesh, &FULLSCREEN_QUAD_VERTICES);
+    let material = create_texture_sample_material(&ctx);
+    let sampler = ctx
+        .device
+        .create_sampler(&SamplerDescriptor::nearest())
+        .unwrap();
+    let view = |mip, layer| {
+        ctx.device
+            .create_texture_view(
+                &texture,
+                &View::new(Dim::D2)
+                    .with_mip_levels(mip, 1)
+                    .with_array_layers(layer, 1),
+            )
+            .unwrap()
+    };
+    let mut initial = RenderGraph::new();
+    let mut clear = GraphicsPass::new("initial red".into());
+    clear.set_render_targets(RenderTargetConfig::new().with_color(
+        ColorAttachment::new(RenderTarget::from_view(view(0, 0))).with_clear_color(1., 0., 0., 1.),
+    ));
+    initial.add_graphics_pass(clear);
+    ctx.execute_graph(initial);
+    // A fresh submission must retain mip 0's layout while transitioning only mip 1.
+    let group = ctx
+        .device
+        .create_binding_group(
+            material.binding_layouts()[0].clone(),
+            BindingGroupDescriptor::new()
+                .with_texture_view(0, view(0, 0))
+                .with_sampler(1, sampler.clone()),
+        )
+        .unwrap();
+    let mut graph = RenderGraph::new();
+    let mut draw = GraphicsPass::new("mip 0 to mip 1".into());
+    draw.set_render_targets(RenderTargetConfig::new().with_color(
+        ColorAttachment::new(RenderTarget::from_view(view(1, 0))).with_clear_color(0., 0., 0., 1.),
+    ));
+    draw.add_draw(
+        mesh.clone(),
+        Arc::new(MaterialInstance::new(material.clone()).with_binding_group(group)),
+    );
+    let rendered = graph.add_graphics_pass(draw);
+    let mut copy = TransferPass::new("same texture disjoint layers".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::copy_texture(
+            texture.clone(),
+            texture.clone(),
+            vec![TextureCopyRegion::new(
+                TextureCopyLocation::mip(1),
+                TextureCopyLocation::new(1, TextureOrigin::new(0, 0, 1)),
+                Extent3d::new_2d(4, 4),
+            )],
+        ),
+    ));
+    let copied = graph.add_transfer_pass(copy);
+    graph.add_dependency(copied, rendered);
+    ctx.execute_graph(graph);
+    let buffer = ctx.create_readback_buffer(1024);
+    let mut graph = RenderGraph::new();
+    let mut read = TransferPass::new("copied mip".into());
+    read.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture(
+            texture.clone(),
+            buffer.clone(),
+            vec![BufferTextureCopyRegion::new(
+                BufferTextureLayout::new(0, Some(256), None),
+                TextureCopyLocation::new(1, TextureOrigin::new(0, 0, 1)),
+                Extent3d::new_2d(4, 4),
+            )],
+        ),
+    ));
+    graph.add_transfer_pass(read);
+    ctx.execute_graph(graph);
+    let pixels = ctx.read_buffer(&buffer, 1024);
+    if backend != Backend::Dummy {
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(
+                    &pixels[y * 256 + x * 4..y * 256 + x * 4 + 4],
+                    &[255, 0, 0, 255]
+                );
+            }
+        }
+    }
+    // Sampling the written mip is invalid and must fail before recording.
+    let group = ctx
+        .device
+        .create_binding_group(
+            material.binding_layouts()[0].clone(),
+            BindingGroupDescriptor::new()
+                .with_texture_view(0, view(1, 0))
+                .with_sampler(1, sampler),
+        )
+        .unwrap();
+    let mut invalid = RenderGraph::new();
+    let mut pass = GraphicsPass::new("overlapping view".into());
+    pass.set_render_targets(
+        RenderTargetConfig::new()
+            .with_color(ColorAttachment::new(RenderTarget::from_view(view(1, 0)))),
+    );
+    pass.add_draw(
+        mesh,
+        Arc::new(MaterialInstance::new(material).with_binding_group(group)),
+    );
+    invalid.add_graphics_pass(pass);
+    {
+        let mut pipeline = ctx.pipeline.borrow_mut();
+        let mut schedule = pipeline.begin_frame().unwrap();
+        assert!(matches!(
+            schedule.submit(invalid),
+            Err(redlilium_graphics::GraphicsError::InvalidParameter(_))
+        ));
+        schedule.submit(RenderGraph::new()).unwrap();
+        pipeline.end_frame(schedule);
+        pipeline.wait_idle().unwrap();
+    }
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        assert_eq!(
+            redlilium_graphics::diagnostics::vulkan::validation_error_count(),
+            0
+        );
+    }
+}
+
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn views_of_disjoint_layers_compile_in_strict_mode(#[case] backend: Backend) {
+    use redlilium_graphics::{TextureViewDescriptor as View, TextureViewDimension as Dim};
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    let texture = ctx
+        .device
+        .create_texture(&TextureDescriptor::new_2d_array(
+            4,
+            4,
+            2,
+            TextureFormat::Rgba8Unorm,
+            TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+        ))
+        .unwrap();
+    let mut graph = RenderGraph::new();
+    for layer in 0..2 {
+        let view = ctx
+            .device
+            .create_texture_view(&texture, &View::new(Dim::D2).with_array_layers(layer, 1))
+            .unwrap();
+        let mut pass = GraphicsPass::new(format!("layer {layer}"));
+        pass.set_render_targets(RenderTargetConfig::new().with_color(
+            ColorAttachment::new(RenderTarget::from_view(view)).with_clear_color(
+                layer as f32,
+                1. - layer as f32,
+                0.,
+                1.,
+            ),
+        ));
+        graph.add_graphics_pass(pass);
+    }
+    {
+        let mut pipeline = ctx.pipeline.borrow_mut();
+        let mut schedule = pipeline.begin_frame().unwrap();
+        schedule
+            .submit_with_mode(graph, RenderGraphCompilationMode::Strict)
+            .unwrap();
+        pipeline.end_frame(schedule);
+        pipeline.wait_idle().unwrap();
+    }
+    for layer in 0..2 {
+        let rb = ctx.create_readback_buffer(1024);
+        let mut graph = RenderGraph::new();
+        let mut pass = TransferPass::new("layer check".into());
+        pass.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::readback_texture(
+                texture.clone(),
+                rb.clone(),
+                vec![BufferTextureCopyRegion::new(
+                    BufferTextureLayout::new(0, Some(256), None),
+                    TextureCopyLocation::new(0, TextureOrigin::new(0, 0, layer)),
+                    Extent3d::new_2d(4, 4),
+                )],
+            ),
+        ));
+        graph.add_transfer_pass(pass);
+        ctx.execute_graph(graph);
+        let bytes = ctx.read_buffer(&rb, 1024);
+        if backend != Backend::Dummy {
+            assert_eq!(
+                &bytes[..4],
+                &[layer as u8 * 255, (1 - layer) as u8 * 255, 0, 255]
+            );
+        }
+    }
+}
+
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn integer_and_volume_view_bindings_execute(#[case] backend: Backend) {
+    use redlilium_graphics::{
+        ShaderStageFlags, TextureDimension, TextureSampleType as Sample,
+        TextureViewDescriptor as View, TextureViewDimension as Dim,
+    };
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        return;
+    };
+    for (format, dimension, sample, shader, value) in [
+        (
+            TextureFormat::R32Uint,
+            TextureDimension::D2,
+            Sample::Uint,
+            "@group(0) @binding(0) var image: texture_2d<u32>; @group(0) @binding(1) var<storage,read_write> output: u32; @compute @workgroup_size(1) fn main(){output=textureLoad(image,vec2i(0),0).x;}",
+            42u32.to_le_bytes(),
+        ),
+        (
+            TextureFormat::R32Float,
+            TextureDimension::D3,
+            Sample::Float { filterable: false },
+            "@group(0) @binding(0) var image: texture_3d<f32>; @group(0) @binding(1) var<storage,read_write> output: u32; @compute @workgroup_size(1) fn main(){output=u32(textureLoad(image,vec3i(0),0).x);}",
+            42f32.to_le_bytes(),
+        ),
+    ] {
+        let texture = ctx
+            .device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    1,
+                    1,
+                    format,
+                    TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+                )
+                .with_dimension(dimension),
+            )
+            .unwrap();
+        let view = ctx
+            .device
+            .create_texture_view(&texture, &View::new(dimension.into()))
+            .unwrap();
+        let layout = Arc::new(
+            BindingLayout::new()
+                .with_entry(
+                    BindingLayoutEntry::new(
+                        0,
+                        BindingType::SampledTexture {
+                            dimension: if dimension == TextureDimension::D3 {
+                                Dim::D3
+                            } else {
+                                Dim::D2
+                            },
+                            sample_type: sample,
+                            multisampled: false,
+                        },
+                    )
+                    .with_visibility(ShaderStageFlags::COMPUTE),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(1, BindingType::StorageBuffer)
+                        .with_visibility(ShaderStageFlags::COMPUTE),
+                ),
+        );
+        let output = ctx.create_gpu_buffer(4, BufferUsage::STORAGE);
+        let material = ctx
+            .device
+            .create_material(
+                &MaterialDescriptor::new()
+                    .with_shader(ShaderSource::compute(shader, "main"))
+                    .with_binding_layout(layout.clone()),
+            )
+            .unwrap();
+        let group = ctx
+            .device
+            .create_binding_group(
+                layout,
+                BindingGroupDescriptor::new()
+                    .with_texture_view(0, view)
+                    .with_buffer(1, output.clone()),
+            )
+            .unwrap();
+        let mut graph = RenderGraph::new();
+        let mut upload = TransferPass::new("typed texture upload".into());
+        upload.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::upload_texture_level(&ctx.device, texture, 0, 0, &value).unwrap(),
+        ));
+        graph.add_transfer_pass(upload);
+        let mut pass = redlilium_graphics::ComputePass::new("typed view load".into());
+        pass.add_dispatch(
+            Arc::new(MaterialInstance::new(material).with_binding_group(group)),
+            1,
+            1,
+            1,
+        );
+        graph.add_compute_pass(pass);
+        let rb = ctx.create_readback_buffer(4);
+        let mut copy = TransferPass::new("result".into());
+        copy.set_transfer_config(
+            TransferConfig::new()
+                .with_operation(TransferOperation::copy_buffer_whole(output, rb.clone())),
+        );
+        graph.add_transfer_pass(copy);
+        ctx.execute_graph(graph);
+        assert_eq!(ctx.read_buffer(&rb, 4), 42u32.to_le_bytes());
+    }
 }

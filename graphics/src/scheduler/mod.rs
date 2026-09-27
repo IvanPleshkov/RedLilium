@@ -307,10 +307,12 @@ impl FrameSchedule {
 
         let compiled = graph.compile(mode)?;
         let usage = GraphUsage::from_compiled(compiled);
+        let readbacks = crate::readback::ReadbackReservations::reserve(&graph)?;
         {
             let backend = self.device.instance().backend();
             backend.execute_graph(&graph, graph.compiled().unwrap(), fence.gpu_fence())?;
         }
+        readbacks.commit();
         let handle = SubmitHandle {
             index: self.fences.len(),
         };

@@ -11,8 +11,6 @@
 //! shared with file textures.)
 #![cfg(feature = "rendering")]
 
-use std::sync::{Arc, Mutex};
-
 use redlilium_assets::Guid;
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
@@ -112,7 +110,7 @@ fn offscreen_camera_clear_lands_in_virtual_texture() {
             BufferUsage::COPY_DST | BufferUsage::MAP_READ,
         ))
         .expect("readback buffer");
-    let pixels = Arc::new(Mutex::new(Vec::new()));
+    let pixels = redlilium_graphics::Readback::new();
     let mut transfer = TransferPass::new("virtual_readback".into());
     transfer.set_transfer_config(
         TransferConfig::new()
@@ -139,7 +137,10 @@ fn offscreen_camera_clear_lands_in_virtual_texture() {
     pipeline.end_frame(schedule);
     pipeline.wait_idle().expect("wait_idle 2");
 
-    let pixels = pixels.lock().unwrap();
+    let pixels = pixels
+        .take_result()
+        .expect("readback pending")
+        .expect("readback failed");
     assert_eq!(pixels.len(), byte_size as usize, "readback completed");
     // Sample a few points: all must be the offscreen camera's red clear.
     for (x, y) in [(0, 0), (SIZE / 2, SIZE / 2), (SIZE - 1, SIZE - 1)] {

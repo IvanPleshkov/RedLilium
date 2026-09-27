@@ -513,6 +513,20 @@ impl GraphicsDevice {
         Ok(texture)
     }
 
+    /// Create an immutable view; resource contents and GPU ordering remain graph operations.
+    pub fn create_texture_view(
+        self: &Arc<Self>,
+        texture: &Arc<Texture>,
+        descriptor: &crate::TextureViewDescriptor,
+    ) -> Result<Arc<crate::TextureView>, GraphicsError> {
+        if !Arc::ptr_eq(self, texture.device()) {
+            return Err(GraphicsError::InvalidParameter(
+                "texture belongs to another device".into(),
+            ));
+        }
+        texture.create_view(descriptor)
+    }
+
     /// Create a bottom-level acceleration structure over triangle geometry
     /// (#110, ADR-032).
     ///
@@ -972,7 +986,7 @@ impl GraphicsDevice {
     pub fn create_binding_group(
         self: &Arc<Self>,
         layout: Arc<crate::materials::BindingLayout>,
-        descriptor: crate::materials::BindingGroupDescriptor,
+        mut descriptor: crate::materials::BindingGroupDescriptor,
     ) -> Result<Arc<crate::materials::BindingGroup>, GraphicsError> {
         profile_scope!("create_binding_group");
 
@@ -1032,11 +1046,14 @@ impl GraphicsDevice {
             if entry.sampled_depth_layout
                 == crate::materials::SampledDepthLayout::DepthStencilReadOnly
             {
-                let depth = matches!(
-                    &entry.resource,
-                    crate::materials::BoundResource::Texture(t)
-                        if t.format().is_depth_stencil()
-                );
+                let depth = match &entry.resource {
+                    crate::BoundResource::Texture(t) => t.format().is_depth_stencil(),
+                    crate::BoundResource::TextureView(v) => {
+                        v.format().is_depth_stencil()
+                            && v.range().aspect != crate::TextureAspect::StencilOnly
+                    }
+                    _ => false,
+                };
                 if !depth {
                     return Err(GraphicsError::InvalidParameter(format!(
                         "binding {} declares DepthStencilReadOnly sampled layout but is not a \
@@ -1047,6 +1064,20 @@ impl GraphicsDevice {
             }
         }
 
+        // Legacy texture bindings resolve to the same view representation.
+        for entry in &mut descriptor.entries {
+            if let crate::BoundResource::Texture(texture) = &entry.resource {
+                let aspect = if texture.format().is_depth_stencil() {
+                    crate::TextureAspect::DepthOnly
+                } else {
+                    crate::TextureAspect::All
+                };
+                let desc = crate::TextureViewDescriptor::new(texture.dimension().into())
+                    .with_aspect(aspect);
+                entry.resource =
+                    crate::BoundResource::TextureView(self.create_texture_view(texture, &desc)?);
+            }
+        }
         crate::validation::binding_group(self, &layout, &descriptor)?;
 
         let gpu_handle = self
@@ -1660,9 +1691,10 @@ fn resource_matches_binding_type(
                 | BindingType::StorageBuffer
                 | BindingType::StorageBufferReadOnly
         ),
-        BoundResource::Texture(_) => matches!(
+        BoundResource::Texture(_) | BoundResource::TextureView(_) => matches!(
             binding_type,
-            BindingType::Texture
+            BindingType::SampledTexture { .. }
+                | BindingType::Texture
                 | BindingType::TextureCube
                 | BindingType::Texture2DArray
                 | BindingType::DepthTexture

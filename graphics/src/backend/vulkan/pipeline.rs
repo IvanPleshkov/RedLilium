@@ -581,7 +581,8 @@ impl PipelineManager {
                     BindingType::Sampler | BindingType::ComparisonSampler => {
                         vk::DescriptorType::SAMPLER
                     }
-                    BindingType::Texture
+                    BindingType::SampledTexture { .. }
+                    | BindingType::Texture
                     | BindingType::TextureCube
                     | BindingType::Texture2DArray
                     | BindingType::DepthTexture

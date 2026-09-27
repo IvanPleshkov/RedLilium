@@ -46,6 +46,7 @@ enum ResourceKey {
 pub(crate) struct GraphUsage {
     /// Resources any pass of the graph reads.
     reads: HashSet<ResourceKey>,
+    textures: Vec<(usize, crate::TextureSubresourceRange, bool)>,
     /// Resources any pass of the graph writes.
     writes: HashSet<ResourceKey>,
 }
@@ -57,7 +58,12 @@ impl GraphUsage {
         for pass_usage in compiled.pass_usages() {
             for decl in &pass_usage.texture_usages {
                 let key = ResourceKey::Texture(std::sync::Arc::as_ptr(&decl.texture) as usize);
-                usage.insert(key, decl.access.is_write());
+                let ResourceKey::Texture(id) = key else {
+                    unreachable!()
+                };
+                usage
+                    .textures
+                    .push((id, decl.range(), decl.access.is_write()));
             }
             for decl in &pass_usage.buffer_usages {
                 let key = ResourceKey::Buffer(std::sync::Arc::as_ptr(&decl.buffer) as usize);
@@ -84,7 +90,8 @@ impl GraphUsage {
     ///
     /// Read-after-read is not a hazard and derives no edge.
     pub(crate) fn conflicts_with(&self, next: &GraphUsage) -> bool {
-        next.reads.iter().any(|key| self.writes.contains(key)) // RAW
+        self.textures.iter().any(|(id,range,write)|next.textures.iter().any(|(other,r,w)|id==other && (*write||*w) && range.overlaps(*r)))
+            || next.reads.iter().any(|key| self.writes.contains(key)) // RAW
             || next
                 .writes
                 .iter()
@@ -102,6 +109,7 @@ mod tests {
 
     fn usage(reads: &[usize], writes: &[usize]) -> GraphUsage {
         GraphUsage {
+            textures: Vec::new(),
             reads: reads.iter().map(|&id| key(id)).collect(),
             writes: writes.iter().map(|&id| key(id)).collect(),
         }
@@ -150,5 +158,40 @@ mod tests {
         let mut b = GraphUsage::default();
         b.insert(ResourceKey::Buffer(7), false);
         assert!(!a.conflicts_with(&b));
+    }
+}
+
+#[cfg(test)]
+mod ranges {
+    use super::*;
+    #[test]
+    fn only_overlapping_texture_submissions_conflict() {
+        let a = crate::TextureSubresourceRange {
+            aspect: crate::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: 1,
+            base_array_layer: 0,
+            array_layer_count: 1,
+        };
+        let usage = |range, write| GraphUsage {
+            textures: vec![(1, range, write)],
+            ..Default::default()
+        };
+        assert!(!usage(a, true).conflicts_with(&usage(
+            crate::TextureSubresourceRange {
+                base_mip_level: 1,
+                ..a
+            },
+            false
+        )));
+        assert!(!usage(a, true).conflicts_with(&usage(
+            crate::TextureSubresourceRange {
+                base_array_layer: 1,
+                ..a
+            },
+            true
+        )));
+        assert!(usage(a, true).conflicts_with(&usage(a, false)));
+        assert!(!usage(a, false).conflicts_with(&usage(a, false)));
     }
 }

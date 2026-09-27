@@ -4,7 +4,7 @@
 //! across different backend implementations.
 
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use redlilium_graphics::{
     BackendType, BindingGroupDescriptor, Buffer, BufferDescriptor, BufferUsage, ColorAttachment,
@@ -323,7 +323,7 @@ impl TestContext {
     /// sanctioned readback path; `GraphicsDevice` no longer exposes a direct
     /// `read_buffer`.
     pub fn read_buffer(&self, buffer: &Arc<Buffer>, size: u64) -> Vec<u8> {
-        let dst = Arc::new(Mutex::new(Vec::new()));
+        let dst = redlilium_graphics::Readback::new();
 
         let mut graph = RenderGraph::new();
         let mut pass = TransferPass::new("test_readback".into());
@@ -348,7 +348,9 @@ impl TestContext {
         pipeline.end_frame(schedule);
         pipeline.wait_idle().expect("wait_idle failed");
 
-        dst.lock().unwrap().clone()
+        dst.take_result()
+            .expect("readback pending")
+            .expect("readback failed")
     }
 
     /// Upload `data` into `buffer` through the frame graph (a `WriteBuffer`

@@ -1014,7 +1014,13 @@ impl GraphicsPass {
             // Color attachments
             for color in &targets.color_attachments {
                 if let Some(texture) = color.target.texture() {
-                    usage.add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                    usage.add_texture_decl(
+                        super::resource_usage::TextureUsageDecl::new(
+                            texture.clone(),
+                            TextureAccessMode::RenderTargetWrite,
+                        )
+                        .with_range(color.target.subresource_range().unwrap()),
+                    );
                 } else {
                     let access = if matches!(color.load_op, LoadOp::Load) {
                         SurfaceAccess::ReadWrite
@@ -1026,8 +1032,13 @@ impl GraphicsPass {
                 // Resolve targets are also written to.
                 if let Some(resolve) = &color.resolve_target {
                     if let Some(texture) = resolve.texture() {
-                        usage
-                            .add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                        usage.add_texture_decl(
+                            super::resource_usage::TextureUsageDecl::new(
+                                texture.clone(),
+                                TextureAccessMode::RenderTargetWrite,
+                            )
+                            .with_range(resolve.subresource_range().unwrap()),
+                        );
                     } else {
                         usage.set_surface_access(SurfaceAccess::Write);
                     }
@@ -1043,7 +1054,10 @@ impl GraphicsPass {
                 } else {
                     TextureAccessMode::DepthStencilWrite
                 };
-                usage.add_texture(Arc::clone(texture), access);
+                usage.add_texture_decl(
+                    super::resource_usage::TextureUsageDecl::new(texture.clone(), access)
+                        .with_range(depth.target.subresource_range().unwrap()),
+                );
             }
         }
 
@@ -1108,6 +1122,7 @@ impl GraphicsPass {
                 i != j
                     && other.access == TextureAccessMode::ShaderRead
                     && Arc::ptr_eq(&attach.texture, &other.texture)
+                    && attach.range().overlaps(other.range())
             });
             if sampled_plain {
                 log::error!(
@@ -1130,7 +1145,7 @@ impl GraphicsPass {
 /// pass with N draws would declare the same buffers N times (N tracker
 /// lookups per frame in the Vulkan backend).
 struct BufferDeclSet {
-    textures: HashSet<(usize, TextureAccessMode)>,
+    textures: HashSet<(usize, TextureAccessMode, crate::TextureSubresourceRange)>,
     groups: HashSet<(usize, usize)>,
     heaps: HashSet<usize>,
     seen: HashSet<(*const Buffer, BufferAccessMode)>,
@@ -1152,10 +1167,11 @@ impl BufferDeclSet {
         texture: &Arc<crate::Texture>,
         access: TextureAccessMode,
     ) {
-        if self
-            .textures
-            .insert((Arc::as_ptr(texture) as usize, access))
-        {
+        if self.textures.insert((
+            Arc::as_ptr(texture) as usize,
+            access,
+            crate::TextureSubresourceRange::whole(texture),
+        )) {
             usage.add_texture(Arc::clone(texture), access);
         }
     }
@@ -1207,6 +1223,22 @@ fn extract_material_resources(
                 SampledDepthLayout::ShaderReadOnly => TextureAccessMode::ShaderRead,
             };
             let buffer = match &entry.resource {
+                BoundResource::TextureView(view) => {
+                    if seen.textures.insert((
+                        Arc::as_ptr(view.texture()) as usize,
+                        sampled_access,
+                        view.range(),
+                    )) {
+                        usage.add_texture_decl(
+                            super::resource_usage::TextureUsageDecl::new(
+                                view.texture().clone(),
+                                sampled_access,
+                            )
+                            .with_range(view.range()),
+                        );
+                    }
+                    continue;
+                }
                 BoundResource::Texture(tex) => {
                     seen.add_texture(usage, tex, sampled_access);
                     continue;

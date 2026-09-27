@@ -72,8 +72,48 @@ browser validates it. Such errors, and errors reported after queue submission,
 are retained and returned by the next resource creation or graph submission.
 Submitted resources remain protected by their fence even when a later error arrives.
 
-Texture views and precise mip/layer tracking are described in the
-[API proposal](TEXTURE_VIEWS_DESIGN.md); they are not implemented yet.
+Texture views select validated mip/layer ranges and aspects. Create them with
+`device.create_texture_view(&texture, &TextureViewDescriptor::new(dimension))`,
+then bind with `with_texture_view` or attach with `RenderTarget::from_view`.
+Attachment views select one 2D mip/layer; D3 views sample volumes, not individual
+Z slices. Cube views select six aligned faces. The texture keeps weak references
+to cached views; each live view retains its parent texture. Legacy texture binding
+and attachment helpers remain available.
+
+`BindingType::SampledTexture` specifies view dimension, Float/Sint/Uint/Depth sample
+type and multisampling. Existing texture binding variants remain equivalent
+conveniences. Storage texture bindings and format reinterpretation are not added.
+
+Graph dependencies and Vulkan barriers track mip/layer ranges across passes,
+submissions and queues. Whole-texture bindings declare all levels and layers.
+Overlapping incompatible accesses in a graphics/compute pass are rejected;
+read-only depth co-attachment still uses its explicit sampled-depth layout.
+Disjoint subresources can be sampled and rendered in the same pass. Vulkan
+conservatively tracks depth/stencil aspects together; D3 tracking is per mip.
+The implementation and scope are described in [the design](TEXTURE_VIEWS_DESIGN.md).
+
+### Readback results
+
+Create a fresh `Readback::new()` for each `TransferOperation::readback_buffer`
+operation. After a successful graph submission and frame-slot retirement,
+`take_result()` yields `Some(Ok(bytes))` or `Some(Err(error))` once; `status()`
+distinguishes Pending, Ready and Consumed. Empty successful reads are explicit.
+Submission errors must be handled separately: an unsubmitted request is still
+pending. Reusing a result handle in another submitted operation is rejected.
+Readbacks start when `begin_frame` retires a slot or `recycle_all_graphs` drains
+completed graphs. wgpu mapping then needs device polling (driven by subsequent
+frames); `wait_idle` alone does not consume graph readback requests.
+
+Requests from one retiring slot sharing a buffer use a single mapping of the
+union of their ranges. Further batches queue until unmap; requests are never
+silently skipped. GPU access to a buffer with a pending CPU mapping is rejected.
+This is a post-fence read of the readback buffer, not a snapshot at each marker:
+use separate source buffers if distinct intermediate GPU results are required.
+Editor picking and screenshots consume these results and report failures.
+
+Migration: replace `Arc<Mutex<Vec<u8>>>` destinations with `Readback`, and polling
+an empty vector with `take_result()`/`status()`. For repeated operations create
+new handles rather than clearing and reusing the previous result.
 
 ### Transfer validation
 
@@ -100,9 +140,10 @@ contract includes:
   height. Buffer copies of combined depth/stencil or `Depth24Plus`, and uploads
   of `Depth32Float`, are unsupported by the common contract.
 - Texture copies require matching dimension classes, sample counts, and formats
-  (linear/sRGB counterparts are compatible). Source and destination must be
-  different resources, even for disjoint buffer ranges or texture subresources.
-  In-place texture copies need subresource tracking, which is not implemented.
+  (linear/sRGB counterparts are compatible). Buffer copies require different
+  resources. Same-texture copies are allowed
+  only when all source and destination mip/layer ranges are disjoint; disjoint
+  pixel rectangles within the same subresource remain unsupported.
 - Mip generation requires `COPY_SRC | COPY_DST` and, for multiple levels, a
   single-sampled 2D texture, 2D array, cubemap, cube array or 3D volume with a
   supported format. A single level is a no-op.

@@ -6,7 +6,7 @@
 //!
 //! Also maintains an R32Uint entity-index texture for GPU-based object picking.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use redlilium_core::math::mat4_to_cols_array_2d;
 use redlilium_ecs::ui::Selection;
@@ -117,10 +117,10 @@ pub struct SceneViewState {
     pending_pick: Option<[u32; 2]>,
     /// Single-pixel pick result bytes, filled by the frame pipeline after the GPU
     /// readback completes (one or more frames later). Polled by `resolve_pick`.
-    pick_result: Arc<Mutex<Vec<u8>>>,
+    pick_result: redlilium_graphics::Readback,
     /// Frames a pending pick has been held waiting on `readback_buffer`'s prior
-    /// async map to resolve (#33). Only a diagnostic — the map callback always
-    /// clears the flag, so this can't wedge; a high value flags a stuck readback.
+    /// async map to resolve (#33). A high value flags a stuck readback or
+    /// missing device polling.
     pick_wait_frames: u32,
 
     // --- Selection outline ---
@@ -143,7 +143,7 @@ pub struct SceneViewState {
     pending_rect_pick: Option<[u32; 4]>,
     rect_readback_buffer: Arc<Buffer>,
     /// Rect pick result bytes, filled by the frame pipeline post-readback.
-    rect_result: Arc<Mutex<Vec<u8>>>,
+    rect_result: redlilium_graphics::Readback,
     /// Dimensions [w, h] and padded bytes_per_row of the last rect readback.
     rect_pick_layout: [u32; 3],
     /// As [`pick_wait_frames`](Self::pick_wait_frames) but for the rect readback.
@@ -267,11 +267,11 @@ impl SceneViewState {
             has_selection: false,
             readback_buffer,
             pending_pick: None,
-            pick_result: Arc::new(Mutex::new(Vec::new())),
+            pick_result: redlilium_graphics::Readback::new(),
             pick_wait_frames: 0,
             pending_rect_pick: None,
             rect_readback_buffer,
-            rect_result: Arc::new(Mutex::new(Vec::new())),
+            rect_result: redlilium_graphics::Readback::new(),
             rect_pick_layout: [0; 3],
             rect_wait_frames: 0,
             frame_ring_buffer: None,
@@ -624,9 +624,7 @@ impl SceneViewState {
         );
 
         // Clear any stale result so `resolve_pick` only sees this readback.
-        if let Ok(mut g) = self.pick_result.lock() {
-            g.clear();
-        }
+        self.pick_result = redlilium_graphics::Readback::new();
 
         let mut pass = TransferPass::new("pick_readback".into());
         pass.set_transfer_config(TransferConfig::new().with_operations(vec![
@@ -700,13 +698,10 @@ impl SceneViewState {
     /// space) and the depth-derived world-space surface point. A miss is a
     /// completed result, not a pending one: remote picks must answer it. The
     /// result is consumed once read.
-    pub fn resolve_pick(&mut self) -> Option<PickHit> {
-        let data = {
-            let mut guard = self.pick_result.lock().ok()?;
-            if guard.len() < PICK_DEPTH_OFFSET as usize + 4 {
-                return None; // not ready yet
-            }
-            std::mem::take(&mut *guard)
+    pub fn resolve_pick(&mut self) -> Option<Result<PickHit, redlilium_graphics::GraphicsError>> {
+        let data = match self.pick_result.take_result()? {
+            Ok(bytes) => bytes,
+            Err(error) => return Some(Err(error)),
         };
         let value = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let d = PICK_DEPTH_OFFSET as usize;
@@ -724,10 +719,10 @@ impl SceneViewState {
         } else {
             Some(value - 1) // shader wrote entity_index + 1
         };
-        Some(PickHit {
+        Some(Ok(PickHit {
             entity,
             world_point,
-        })
+        }))
     }
 
     // ---- Rect selection readback ----
@@ -792,7 +787,7 @@ impl SceneViewState {
 
     /// Build a transfer pass that copies a rectangular region from the
     /// entity-index texture into the rect readback buffer.
-    pub fn build_rect_readback(&self, x: u32, y: u32, w: u32, h: u32) -> TransferPass {
+    pub fn build_rect_readback(&mut self, x: u32, y: u32, w: u32, h: u32) -> TransferPass {
         let bytes_per_row = (w * 4).div_ceil(256) * 256;
 
         let region = BufferTextureCopyRegion::new(
@@ -807,9 +802,7 @@ impl SceneViewState {
 
         let total_bytes = (bytes_per_row * h) as usize;
 
-        if let Ok(mut g) = self.rect_result.lock() {
-            g.clear();
-        }
+        self.rect_result = redlilium_graphics::Readback::new();
 
         let mut pass = TransferPass::new("rect_pick_readback".into());
         pass.set_transfer_config(TransferConfig::new().with_operations(vec![
@@ -836,15 +829,14 @@ impl SceneViewState {
 
     /// Read rect pick results from the readback buffer.
     ///
-    /// Returns `Some(entity_indices)` with unique entity indices found in the
-    /// rectangle, or `None` if still waiting for the GPU.
-    pub fn resolve_rect_pick(&mut self) -> Option<Vec<u32>> {
-        let data = {
-            let mut guard = self.rect_result.lock().ok()?;
-            if guard.is_empty() {
-                return None; // not ready yet
-            }
-            std::mem::take(&mut *guard)
+    /// Returns unique entity indices or a readback error once complete;
+    /// `None` means no completed result is available.
+    pub fn resolve_rect_pick(
+        &mut self,
+    ) -> Option<Result<Vec<u32>, redlilium_graphics::GraphicsError>> {
+        let data = match self.rect_result.take_result()? {
+            Ok(bytes) => bytes,
+            Err(error) => return Some(Err(error)),
         };
 
         let [w, h, bytes_per_row] = self.rect_pick_layout;
@@ -867,7 +859,7 @@ impl SceneViewState {
             }
         }
 
-        Some(unique.into_iter().collect())
+        Some(Ok(unique.into_iter().collect()))
     }
 
     /// Clear the viewport (e.g. when the SceneView tab is not visible).

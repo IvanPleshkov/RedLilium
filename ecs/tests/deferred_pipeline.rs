@@ -14,8 +14,6 @@
 //! `environment` asset.
 #![cfg(feature = "rendering")]
 
-use std::sync::{Arc, Mutex};
-
 use redlilium_assets::Guid;
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
@@ -125,7 +123,7 @@ fn deferred_camera_no_environment_fallback() {
             BufferUsage::COPY_DST | BufferUsage::MAP_READ,
         ))
         .expect("readback buffer");
-    let pixels = Arc::new(Mutex::new(Vec::new()));
+    let pixels = redlilium_graphics::Readback::new();
     let mut transfer = TransferPass::new("deferred_readback".into());
     transfer.set_transfer_config(
         TransferConfig::new()
@@ -154,7 +152,10 @@ fn deferred_camera_no_environment_fallback() {
     pipeline.end_frame(schedule);
     pipeline.wait_idle().expect("wait_idle 2");
 
-    let data = pixels.lock().unwrap().clone();
+    let data = pixels
+        .take_result()
+        .expect("readback pending")
+        .expect("readback failed");
     assert_eq!(data.len(), byte_size as usize, "readback size");
 
     // Fallback contract (#145): no environment + no meshes ⇒ every pixel is

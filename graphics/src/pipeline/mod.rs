@@ -279,48 +279,18 @@ impl FramePipeline {
         }
     }
 
-    /// Begin a new frame and return a schedule for graph submission.
-    ///
-    /// This waits for the current frame slot to become available. If the GPU
-    /// is still processing a previous frame in this slot, this call blocks
-    /// until that work completes.
-    ///
-    /// Returns a [`FrameSchedule`] for submitting render graphs.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// loop {
-    ///     let mut schedule = pipeline.begin_frame()?;  // Wait + get schedule
-    ///
-    ///     schedule.submit(prepass_graph)?;
-    ///     schedule.submit(main_graph)?;
-    ///
-    ///     pipeline.end_frame(schedule);
-    /// }
-    /// ```
-    /// Issue async readback of every `ReadbackBuffer` op in a slot's retired
-    /// graphs.
-    ///
-    /// Called only after the slot's fence has signalled (GPU finished writing
-    /// the readback sources). Each `src[src_range]` is mapped non-blockingly;
-    /// the map's completion callback copies it into the op's CPU `dst` a tick
-    /// later (next `device.poll` on native, next event-loop turn on wasm) — so
-    /// this never blocks and is safe on the single browser thread (#33).
-    /// Consumers poll `dst` for readiness (it stays as-is until filled).
-    ///
-    /// Two-gate recycling: the map holds its own clones of the wgpu buffer and
-    /// the `dst`/`map_pending` handles, so it outlives this graph's recycle. The
-    /// `map_pending` flag on `src` prevents an overlapping map of the same
-    /// buffer.
+    /// After the fence, group requests by source buffer and map each union once.
+    /// Readback handles report success (including zero bytes) or failure explicitly.
+    /// Later batches for a buffer are serialized until its previous map unmaps.
     fn process_readbacks(&self, slot: usize) {
         use crate::graph::TransferOperation;
+        let mut batches: std::collections::HashMap<
+            usize,
+            (Arc<crate::Buffer>, crate::readback::ReadbackBatch),
+        > = Default::default();
         for graph in &self.slot_graphs[slot] {
             for pass in graph.passes() {
-                let Some(transfer) = pass.as_transfer() else {
-                    continue;
-                };
-                let Some(config) = transfer.transfer_config() else {
+                let Some(config) = pass.as_transfer().and_then(|p| p.transfer_config()) else {
                     continue;
                 };
                 for op in &config.operations {
@@ -330,14 +300,17 @@ impl FramePipeline {
                         dst,
                     } = op
                     {
-                        src.read_mapped_async(
-                            src_range.start as u64,
-                            (src_range.end - src_range.start) as u64,
-                            Arc::clone(dst),
-                        );
+                        batches
+                            .entry(Arc::as_ptr(src) as usize)
+                            .or_insert_with(|| (src.clone(), Vec::new()))
+                            .1
+                            .push((src_range.clone(), dst.clone()));
                     }
                 }
             }
+        }
+        for (_, (buffer, requests)) in batches {
+            buffer.read_mapped_batch(requests);
         }
     }
 
@@ -686,7 +659,7 @@ impl FramePipeline {
         Ok(())
     }
 
-    /// Recycle all submitted graphs across every frame slot.
+    /// Start pending readbacks and recycle submitted graphs across every frame slot.
     ///
     /// This releases all `Arc` references (e.g. swapchain texture views) held
     /// by graphs that were kept alive for GPU safety. **Must only be called
@@ -704,6 +677,9 @@ impl FramePipeline {
             "cannot recycle graphs while GPU work or a frame schedule is active"
         );
         self.collect_returned_frame().expect("no active frame");
+        for slot in 0..self.slot_graphs.len() {
+            self.process_readbacks(slot);
+        }
         for slot_graphs in &mut self.slot_graphs {
             for mut graph in slot_graphs.drain(..) {
                 graph.reset();

@@ -275,6 +275,16 @@ impl Editor {
         if let Some(scene_view) = &mut self.scene_view
             && let Some(hit) = scene_view.resolve_pick()
         {
+            let hit = match hit {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("GPU picking failed: {error}");
+                    if let (Some(rc), Some(ew)) = (&mut self.remote, &self.world) {
+                        crate::remote_commands::fail_pick(rc, &ew.world, &error.to_string());
+                    }
+                    return;
+                }
+            };
             let cpu_pos = self.pending_cpu_pick.take();
             let rect = self.scene_view_rect_phys;
             let ew = self.world.as_mut().unwrap();
@@ -339,6 +349,16 @@ impl Editor {
         if let Some(scene_view) = &mut self.scene_view
             && let Some(entity_indices) = scene_view.resolve_rect_pick()
         {
+            let entity_indices = match entity_indices {
+                Ok(value) => value,
+                Err(error) => {
+                    log::error!("GPU picking failed: {error}");
+                    if let (Some(rc), Some(ew)) = (&mut self.remote, &self.world) {
+                        crate::remote_commands::fail_pick(rc, &ew.world, &error.to_string());
+                    }
+                    return;
+                }
+            };
             let ew = self.world.as_mut().unwrap();
             // A remote `pick_rect` owns this readback — answer it, don't select.
             if self

@@ -69,7 +69,7 @@ fn bindings(
                 || expected.entries.iter().any(|entry| {
                     !group.layout().entries.iter().any(|actual| {
                         actual.binding == entry.binding
-                            && actual.binding_type == entry.binding_type
+                            && actual.binding_type.canonical() == entry.binding_type.canonical()
                             && actual.visibility == entry.visibility
                     })
                 }))
@@ -179,6 +179,30 @@ impl RenderGraph {
         device: &Arc<GraphicsDevice>,
     ) -> Result<(), GraphicsError> {
         for pass in self.passes() {
+            // Transfer operations are ordered individually and may transition between accesses.
+            if !pass.is_transfer() {
+                let usage = pass.infer_resource_usage();
+                for (i, a) in usage.texture_usages.iter().enumerate() {
+                    for b in &usage.texture_usages[i + 1..] {
+                        if !Arc::ptr_eq(&a.texture, &b.texture) {
+                            continue;
+                        }
+                        let overlap = if a.texture.format().has_stencil() {
+                            a.range().overlaps_levels(b.range())
+                        } else {
+                            a.range().overlaps(b.range())
+                        };
+                        if overlap
+                            && (a.access.is_write() || b.access.is_write() || a.access != b.access)
+                        {
+                            return Err(invalid(format!(
+                                "pass {:?}: conflicting accesses to overlapping texture subresources",
+                                pass.name()
+                            )));
+                        }
+                    }
+                }
+            }
             let result = (|| {
                 match pass {
                     Pass::Graphics(p) => {

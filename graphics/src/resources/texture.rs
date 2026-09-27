@@ -2,31 +2,10 @@
 
 use std::sync::Arc;
 
+use super::GpuTextureView;
 use crate::backend::GpuTexture;
 use crate::device::GraphicsDevice;
 use crate::types::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat};
-
-/// Attachment views select exactly one mip and array layer. Cached by the
-/// owning texture, so their lifetime covers every submitted graph using it.
-pub(crate) enum AttachmentView {
-    Dummy,
-    #[cfg(feature = "wgpu-backend")]
-    Wgpu(wgpu::TextureView),
-    #[cfg(feature = "vulkan-backend")]
-    Vulkan {
-        device: ash::Device,
-        view: ash::vk::ImageView,
-    },
-}
-
-#[cfg(feature = "vulkan-backend")]
-impl Drop for AttachmentView {
-    fn drop(&mut self) {
-        if let Self::Vulkan { device, view } = self {
-            unsafe { device.destroy_image_view(*view, None) };
-        }
-    }
-}
 
 /// A GPU texture resource.
 ///
@@ -45,8 +24,12 @@ impl Drop for AttachmentView {
 /// ```
 pub struct Texture {
     descriptor: TextureDescriptor,
-    attachment_views:
-        parking_lot::Mutex<std::collections::HashMap<(u32, u32), Arc<AttachmentView>>>,
+    views: parking_lot::Mutex<
+        std::collections::HashMap<
+            crate::TextureViewDescriptor,
+            (Arc<GpuTextureView>, std::sync::Weak<crate::TextureView>),
+        >,
+    >,
     gpu_handle: GpuTexture,
     /// Declared after `gpu_handle` deliberately: fields drop in declaration
     /// order, and this keep-alive must outlive the handle's `Drop`, which
@@ -64,9 +47,33 @@ impl Texture {
         Self {
             device,
             descriptor,
-            attachment_views: Default::default(),
+            views: Default::default(),
             gpu_handle,
         }
+    }
+
+    pub(crate) fn create_view(
+        self: &Arc<Self>,
+        desc: &crate::TextureViewDescriptor,
+    ) -> Result<Arc<crate::TextureView>, crate::GraphicsError> {
+        let desc = desc.resolve(self)?;
+        let mut cache = self.views.lock();
+        if let Some(view) = cache.get(&desc).and_then(|(_, view)| view.upgrade()) {
+            return Ok(view);
+        }
+        let native = if let Some((native, _)) = cache.get(&desc) {
+            native.clone()
+        } else {
+            Arc::new(crate::backend::texture_view::create_view(
+                &self.device.instance().backend(),
+                &self.gpu_handle,
+                self.format(),
+                &desc,
+            )?)
+        };
+        let view = Arc::new(crate::TextureView::new(self.clone(), desc, native.clone()));
+        cache.insert(desc, (native, Arc::downgrade(&view)));
+        Ok(view)
     }
 
     pub(crate) fn validate_attachment(
@@ -100,68 +107,15 @@ impl Texture {
     }
 
     pub(crate) fn attachment_view(
-        &self,
+        self: &Arc<Self>,
         mip: u32,
         layer: u32,
-    ) -> Result<Arc<AttachmentView>, crate::GraphicsError> {
+    ) -> Result<Arc<GpuTextureView>, crate::GraphicsError> {
         self.validate_attachment(mip, layer)?;
-        let mut views = self.attachment_views.lock();
-        if let Some(view) = views.get(&(mip, layer)) {
-            return Ok(Arc::clone(view));
-        }
-        let view = match &self.gpu_handle {
-            GpuTexture::Dummy => AttachmentView::Dummy,
-            #[cfg(feature = "wgpu-backend")]
-            GpuTexture::Wgpu { texture, .. } => {
-                AttachmentView::Wgpu(texture.create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_mip_level: mip,
-                    mip_level_count: Some(1),
-                    base_array_layer: layer,
-                    array_layer_count: Some(1),
-                    ..Default::default()
-                }))
-            }
-            #[cfg(feature = "vulkan-backend")]
-            GpuTexture::Vulkan {
-                device,
-                image,
-                format,
-                ..
-            } => {
-                use ash::vk;
-                let aspect = if self.format().is_depth_stencil() {
-                    if self.format().has_stencil() {
-                        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
-                    } else {
-                        vk::ImageAspectFlags::DEPTH
-                    }
-                } else {
-                    vk::ImageAspectFlags::COLOR
-                };
-                let info = vk::ImageViewCreateInfo::default()
-                    .image(*image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(*format)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: aspect,
-                        base_mip_level: mip,
-                        level_count: 1,
-                        base_array_layer: layer,
-                        layer_count: 1,
-                    });
-                let view = unsafe { device.create_image_view(&info, None) }.map_err(|e| {
-                    crate::GraphicsError::ResourceCreationFailed(format!("attachment view: {e:?}"))
-                })?;
-                AttachmentView::Vulkan {
-                    device: device.clone(),
-                    view,
-                }
-            }
-        };
-        let view = Arc::new(view);
-        views.insert((mip, layer), Arc::clone(&view));
-        Ok(view)
+        let descriptor = crate::TextureViewDescriptor::new(crate::TextureViewDimension::D2)
+            .with_mip_levels(mip, 1)
+            .with_array_layers(layer, 1);
+        Ok(self.create_view(&descriptor)?.native.clone())
     }
 
     /// Get the GPU handle for this texture.

@@ -302,9 +302,20 @@ impl TransferOperation {
                 texture(src, device, TextureUsage::COPY_SRC)?;
                 texture(dst, device, TextureUsage::COPY_DST)?;
                 if Arc::ptr_eq(src, dst) {
-                    return Err(invalid(
-                        "copying within the same texture requires subresource tracking and is unsupported",
-                    ));
+                    for a in regions {
+                        for b in regions {
+                            let same_mip = a.src.mip_level == b.dst.mip_level;
+                            let same_layers = src.dimension() == TextureDimension::D3
+                                || (a.src.origin.z < b.dst.origin.z.saturating_add(b.extent.depth)
+                                    && b.dst.origin.z
+                                        < a.src.origin.z.saturating_add(a.extent.depth));
+                            if same_mip && same_layers {
+                                return Err(invalid(
+                                    "copies within the same texture require disjoint mip/layer subresources",
+                                ));
+                            }
+                        }
+                    }
                 }
                 if copy_format(src.format()) != copy_format(dst.format()) {
                     return Err(invalid(
@@ -370,7 +381,6 @@ mod tests {
     use crate::{
         BackendType, BufferDescriptor, GraphicsInstance, InstanceParameters, TextureDescriptor,
     };
-    use std::sync::Mutex;
 
     fn device() -> Arc<GraphicsDevice> {
         GraphicsInstance::with_parameters(
@@ -496,33 +506,29 @@ mod tests {
             .validate(&d)
             .unwrap();
         check_bad(
-            TransferOperation::readback_buffer(dst, 0..4, Arc::new(Mutex::new(vec![]))),
+            TransferOperation::readback_buffer(dst, 0..4, crate::Readback::new()),
             &d,
             "MAP_READ",
         );
         let src = buf(&d, 16, BufferUsage::MAP_READ);
         for range in [4..8, 0..3] {
             check_bad(
-                TransferOperation::readback_buffer(
-                    src.clone(),
-                    range,
-                    Arc::new(Mutex::new(vec![])),
-                ),
+                TransferOperation::readback_buffer(src.clone(), range, crate::Readback::new()),
                 &d,
                 "aligned",
             );
         }
         check_bad(
-            TransferOperation::readback_buffer(src.clone(), 16..20, Arc::new(Mutex::new(vec![]))),
+            TransferOperation::readback_buffer(src.clone(), 16..20, crate::Readback::new()),
             &d,
             "exceeds",
         );
         check_bad(
-            TransferOperation::readback_buffer(src.clone(), 8..4, Arc::new(Mutex::new(vec![]))),
+            TransferOperation::readback_buffer(src.clone(), 8..4, crate::Readback::new()),
             &d,
             "reversed",
         );
-        TransferOperation::readback_buffer(src, 8..12, Arc::new(Mutex::new(vec![])))
+        TransferOperation::readback_buffer(src, 8..12, crate::Readback::new())
             .validate(&d)
             .unwrap();
     }

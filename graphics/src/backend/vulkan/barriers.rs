@@ -335,7 +335,7 @@ impl BufferAccessTracker {
 #[derive(Debug, Default)]
 pub struct BarrierBatch {
     /// Image barriers keyed by image handle (to avoid duplicates).
-    image_barriers: HashMap<TextureId, ImageBarrierInfo>,
+    image_barriers: HashMap<(TextureId, crate::TextureSubresourceRange), ImageBarrierInfo>,
     /// Buffer barriers keyed by buffer handle (to avoid duplicates).
     buffer_barriers: HashMap<BufferId, BufferBarrierInfo>,
 }
@@ -343,6 +343,7 @@ pub struct BarrierBatch {
 /// Information for a single image barrier.
 #[derive(Debug, Clone)]
 struct ImageBarrierInfo {
+    range: crate::TextureSubresourceRange,
     image: vk::Image,
     old_layout: vk::ImageLayout,
     new_layout: vk::ImageLayout,
@@ -419,6 +420,7 @@ impl BarrierBatch {
     /// `new_layout.dst_stage()`. Access masks are stage-agnostic, so they stay
     /// derived from the layout.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn add_image_barrier_with_src_scope(
         &mut self,
         id: TextureId,
@@ -430,6 +432,37 @@ impl BarrierBatch {
         src_access: vk::AccessFlags2,
         dst_stage: vk::PipelineStageFlags2,
     ) {
+        self.add_image_range_barrier(
+            id,
+            image,
+            old_layout,
+            new_layout,
+            aspect_mask,
+            src_stage,
+            src_access,
+            dst_stage,
+            crate::TextureSubresourceRange {
+                aspect: crate::TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: vk::REMAINING_MIP_LEVELS,
+                base_array_layer: 0,
+                array_layer_count: vk::REMAINING_ARRAY_LAYERS,
+            },
+        );
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add_image_range_barrier(
+        &mut self,
+        id: TextureId,
+        image: vk::Image,
+        old_layout: TextureLayout,
+        new_layout: TextureLayout,
+        aspect_mask: vk::ImageAspectFlags,
+        src_stage: vk::PipelineStageFlags2,
+        src_access: vk::AccessFlags2,
+        dst_stage: vk::PipelineStageFlags2,
+        range: crate::TextureSubresourceRange,
+    ) {
         // Same read-only layout: no hazard, nothing to do.
         if old_layout == new_layout && !new_layout.is_write() {
             return;
@@ -439,7 +472,7 @@ impl BarrierBatch {
         // batch collapses two transitions of one image into a chain, the
         // scopes are unioned within that single barrier — still tighter than
         // the old batch-wide mask which applied every stage to every image.
-        match self.image_barriers.entry(id) {
+        match self.image_barriers.entry((id, range)) {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 let info = occupied.get_mut();
                 info.new_layout = new_layout.to_vk();
@@ -450,6 +483,7 @@ impl BarrierBatch {
             }
             std::collections::hash_map::Entry::Vacant(vacant) => {
                 vacant.insert(ImageBarrierInfo {
+                    range,
                     image,
                     old_layout: old_layout.to_vk(),
                     new_layout: new_layout.to_vk(),
@@ -526,9 +560,38 @@ impl BarrierBatch {
             return;
         }
 
-        let image_barriers: Vec<vk::ImageMemoryBarrier2> = self
-            .image_barriers
-            .values()
+        let mut sorted: Vec<_> = self.image_barriers.values().cloned().collect();
+        sorted.sort_unstable_by_key(|b| {
+            (
+                b.image.as_raw(),
+                b.range.base_mip_level,
+                b.range.base_array_layer,
+            )
+        });
+        let mut merged: Vec<ImageBarrierInfo> = Vec::with_capacity(sorted.len());
+        for info in sorted {
+            merged.push(info);
+            while merged.len() > 1 {
+                let n = merged.len();
+                let a = &merged[n - 2];
+                let b = &merged[n - 1];
+                let same = a.image == b.image
+                    && a.old_layout == b.old_layout
+                    && a.new_layout == b.new_layout
+                    && a.aspect_mask == b.aspect_mask
+                    && a.src_stage_mask == b.src_stage_mask
+                    && a.dst_stage_mask == b.dst_stage_mask
+                    && a.src_access_mask == b.src_access_mask
+                    && a.dst_access_mask == b.dst_access_mask;
+                let Some(range) = same.then(|| a.range.merge_adjacent(b.range)).flatten() else {
+                    break;
+                };
+                merged.pop();
+                merged[n - 2].range = range;
+            }
+        }
+        let image_barriers: Vec<vk::ImageMemoryBarrier2> = merged
+            .iter()
             .map(|info| {
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(info.src_stage_mask)
@@ -542,10 +605,10 @@ impl BarrierBatch {
                     .image(info.image)
                     .subresource_range(vk::ImageSubresourceRange {
                         aspect_mask: info.aspect_mask,
-                        base_mip_level: 0,
-                        level_count: vk::REMAINING_MIP_LEVELS,
-                        base_array_layer: 0,
-                        layer_count: vk::REMAINING_ARRAY_LAYERS,
+                        base_mip_level: info.range.base_mip_level,
+                        level_count: info.range.mip_level_count,
+                        base_array_layer: info.range.base_array_layer,
+                        layer_count: info.range.array_layer_count,
                     })
             })
             .collect();

@@ -556,6 +556,30 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
             has_dynamic_offset: false,
             min_binding_size: None,
         },
+        crate::materials::BindingType::SampledTexture {
+            dimension,
+            sample_type,
+            multisampled,
+        } => wgpu::BindingType::Texture {
+            view_dimension: match dimension {
+                crate::TextureViewDimension::D1 => wgpu::TextureViewDimension::D1,
+                crate::TextureViewDimension::D1Array => wgpu::TextureViewDimension::D1,
+                crate::TextureViewDimension::D2 => wgpu::TextureViewDimension::D2,
+                crate::TextureViewDimension::D2Array => wgpu::TextureViewDimension::D2Array,
+                crate::TextureViewDimension::D3 => wgpu::TextureViewDimension::D3,
+                crate::TextureViewDimension::Cube => wgpu::TextureViewDimension::Cube,
+                crate::TextureViewDimension::CubeArray => wgpu::TextureViewDimension::CubeArray,
+            },
+            sample_type: match sample_type {
+                crate::TextureSampleType::Float { filterable } => {
+                    wgpu::TextureSampleType::Float { filterable }
+                }
+                crate::TextureSampleType::Sint => wgpu::TextureSampleType::Sint,
+                crate::TextureSampleType::Uint => wgpu::TextureSampleType::Uint,
+                crate::TextureSampleType::Depth => wgpu::TextureSampleType::Depth,
+            },
+            multisampled,
+        },
         crate::materials::BindingType::Texture => wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
             view_dimension: wgpu::TextureViewDimension::D2,

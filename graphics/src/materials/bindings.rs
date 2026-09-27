@@ -33,6 +33,12 @@ impl UpdateRate {
 /// Type of resource that can be bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingType {
+    /// Explicit sampled view type, including integer, volume and MSAA sampling.
+    SampledTexture {
+        dimension: crate::TextureViewDimension,
+        sample_type: crate::TextureSampleType,
+        multisampled: bool,
+    },
     /// Uniform buffer (read-only, small, frequently updated).
     UniformBuffer,
 
@@ -129,6 +135,25 @@ pub enum BindingType {
     /// The bindless heap's sampler array (#117) — the sampler-typed sibling
     /// of [`BindlessTextures`](Self::BindlessTextures), same rules.
     BindlessSamplers,
+}
+
+impl BindingType {
+    pub(crate) fn canonical(self) -> Self {
+        use crate::{TextureSampleType as S, TextureViewDimension as D};
+        let (dimension, sample_type) = match self {
+            Self::Texture => (D::D2, S::Float { filterable: true }),
+            Self::TextureCube => (D::Cube, S::Float { filterable: true }),
+            Self::Texture2DArray => (D::D2Array, S::Float { filterable: true }),
+            Self::DepthTexture => (D::D2, S::Depth),
+            Self::UnfilterableTexture => (D::D2, S::Float { filterable: false }),
+            _ => return self,
+        };
+        Self::SampledTexture {
+            dimension,
+            sample_type,
+            multisampled: false,
+        }
+    }
 }
 
 /// Describes a single binding slot in a layout.

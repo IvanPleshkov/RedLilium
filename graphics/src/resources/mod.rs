@@ -18,6 +18,7 @@ mod ring_buffer;
 mod sampler;
 mod texture;
 
+pub(crate) use crate::backend::texture_view::GpuTextureView;
 pub use acceleration_structure::{
     AccelBuildSizes, Blas, BlasDescriptor, BlasTriangles, CompactionCopy, Tlas, TlasDescriptor,
     TlasInstance,
@@ -28,5 +29,10 @@ pub(crate) use acceleration_structure::{
 pub use buffer::Buffer;
 pub use ring_buffer::{RingAllocation, RingBuffer};
 pub use sampler::Sampler;
-pub(crate) use texture::AttachmentView;
 pub use texture::Texture;
+
+mod texture_view;
+pub use texture_view::{
+    TextureAspect, TextureSampleType, TextureSubresourceRange, TextureView, TextureViewDescriptor,
+    TextureViewDimension,
+};

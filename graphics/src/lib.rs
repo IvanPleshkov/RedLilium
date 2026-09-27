@@ -80,6 +80,7 @@ pub mod instance;
 pub mod materials;
 pub mod mesh;
 pub mod pipeline;
+mod readback;
 pub mod resize;
 pub mod resources;
 pub mod scheduler;
@@ -122,10 +123,12 @@ pub use mesh::{
     VertexStepMode,
 };
 pub use pipeline::{FramePipeline, MAX_FRAMES_IN_FLIGHT};
+pub use readback::{Readback, ReadbackStatus};
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
 pub use resources::{
     AccelBuildSizes, Blas, BlasDescriptor, BlasTriangles, Buffer, RingAllocation, RingBuffer,
-    Sampler, Texture, Tlas, TlasDescriptor, TlasInstance,
+    Sampler, Texture, TextureAspect, TextureSampleType, TextureSubresourceRange, TextureView,
+    TextureViewDescriptor, TextureViewDimension, Tlas, TlasDescriptor, TlasInstance,
 };
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, SubmitHandle};
 pub use shader::{

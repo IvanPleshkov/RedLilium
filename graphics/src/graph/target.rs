@@ -79,6 +79,7 @@ pub enum StoreOp {
 /// ```
 #[derive(Debug, Clone)]
 pub struct RenderTarget {
+    view: Option<Arc<crate::TextureView>>,
     kind: RenderTargetKind,
 }
 
@@ -124,6 +125,7 @@ impl RenderTarget {
     /// Create a render target from an acquired surface texture.
     pub fn from_surface(surface_texture: &SurfaceTexture) -> Self {
         Self {
+            view: None,
             kind: RenderTargetKind::Surface {
                 format: surface_texture.format(),
                 width: surface_texture.width(),
@@ -139,12 +141,38 @@ impl RenderTarget {
     /// Select one mip and array layer (or cube face) as an attachment.
     pub fn from_texture_layer(texture: Arc<Texture>, mip_level: u32, array_layer: u32) -> Self {
         Self {
+            view: None,
             kind: RenderTargetKind::Texture {
                 texture,
                 mip_level,
                 array_layer,
             },
         }
+    }
+
+    /// Use a single-mip, single-layer 2D view as an attachment (validated on submit).
+    pub fn from_view(view: Arc<crate::TextureView>) -> Self {
+        let mut target = Self::from_texture_layer(
+            view.texture().clone(),
+            view.range().base_mip_level,
+            view.range().base_array_layer,
+        );
+        target.view = Some(view);
+        target
+    }
+    /// Exact subresources used by this attachment, or None for a surface.
+    pub fn subresource_range(&self) -> Option<crate::TextureSubresourceRange> {
+        let texture = self.texture()?;
+        Some(self.view.as_ref().map_or(
+            crate::TextureSubresourceRange {
+                base_mip_level: self.mip_level().unwrap(),
+                mip_level_count: 1,
+                base_array_layer: self.array_layer().unwrap(),
+                array_layer_count: 1,
+                ..crate::TextureSubresourceRange::whole(texture)
+            },
+            |v| v.range(),
+        ))
     }
 
     /// Whether this target refers to an acquired swapchain surface.
@@ -187,6 +215,7 @@ impl RenderTarget {
     #[cfg(test)]
     pub(crate) fn test_surface(format: TextureFormat, width: u32, height: u32) -> Self {
         Self {
+            view: None,
             kind: RenderTargetKind::Surface {
                 format,
                 width,
@@ -208,6 +237,17 @@ impl RenderTarget {
     }
 
     pub(crate) fn validate(&self) -> Result<(), crate::GraphicsError> {
+        if let Some(view) = &self.view {
+            if view.dimension() != crate::TextureViewDimension::D2
+                || view.range().mip_level_count != 1
+                || view.range().array_layer_count != 1
+                || (view.format().has_stencil() && view.range().aspect != crate::TextureAspect::All)
+            {
+                return Err(crate::GraphicsError::InvalidParameter(
+                    "attachment view must select one 2D mip/layer and all format aspects".into(),
+                ));
+            }
+        }
         match &self.kind {
             RenderTargetKind::Texture {
                 texture,
@@ -223,6 +263,11 @@ impl RenderTarget {
 
     #[cfg(feature = "wgpu-backend")]
     pub(crate) fn wgpu_view(&self) -> Result<wgpu::TextureView, crate::GraphicsError> {
+        if let Some(view) = &self.view {
+            if let crate::resources::GpuTextureView::Wgpu(native) = &*view.native {
+                return Ok(native.clone());
+            }
+        }
         match &self.kind {
             RenderTargetKind::Texture {
                 texture,
@@ -230,7 +275,7 @@ impl RenderTarget {
                 array_layer,
             } => {
                 let view = texture.attachment_view(*mip_level, *array_layer)?;
-                if let crate::resources::AttachmentView::Wgpu(view) = &*view {
+                if let crate::resources::GpuTextureView::Wgpu(view) = &*view {
                     return Ok(view.clone());
                 }
             }
@@ -246,6 +291,11 @@ impl RenderTarget {
 
     #[cfg(feature = "vulkan-backend")]
     pub(crate) fn vulkan_view(&self) -> Result<ash::vk::ImageView, crate::GraphicsError> {
+        if let Some(view) = &self.view {
+            if let crate::resources::GpuTextureView::Vulkan { view, .. } = &*view.native {
+                return Ok(*view);
+            }
+        }
         match &self.kind {
             RenderTargetKind::Texture {
                 texture,
@@ -253,7 +303,7 @@ impl RenderTarget {
                 array_layer,
             } => {
                 let view = texture.attachment_view(*mip_level, *array_layer)?;
-                if let crate::resources::AttachmentView::Vulkan { view, .. } = &*view {
+                if let crate::resources::GpuTextureView::Vulkan { view, .. } = &*view {
                     return Ok(*view);
                 }
             }

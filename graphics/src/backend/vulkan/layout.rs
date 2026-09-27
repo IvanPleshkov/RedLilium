@@ -453,7 +453,7 @@ impl TextureId {
 /// INVARIANT (queue ownership): this CPU-side map, updated in pass-record
 /// order, matches GPU execution order because same-queue submits execute in
 /// submission order and cross-queue accesses are ordered by the timeline
-/// waits the tracker emits (see [`request_access`](TextureLayoutTracker::request_access)
+/// waits the tracker emits (see [`request_access_range`](TextureLayoutTracker::request_access_range)
 /// and #47): the wait guarantees the previous queue's access — and its layout
 /// state — completed before this queue's transition executes. Every access
 /// MUST be reported with the correct `QueueId`.
@@ -461,8 +461,7 @@ impl TextureId {
 /// Keeping layouts across frames is what lets **persistent / history textures**
 /// (temporal AA, accumulation, motion blur) retain their contents: their first
 /// use next frame transitions from their real previous layout rather than from
-/// `UNDEFINED`. Transient targets are unaffected — they are re-cleared
-/// (`LoadOp::Clear`) and the resulting same-layout barrier is a cheap no-op.
+/// `UNDEFINED`. Transient targets still require barriers between writes, even when re-cleared.
 ///
 /// Keyed by a **stable [`TextureId`]** (a per-texture counter), not the raw
 /// `vk::Image` handle: a destroyed image's handle may be reused by a new
@@ -475,8 +474,8 @@ impl TextureId {
 #[derive(Debug)]
 pub struct TextureLayoutTracker {
     /// Tracked state of each texture, by stable id.
-    layouts: HashMap<TextureId, TrackedTexture>,
-    journal: HashMap<TextureId, Option<TrackedTexture>>,
+    layouts: HashMap<TextureId, Vec<TrackedRegion>>,
+    journal: HashMap<TextureId, Option<Vec<TrackedRegion>>>,
     recording: bool,
     /// Extra pipeline stages OR'd into every shader-stage layout scope (#114):
     /// `TASK_SHADER_EXT | MESH_SHADER_EXT` when `VK_EXT_mesh_shader` is
@@ -491,7 +490,7 @@ pub struct TextureLayoutTracker {
 
 /// Per-texture tracked state: the actual GPU-side layout plus queue-ownership
 /// bookkeeping for cross-queue synchronization (#47 phase 4).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TrackedTexture {
     /// Current Vulkan image layout.
     layout: TextureLayout,
@@ -501,6 +500,22 @@ struct TrackedTexture {
     /// Highest submit timeline value that read this texture since the last
     /// write, per queue (a cross-queue write waits on these).
     read_submits: [Option<u64>; super::barriers::QUEUE_COUNT],
+}
+
+#[derive(Debug, Clone)]
+struct TrackedRegion {
+    range: crate::TextureSubresourceRange,
+    state: TrackedTexture,
+}
+#[cfg(test)]
+fn full_range() -> crate::TextureSubresourceRange {
+    crate::TextureSubresourceRange {
+        aspect: crate::TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: u32::MAX,
+        base_array_layer: 0,
+        array_layer_count: u32::MAX,
+    }
 }
 
 impl Default for TrackedTexture {
@@ -596,7 +611,8 @@ impl TextureLayoutTracker {
     pub fn get_layout(&self, id: TextureId) -> TextureLayout {
         self.layouts
             .get(&id)
-            .map_or(TextureLayout::Undefined, |t| t.layout)
+            .and_then(|r| r.first())
+            .map_or(TextureLayout::Undefined, |r| r.state.layout)
     }
 
     /// Update the tracked layout after a transition, leaving queue-ownership
@@ -605,7 +621,16 @@ impl TextureLayoutTracker {
     /// synchronization (tests, swapchain handling).
     #[cfg(test)]
     pub fn set_layout(&mut self, id: TextureId, layout: TextureLayout) {
-        self.layouts.entry(id).or_default().layout = layout;
+        self.layouts.insert(
+            id,
+            vec![TrackedRegion {
+                range: full_range(),
+                state: TrackedTexture {
+                    layout,
+                    ..Default::default()
+                },
+            }],
+        );
     }
 
     /// Record an access to a texture from a submit on `queue` with timeline
@@ -620,6 +645,7 @@ impl TextureLayoutTracker {
     /// Writes and layout transitions wait for other queues' outstanding
     /// readers. A transition also becomes the last writer for queue-ordering
     /// purposes so other queues cannot observe its new layout prematurely.
+    #[cfg(test)]
     pub fn request_access(
         &mut self,
         id: TextureId,
@@ -628,12 +654,141 @@ impl TextureLayoutTracker {
         submit_value: u64,
         waits: &mut super::barriers::SubmitWaits,
     ) -> (TextureLayout, bool) {
+        let transitions = self.request_access_range(
+            id,
+            full_range(),
+            full_range(),
+            layout,
+            queue,
+            submit_value,
+            waits,
+        );
+        (transitions[0].1, transitions[0].2)
+    }
+
+    /// Split only touched rectangles; preserve queue history on every untouched range.
+    pub fn request_access_range(
+        &mut self,
+        id: TextureId,
+        mut requested: crate::TextureSubresourceRange,
+        mut full: crate::TextureSubresourceRange,
+        layout: TextureLayout,
+        queue: super::barriers::QueueId,
+        submit_value: u64,
+        waits: &mut super::barriers::SubmitWaits,
+    ) -> Vec<(crate::TextureSubresourceRange, TextureLayout, bool)> {
+        // Separate depth/stencil layouts are not enabled: synchronize both aspects.
+        requested.aspect = crate::TextureAspect::All;
+        full.aspect = crate::TextureAspect::All;
         if self.recording {
             self.journal
                 .entry(id)
-                .or_insert_with(|| self.layouts.get(&id).copied());
+                .or_insert_with(|| self.layouts.get(&id).cloned());
         }
-        let state = self.layouts.entry(id).or_default();
+        let regions = self.layouts.entry(id).or_insert_with(|| {
+            vec![TrackedRegion {
+                range: full,
+                state: Default::default(),
+            }]
+        });
+        if regions.len() == 1 && regions[0].range == requested {
+            let (old, foreign) =
+                Self::access(&mut regions[0].state, layout, queue, submit_value, waits);
+            return vec![(requested, old, foreign)];
+        }
+        let mut updated = Vec::new();
+        let mut transitions = Vec::new();
+        for region in regions.drain(..) {
+            if !region.range.overlaps(requested) {
+                updated.push(region);
+                continue;
+            }
+            let r = region.range;
+            let m0 = r.base_mip_level.max(requested.base_mip_level);
+            let m1 = (r.base_mip_level + r.mip_level_count)
+                .min(requested.base_mip_level + requested.mip_level_count);
+            let l0 = r.base_array_layer.max(requested.base_array_layer);
+            let l1 = (r.base_array_layer + r.array_layer_count)
+                .min(requested.base_array_layer + requested.array_layer_count);
+            let mut push = |m: u32, mc: u32, l: u32, lc: u32| {
+                if mc > 0 && lc > 0 {
+                    updated.push(TrackedRegion {
+                        range: crate::TextureSubresourceRange {
+                            base_mip_level: m,
+                            mip_level_count: mc,
+                            base_array_layer: l,
+                            array_layer_count: lc,
+                            ..r
+                        },
+                        state: region.state,
+                    });
+                }
+            };
+            push(
+                r.base_mip_level,
+                m0 - r.base_mip_level,
+                r.base_array_layer,
+                r.array_layer_count,
+            );
+            push(
+                m1,
+                r.base_mip_level + r.mip_level_count - m1,
+                r.base_array_layer,
+                r.array_layer_count,
+            );
+            push(m0, m1 - m0, r.base_array_layer, l0 - r.base_array_layer);
+            push(
+                m0,
+                m1 - m0,
+                l1,
+                r.base_array_layer + r.array_layer_count - l1,
+            );
+            let touched = crate::TextureSubresourceRange {
+                base_mip_level: m0,
+                mip_level_count: m1 - m0,
+                base_array_layer: l0,
+                array_layer_count: l1 - l0,
+                ..r
+            };
+            let mut state = region.state;
+            let (old, foreign) = Self::access(&mut state, layout, queue, submit_value, waits);
+            transitions.push((touched, old, foreign));
+            updated.push(TrackedRegion {
+                range: touched,
+                state,
+            });
+        }
+        // Restoring the whole image to one state is the common end of mip jobs.
+        if updated.iter().all(|r| r.state == updated[0].state) {
+            let state = updated[0].state;
+            updated = vec![TrackedRegion { range: full, state }];
+        } else {
+            loop {
+                let pair = (0..updated.len()).find_map(|i| {
+                    ((i + 1)..updated.len()).find_map(|j| {
+                        (updated[i].state == updated[j].state)
+                            .then(|| updated[i].range.merge_adjacent(updated[j].range))
+                            .flatten()
+                            .map(|r| (i, j, r))
+                    })
+                });
+                let Some((i, j, range)) = pair else {
+                    break;
+                };
+                updated[i].range = range;
+                updated.swap_remove(j);
+            }
+        }
+        *regions = updated;
+        transitions
+    }
+    fn access(
+        state: &mut TrackedTexture,
+        layout: TextureLayout,
+        queue: super::barriers::QueueId,
+        submit_value: u64,
+        waits: &mut super::barriers::SubmitWaits,
+    ) -> (TextureLayout, bool) {
         // A layout transition is itself a write to image memory. Treat it
         // as such for queue waits and reader retirement, even when the
         // operation that follows only reads the texture.
@@ -1092,5 +1247,92 @@ mod tests {
             assert_eq!(tracker.src_stage(layout), layout.src_stage());
             assert_eq!(tracker.dst_stage(layout), layout.dst_stage());
         }
+    }
+}
+
+#[cfg(test)]
+mod subresource_tests {
+    use super::super::barriers::{QueueId, SubmitWaits};
+    use super::*;
+    use crate::{TextureAspect, TextureSubresourceRange as Range};
+    #[test]
+    fn independent_ranges_keep_queue_history_and_rollback() {
+        let mut tracker = TextureLayoutTracker::new();
+        let id = TextureId::from_raw(42);
+        let all = Range {
+            aspect: TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: 3,
+            base_array_layer: 0,
+            array_layer_count: 6,
+        };
+        let face = Range {
+            base_mip_level: 1,
+            mip_level_count: 1,
+            base_array_layer: 2,
+            array_layer_count: 1,
+            ..all
+        };
+        let untouched = Range {
+            base_array_layer: 3,
+            ..face
+        };
+        let mut waits = SubmitWaits::default();
+        tracker.request_access_range(
+            id,
+            face,
+            all,
+            TextureLayout::TransferDst,
+            QueueId::Transfer,
+            7,
+            &mut waits,
+        );
+        let changes = tracker.request_access_range(
+            id,
+            untouched,
+            all,
+            TextureLayout::ShaderReadOnly,
+            QueueId::Graphics,
+            8,
+            &mut waits,
+        );
+        assert_eq!(changes[0].1, TextureLayout::Undefined);
+        assert!(waits.is_empty());
+        tracker.begin_submit();
+        tracker.request_access_range(
+            id,
+            face,
+            all,
+            TextureLayout::ShaderReadOnly,
+            QueueId::Graphics,
+            9,
+            &mut waits,
+        );
+        assert_eq!(waits.get(QueueId::Transfer), Some(7));
+        tracker.finish_submit(false);
+        let changes = tracker.request_access_range(
+            id,
+            face,
+            all,
+            TextureLayout::ShaderReadOnly,
+            QueueId::Graphics,
+            10,
+            &mut waits,
+        );
+        assert_eq!(changes[0].1, TextureLayout::TransferDst);
+        tracker.request_access_range(
+            id,
+            all,
+            all,
+            TextureLayout::TransferDst,
+            QueueId::Graphics,
+            11,
+            &mut waits,
+        );
+        assert_eq!(
+            tracker.layouts[&id].len(),
+            1,
+            "equal states should coalesce back to one whole-image record"
+        );
     }
 }

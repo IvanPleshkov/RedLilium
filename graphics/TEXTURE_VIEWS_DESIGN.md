@@ -1,6 +1,7 @@
-# Texture views and subresource tracking — proposal
+# Texture views and subresource tracking
 
-Status: awaiting API review. This document does not describe implemented API.
+Status: implemented after API review. The API and restrictions below describe
+the supported scope.
 
 The goal is to sample one mip or layer range while writing a disjoint range of
 that same texture through the render graph. Device methods only create resources;
@@ -8,7 +9,7 @@ transfers, mip generation and IBL filtering remain graph operations.
 
 ## Resource API
 
-Add an immutable `TextureView` owning an `Arc<Texture>` and a validated, normalized
+An immutable `TextureView` owns an `Arc<Texture>` and a validated, normalized
 view descriptor. Native image views remain internal. Create it with:
 
 ```rust,ignore
@@ -32,14 +33,14 @@ multiples of six. A cube or array may expose one face/layer as a D2 view. D3 vie
 remain D3: Z slices are not array layers or independently tracked image layouts.
 MSAA views have one mip and retain the texture's sample count.
 
-Add `BindingGroupDescriptor::with_texture_view` and
-`RenderTarget::from_view`. Attachment views must select one mip and one layer;
+Use `BindingGroupDescriptor::with_texture_view` and
+`RenderTarget::from_view`. Attachments select one 2D mip/layer and all format aspects;
 layered rendering and D3 slice attachments remain separate features. Existing
 `with_texture` and `RenderTarget::from_texture_*` keep working, resolving to the
-same validated view representation internally. Cache native views by normalized
-descriptor; avoid an owning Texture -> TextureView -> Texture cycle.
+same validated view representation internally. Native views are cached by normalized
+descriptor; public views are cached weakly to avoid a Texture -> TextureView -> Texture cycle.
 
-Generalize sampled bindings with `BindingType::SampledTexture { dimension,
+Sampled bindings use `BindingType::SampledTexture { dimension,
 sample_type, multisampled }`. Sample type is Float (filterable or unfilterable),
 Sint, Uint, or Depth. Existing Texture/TextureCube/Texture2DArray/DepthTexture
 variants remain conveniences normalized to this description for layout comparison
@@ -48,41 +49,36 @@ views alone do not introduce them.
 
 ## Graph and synchronization
 
-Use one normalized `TextureSubresourceRange` (aspect, mip range, layer range)
-throughout usage inference, dependency analysis and backend barriers. Infer ranges
-from bound views, render targets and transfer regions. A whole-texture binding
-means **all** mips/layers, not the current declaration default of one mip/layer.
-Keep parent textures alive through the existing fence retirement path.
+One normalized `TextureSubresourceRange` (aspect, mip range, layer range)
+is used throughout usage inference, dependency analysis and backend barriers. Ranges
+come from bound views, render targets and transfer regions. Whole-texture bindings
+include **all** mips/layers. Parent textures survive through the fence retirement path.
 
 Two accesses conflict only when texture identity and ranges overlap and either
-access writes. Preserve the current read-only depth attachment/sampling exception.
+access writes. Read-only depth attachment/sampling remains supported.
 A same-pass conflicting overlap is an error; disjoint ranges do not create a
 false dependency. Strict mode still rejects ambiguous overlapping writers.
 
 Vulkan starts with a compact whole-image state and splits it only on partial
-access. Track layout/access/stage and submission history per overlapping range;
-merge adjacent equal states and barriers. Preserve cross-submit and cross-queue
-synchronization. Without separate depth/stencil layout support, transition both
-aspects conservatively. D3 state is per mip, never per Z slice. Existing private
-mip-generation barriers must update this state, including scratch-copy paths.
+access. It tracks layout/access and submission history per overlapping range,
+merging adjacent equal states and barriers across submissions and queues.
+Without separate depth/stencil layout support, both aspects transition
+conservatively. D3 state is per mip, never per Z slice. Private mip-generation
+barriers restore the declared final layout, including scratch-copy paths.
 
 wgpu uses the same graph dependencies and native views; its internal barriers
 remain wgpu's responsibility. Backend limitations are checked before recording.
 Whole-image tracking remains a fast path for existing users.
 
-## Implementation and acceptance
+## Validation coverage
 
-1. Add views, canonical sampled binding descriptions, creation validation and
-   native view caching. Preserve the existing convenience API.
-2. Carry exact ranges through every inferred use and graph dependency; convert
-   Vulkan state tracking, including across submissions and async queues.
-3. Enable disjoint same-texture copies and read/write passes only after tracking
-   is complete. Keep overlapping copies rejected. Adapt private mip/IBL paths.
-4. Test mip N-1 sampling while rendering mip N, array/cube face isolation,
-   overlapping-range rejection, cross-submit state, read-only depth and unchanged
-   whole-texture paths on Dummy, Vulkan with validation, and wgpu. Verify generated
-   pixels through graph readback and retain native + wasm build coverage.
+Unit tests cover descriptor validation, native view reuse, range subtraction,
+range-aware dependencies and cross-queue layout history with rollback. GPU tests
+cover sampling mip N-1 while rendering mip N, disjoint array layers, same-texture
+copies and overlapping-access rejection, with pixel verification through graph
+readback. Existing depth, mip-generation and IBL tests cover compatibility with
+whole-texture paths. Native workspace and wasm rendering builds check the API
+migration in consumers.
 
-The decision for review is the API above and this scope. Probe capture, probe
-selection/blending, roughness conventions and lighting integration stay with the
+Probe capture, probe selection/blending, roughness conventions and lighting integration stay with the
 renderer/ECS, outside the graphics library.

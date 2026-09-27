@@ -86,6 +86,20 @@ pub(crate) fn binding_layout(layout: &BindingLayout) -> Result<(), GraphicsError
                 entry.binding
             )));
         }
+        if let BindingType::SampledTexture {
+            dimension,
+            sample_type,
+            multisampled: true,
+        } = entry.binding_type.canonical()
+        {
+            if dimension != crate::TextureViewDimension::D2
+                || sample_type == (crate::TextureSampleType::Float { filterable: true })
+            {
+                return Err(invalid(
+                    "multisampled bindings require a 2D view and an unfilterable sample type",
+                ));
+            }
+        }
         if entry.visibility.is_empty() {
             return Err(invalid("binding visibility must not be empty"));
         }
@@ -126,37 +140,51 @@ pub(crate) fn binding_group(
                 Err(invalid("bound resource belongs to another device"))
             }
         };
-        let texture = |t: &Texture, ty| -> Result<(), GraphicsError> {
+        let texture = |t: &Texture,
+                       dimension: crate::TextureViewDimension,
+                       aspect: crate::TextureAspect,
+                       ty: BindingType|
+         -> Result<(), GraphicsError> {
             owner(t.device())?;
-            let dimension = match ty {
-                BindingType::TextureCube => TextureDimension::Cube,
-                BindingType::Texture2DArray => TextureDimension::D2Array,
-                _ => TextureDimension::D2,
+            let BindingType::SampledTexture {
+                dimension: expected,
+                sample_type,
+                multisampled,
+            } = ty.canonical()
+            else {
+                return Err(invalid("binding requires a sampled texture type"));
             };
-            if t.dimension() != dimension
-                || t.sample_count() != 1
+            if dimension != expected
+                || (t.sample_count() > 1) != multisampled
                 || !t.usage().contains(TextureUsage::TEXTURE_BINDING)
             {
                 return Err(invalid(
                     "texture binding dimension, sample count or usage mismatch",
                 ));
             }
-            if ty == BindingType::DepthTexture {
-                if !t.format().is_depth_stencil() {
-                    return Err(invalid("depth binding requires depth format"));
+            use crate::{TextureAspect as A, TextureSampleType as S};
+            let valid = match sample_type {
+                S::Depth => {
+                    t.format().is_depth_stencil()
+                        && aspect != A::StencilOnly
+                        && (!t.format().has_stencil() || aspect == A::DepthOnly)
                 }
-            } else if t.format().is_integer()
-                || (t.format().is_depth_stencil() && ty != BindingType::UnfilterableTexture)
-            {
-                return Err(invalid(
-                    "texture format does not match float binding sample type",
-                ));
-            }
-            if ty != BindingType::DepthTexture
-                && ty != BindingType::UnfilterableTexture
-                && !device.instance().backend().texture_filterable(t.format())
-            {
-                return Err(invalid("texture format is not filterable on this device"));
+                S::Sint => t.format() == TextureFormat::R8Sint,
+                S::Uint => {
+                    matches!(t.format(), TextureFormat::R8Uint | TextureFormat::R32Uint)
+                        || (t.format().has_stencil() && aspect == A::StencilOnly)
+                }
+                S::Float { filterable } => {
+                    !t.format().is_integer()
+                        && aspect != A::StencilOnly
+                        && (!t.format().has_stencil() || aspect == A::DepthOnly)
+                        && (!filterable
+                            || (!t.format().is_depth_stencil()
+                                && device.instance().backend().texture_filterable(t.format())))
+                }
+            };
+            if !valid {
+                return Err(invalid("texture view does not match binding sample type"));
             }
             Ok(())
         };
@@ -208,13 +236,21 @@ pub(crate) fn binding_group(
                     ));
                 }
             }
-            BoundResource::Texture(t) => texture(t, ty)?,
+            BoundResource::Texture(t) => texture(t, t.dimension().into(), TextureAspect::All, ty)?,
+            BoundResource::TextureView(v) => {
+                texture(v.texture(), v.dimension(), v.range().aspect, ty)?
+            }
             BoundResource::Sampler(s) => sampler(s, ty == BindingType::ComparisonSampler)?,
             BoundResource::CombinedTextureSampler {
                 texture: t,
                 sampler: s,
             } => {
-                texture(t, BindingType::Texture)?;
+                texture(
+                    t,
+                    t.dimension().into(),
+                    TextureAspect::All,
+                    BindingType::Texture,
+                )?;
                 sampler(s, false)?;
             }
             BoundResource::AccelerationStructure(t) => owner(t.device())?,

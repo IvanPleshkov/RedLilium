@@ -25,8 +25,9 @@ pub struct Buffer {
     /// True while an async `map_async` readback of this buffer is in flight
     /// (#33). Guards against a second overlapping map (a wgpu validation error)
     /// and against writing the buffer while it is still mapped. Cleared by the
-    /// readback completion callback. Shared into that callback via `Arc`.
+    /// readback completion callback after the last queued batch.
     map_pending: Arc<AtomicBool>,
+    readbacks: parking_lot::Mutex<crate::readback::ReadbackBatch>,
     /// Declared after `gpu_handle` deliberately: fields drop in declaration
     /// order, and this keep-alive must outlive the handle's `Drop` (which
     /// calls `vkDestroyBuffer` and needs the backend, transitively owned by
@@ -46,6 +47,7 @@ impl Buffer {
             descriptor,
             gpu_handle,
             map_pending: Arc::new(AtomicBool::new(false)),
+            readbacks: Default::default(),
         }
     }
 
@@ -73,8 +75,8 @@ impl Buffer {
     /// flight (#33). Used by the debug write-while-mapped guard
     /// ([`scheduler`](crate::scheduler)) and by consumers that must avoid
     /// starting a new readback / reallocating the buffer until the prior map
-    /// resolves (e.g. the editor pick path). The map completion callback clears
-    /// it unconditionally, so it never stays set forever.
+    /// resolves (e.g. the editor pick path). Completion clears it after all
+    /// queued batches finish; wgpu completion requires device polling.
     pub fn is_map_pending(&self) -> bool {
         self.map_pending.load(Ordering::Acquire)
     }
@@ -97,33 +99,57 @@ impl Buffer {
             .write_buffer(&self.gpu_handle, offset, data)
     }
 
-    /// Non-blocking readback: map this buffer and, when the map resolves, copy
-    /// `[offset, offset+size)` into `dst`. On wgpu the map completion is a
-    /// callback (the only way to read back without blocking the browser thread,
-    /// #33); native backends fill `dst` synchronously. Fire-and-forget — errors
-    /// are logged; poll the `dst` for readiness (it stays empty until filled).
-    ///
-    /// Skips if a prior map of this buffer is still in flight (`map_pending`),
-    /// so an overlapping `map_async` can't raise a "buffer already mapped"
-    /// validation error; the completion callback clears the flag.
-    pub(crate) fn read_mapped_async(
-        &self,
-        offset: u64,
-        size: u64,
-        dst: Arc<std::sync::Mutex<Vec<u8>>>,
-    ) {
-        // Claim the buffer for one in-flight map; skip if already claimed.
+    /// Queue a batch and map its union once. Later batches wait until unmap.
+    pub(crate) fn read_mapped_batch(self: &Arc<Self>, requests: crate::readback::ReadbackBatch) {
+        let mut waiting = self.readbacks.lock();
+        waiting.extend(requests);
         if self.map_pending.swap(true, Ordering::AcqRel) {
-            log::debug!("read_mapped_async skipped: a map of this buffer is still pending");
             return;
         }
+        let batch = std::mem::take(&mut *waiting);
+        drop(waiting);
+        self.start_readback(batch);
+    }
+    fn start_readback(self: &Arc<Self>, mut batch: crate::readback::ReadbackBatch) {
+        batch.retain(|(range, result)| {
+            if range.is_empty() {
+                result.complete(Ok(Vec::new()));
+                false
+            } else {
+                true
+            }
+        });
+        if batch.is_empty() {
+            self.finish_readback();
+            return;
+        }
+        let start = batch.iter().map(|(r, _)| r.start).min().unwrap();
+        let end = batch.iter().map(|(r, _)| r.end).max().unwrap();
+        let buffer = self.clone();
         self.device.instance().backend().read_buffer_async(
             &self.gpu_handle,
-            offset,
-            size,
-            dst,
-            Arc::clone(&self.map_pending),
+            start as u64,
+            (end - start) as u64,
+            Box::new(move |result| {
+                for (range, dst) in batch {
+                    dst.complete(match &result {
+                        Ok(bytes) => Ok(bytes[range.start - start..range.end - start].to_vec()),
+                        Err(e) => Err(e.clone()),
+                    });
+                }
+                buffer.finish_readback();
+            }),
         );
+    }
+    fn finish_readback(self: &Arc<Self>) {
+        let mut waiting = self.readbacks.lock();
+        if waiting.is_empty() {
+            self.map_pending.store(false, Ordering::Release);
+            return;
+        }
+        let next = std::mem::take(&mut *waiting);
+        drop(waiting);
+        self.start_readback(next);
     }
 }
 
@@ -169,5 +195,54 @@ mod tests {
             .create_buffer(&BufferDescriptor::new(2048, BufferUsage::UNIFORM))
             .unwrap();
         assert_eq!(buffer.size(), 2048);
+    }
+    #[cfg(feature = "wgpu-backend")]
+    #[test]
+    fn queued_readback_batches_and_errors_complete() {
+        use crate::{BackendType, InstanceParameters, Readback, ReadbackStatus};
+        let Ok(instance) = GraphicsInstance::with_parameters(
+            InstanceParameters::new().with_backend(BackendType::Wgpu),
+        ) else {
+            return;
+        };
+        let device = instance.create_device().unwrap();
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(
+                32,
+                BufferUsage::MAP_READ | BufferUsage::COPY_DST,
+            ))
+            .unwrap();
+        let first = Readback::new();
+        let second = Readback::new();
+        buffer.read_mapped_batch(vec![(0..16, first.clone())]);
+        assert!(buffer.is_map_pending());
+        buffer.read_mapped_batch(vec![(8..32, second.clone())]);
+        let native_device = {
+            let backend = instance.backend();
+            let crate::backend::GpuBackend::Wgpu(backend) = &*backend else {
+                unreachable!()
+            };
+            backend.device().clone()
+        };
+        for _ in 0..3 {
+            native_device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(10)),
+                })
+                .unwrap();
+        }
+        assert_eq!(first.take_result().unwrap().unwrap(), vec![0; 16]);
+        assert_eq!(second.take_result().unwrap().unwrap(), vec![0; 24]);
+        assert!(!buffer.is_map_pending());
+
+        let invalid = device
+            .create_buffer(&BufferDescriptor::new(16, BufferUsage::COPY_DST))
+            .unwrap();
+        let result = Readback::new();
+        invalid.read_mapped_batch(vec![(0..4, result.clone())]);
+        assert_eq!(result.status(), ReadbackStatus::Ready);
+        assert!(result.take_result().unwrap().is_err());
+        assert!(!invalid.is_map_pending());
     }
 }

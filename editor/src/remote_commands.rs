@@ -353,7 +353,7 @@ struct ScreenshotJob {
     id: i64,
     path: String,
     /// Filled by the GPU readback (via the frame graph).
-    result: Arc<Mutex<Vec<u8>>>,
+    result: redlilium_graphics::Readback,
     /// `(width, height, padded_bytes_per_row, format)` — set once the
     /// readback pass is injected.
     layout: Option<(u32, u32, u32, redlilium_graphics::TextureFormat)>,
@@ -529,16 +529,17 @@ fn complete_screenshot(rc: &mut RemoteCommands, world: &World) {
     let Some((w, h, padded_bpr, format)) = job.layout else {
         return; // pass not injected yet
     };
-    let data = {
-        let Ok(mut guard) = job.result.lock() else {
-            return;
-        };
-        if guard.is_empty() {
-            return; // GPU readback still in flight
-        }
-        std::mem::take(&mut *guard)
+    let Some(result) = job.result.take_result() else {
+        return;
     };
     let job = rc.screenshot.take().expect("checked above");
+    let data = match result {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            send_err(world, job.conn, job.id, &error.to_string());
+            return;
+        }
+    };
 
     // Un-pad rows and convert to RGBA8 for the PNG.
     let bytes_px = screenshot_bytes_per_pixel(format);
@@ -1283,7 +1284,7 @@ fn dispatch(
                 conn,
                 id,
                 path,
-                result: Arc::new(Mutex::new(Vec::new())),
+                result: redlilium_graphics::Readback::new(),
                 layout: None,
                 _buffer: None,
             });

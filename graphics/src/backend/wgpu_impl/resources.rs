@@ -13,6 +13,14 @@ use super::conversion::{
 };
 
 impl WgpuBackend {
+    pub(crate) fn create_texture_view(
+        &self,
+        texture: &wgpu::Texture,
+        desc: &wgpu::TextureViewDescriptor,
+    ) -> Result<wgpu::TextureView, GraphicsError> {
+        self.checked(|| Ok(texture.create_view(desc)))
+    }
+
     pub(crate) fn texture_filterable(&self, format: crate::TextureFormat) -> bool {
         convert_texture_format(format)
             .guaranteed_format_features(self.device.features())
@@ -30,6 +38,19 @@ impl WgpuBackend {
         let key = super::bind_group_layout_key(layout);
         if let Some(cached) = self.bind_group_layout_cache.lock().get(&key) {
             return Ok(cached.clone());
+        }
+        if layout.entries.iter().any(|entry| {
+            matches!(
+                entry.binding_type.canonical(),
+                crate::BindingType::SampledTexture {
+                    dimension: crate::TextureViewDimension::D1Array,
+                    ..
+                }
+            )
+        }) {
+            return Err(GraphicsError::FeatureNotSupported(
+                "wgpu has no 1D array bindings".into(),
+            ));
         }
         let entries = super::conversion::binding_layout_entries(layout);
         let created = self.checked(|| {
@@ -759,76 +780,49 @@ impl WgpuBackend {
         }
     }
 
-    /// Non-blocking readback: map `buffer[offset..offset+size]` and, in the
-    /// `map_async` completion callback, copy it into `dst` and clear
-    /// `map_pending`. The callback fires when the GPU finishes the map — on
-    /// native when `device.poll` runs it, on wasm from the browser event loop
-    /// (the only way to read back without blocking the thread, #33).
-    ///
-    /// Fire-and-forget: on any failure it logs and still clears `map_pending`,
-    /// so the buffer isn't wedged as permanently in-flight; poll `dst` for the
-    /// result (it stays whatever it was until the callback fills it).
+    /// Complete a non-blocking mapping with bytes or an explicit error, after unmap.
     pub fn read_buffer_async(
         &self,
         buffer: &GpuBuffer,
         offset: u64,
         size: u64,
-        dst: std::sync::Arc<Mutex<Vec<u8>>>,
-        map_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        complete: crate::readback::ReadbackCallback,
     ) {
-        use std::sync::atomic::Ordering;
-
-        let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
-            log::error!("read_buffer_async called with non-wgpu buffer");
-            map_pending.store(false, Ordering::Release);
+        let GpuBuffer::Wgpu(buffer) = buffer else {
+            complete(Err(GraphicsError::InvalidParameter(
+                "readback requires a wgpu buffer".into(),
+            )));
             return;
         };
         if size == 0 {
-            *dst.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
-            map_pending.store(false, Ordering::Release);
+            complete(Ok(Vec::new()));
             return;
         }
         if offset
             .checked_add(size)
-            .is_none_or(|end| end > wgpu_buffer.size())
+            .is_none_or(|end| end > buffer.size())
+            || !buffer.usage().contains(wgpu::BufferUsages::MAP_READ)
         {
-            log::error!(
-                "read_buffer_async range at offset {offset} ({size} bytes) exceeds buffer size {}",
-                wgpu_buffer.size()
-            );
-            map_pending.store(false, Ordering::Release);
+            complete(Err(GraphicsError::InvalidParameter(
+                "invalid readback range or usage".into(),
+            )));
             return;
         }
-        if !wgpu_buffer.usage().contains(wgpu::BufferUsages::MAP_READ) {
-            log::error!(
-                "read_buffer_async on a buffer without MAP_READ; copy device-local data to a \
-                 readback buffer first"
-            );
-            map_pending.store(false, Ordering::Release);
-            return;
-        }
-
-        // `wgpu::Buffer` is Arc-backed: cheap clones all handle the same GPU
-        // buffer. One clone keeps it mapped/alive across the pending callback.
-        let buf_cb = wgpu_buffer.clone();
-        wgpu_buffer
+        let retained = buffer.clone();
+        buffer
             .slice(offset..offset + size)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                match result {
-                    Ok(()) => {
-                        // Order matters (Fable): copy out, drop the borrowing
-                        // view, THEN unmap, then publish, then clear the flag
-                        // last so the map-pending window fully covers unmap.
-                        let data = buf_cb
-                            .slice(offset..offset + size)
-                            .get_mapped_range()
-                            .to_vec();
-                        buf_cb.unmap();
-                        *dst.lock().unwrap_or_else(|e| e.into_inner()) = data;
-                    }
-                    Err(e) => log::error!("read_buffer_async map failed: {e}"),
+            .map_async(wgpu::MapMode::Read, move |result| match result {
+                Ok(()) => {
+                    let bytes = retained
+                        .slice(offset..offset + size)
+                        .get_mapped_range()
+                        .to_vec();
+                    retained.unmap();
+                    complete(Ok(bytes));
                 }
-                map_pending.store(false, Ordering::Release);
+                Err(error) => complete(Err(GraphicsError::Internal(format!(
+                    "readback mapping failed: {error}"
+                )))),
             });
     }
 }
@@ -900,6 +894,12 @@ fn build_wgpu_bind_group_entries(
                     offset: *offset,
                     size: std::num::NonZeroU64::new(*size),
                 })
+            }
+            BoundResource::TextureView(view) => {
+                let crate::resources::GpuTextureView::Wgpu(view) = &*view.native else {
+                    return Err(mismatch("texture view"));
+                };
+                wgpu::BindingResource::TextureView(view)
             }
             BoundResource::Texture(texture) => {
                 let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {

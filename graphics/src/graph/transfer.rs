@@ -9,7 +9,7 @@
 //! - Texture to buffer readbacks
 
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
@@ -433,17 +433,17 @@ pub enum TransferOperation {
     /// This op records nothing during encoding; it is a marker the frame
     /// pipeline drains once the slot's fence signals, copying `src[src_range]`
     /// into `dst`. The result is therefore available one or more frames later
-    /// (poll `dst`). The GPU→`src` copy (e.g. a `TextureToBuffer`) must be a
+    /// (poll `Readback::take_result`). The GPU→`src` copy (e.g. a `TextureToBuffer`) must be a
     /// separate, earlier operation; `src` must be a host-visible readback buffer.
     /// It requires `MAP_READ`; nonempty ranges need an 8-byte aligned offset
-    /// and a 4-byte aligned size. An empty in-bounds range is a no-op.
+    /// and a 4-byte aligned size. An empty in-bounds range completes with empty bytes.
     ReadbackBuffer {
         /// Host-visible source buffer the GPU wrote earlier this frame.
         src: Arc<Buffer>,
         /// Sub-range of `src` to read.
         src_range: Range<usize>,
-        /// CPU destination, filled after the fence.
-        dst: Arc<Mutex<Vec<u8>>>,
+        /// One-shot result destination, completed after the fence.
+        dst: crate::Readback,
     },
 
     /// Generate the full mip chain of `texture` from mip 0 on the GPU (#96).
@@ -477,18 +477,48 @@ impl TransferOperation {
     /// command so a texture's intermediate layouts are not collapsed.
     pub(crate) fn add_resource_usage(&self, usage: &mut super::resource_usage::PassResourceUsage) {
         use super::resource_usage::{BufferAccessMode, TextureAccessMode};
+        let mut texture =
+            |t: &Arc<Texture>, location: TextureCopyLocation, extent: Extent3d, access| {
+                let mut range = crate::TextureSubresourceRange::whole(t);
+                range.base_mip_level = location.mip_level;
+                range.mip_level_count = 1;
+                if t.dimension() != crate::TextureDimension::D3 {
+                    range.base_array_layer = location.origin.z;
+                    range.array_layer_count = extent.depth;
+                }
+                usage.add_texture_decl(
+                    super::resource_usage::TextureUsageDecl::new(t.clone(), access)
+                        .with_range(range),
+                );
+            };
         match self {
-            TransferOperation::TextureToBuffer { src, dst, .. } => {
-                usage.add_texture(Arc::clone(src), TextureAccessMode::TransferRead);
-                usage.add_buffer(Arc::clone(dst), BufferAccessMode::TransferWrite);
+            TransferOperation::TextureToBuffer { src, dst, regions } => {
+                for r in regions {
+                    texture(
+                        src,
+                        r.texture_location,
+                        r.extent,
+                        TextureAccessMode::TransferRead,
+                    );
+                }
+                usage.add_buffer(dst.clone(), BufferAccessMode::TransferWrite);
             }
-            TransferOperation::BufferToTexture { src, dst, .. } => {
-                usage.add_buffer(Arc::clone(src), BufferAccessMode::TransferRead);
-                usage.add_texture(Arc::clone(dst), TextureAccessMode::TransferWrite);
+            TransferOperation::BufferToTexture { src, dst, regions } => {
+                for r in regions {
+                    texture(
+                        dst,
+                        r.texture_location,
+                        r.extent,
+                        TextureAccessMode::TransferWrite,
+                    );
+                }
+                usage.add_buffer(src.clone(), BufferAccessMode::TransferRead);
             }
-            TransferOperation::TextureToTexture { src, dst, .. } => {
-                usage.add_texture(Arc::clone(src), TextureAccessMode::TransferRead);
-                usage.add_texture(Arc::clone(dst), TextureAccessMode::TransferWrite);
+            TransferOperation::TextureToTexture { src, dst, regions } => {
+                for r in regions {
+                    texture(src, r.src, r.extent, TextureAccessMode::TransferRead);
+                    texture(dst, r.dst, r.extent, TextureAccessMode::TransferWrite);
+                }
             }
             TransferOperation::BufferToBuffer { src, dst, .. } => {
                 usage.add_buffer(Arc::clone(src), BufferAccessMode::TransferRead);
@@ -504,7 +534,7 @@ impl TransferOperation {
             // mips and writes higher ones, but the per-mip transitions
             // are internal — for hazard purposes the write wins, and the
             // op starts and ends in TRANSFER_DST so the whole-image
-            // tracker model stays truthful.
+            // tracker state for every subresource stays truthful.
             TransferOperation::GenerateMipmaps { texture } => {
                 usage.add_texture(Arc::clone(texture), TextureAccessMode::TransferWrite);
             }
@@ -709,7 +739,7 @@ impl TransferOperation {
     pub fn readback_buffer(
         src: Arc<Buffer>,
         src_range: Range<usize>,
-        dst: Arc<Mutex<Vec<u8>>>,
+        dst: crate::Readback,
     ) -> Self {
         Self::ReadbackBuffer {
             src,

@@ -134,41 +134,58 @@ impl BufferAccessMode {
 ///
 /// # Subresource granularity
 ///
-/// The mip/layer range fields describe intent, but the Vulkan barrier system
-/// currently tracks one layout per image and emits **whole-image**
-/// transitions — a pass cannot yet hold different mips/layers of one image
-/// in different layouts (e.g. write mip N while sampling mip N−1 during
-/// mipmap generation). Nothing in the engine declares partial ranges today;
-/// per-subresource tracking is the prerequisite for such workflows.
+/// Ranges are inferred from views, attachments and copy regions. Dependencies and
+/// Vulkan layout history use these exact mip/layer ranges. Depth/stencil aspects
+/// are conservatively synchronized together where separate layouts are unavailable.
 #[derive(Debug, Clone)]
 pub struct TextureUsageDecl {
+    pub aspect: crate::TextureAspect,
     /// The texture being used.
     pub texture: Arc<Texture>,
     /// How the texture is accessed.
     pub access: TextureAccessMode,
     /// Starting mip level (default: 0).
     pub mip_level: u32,
-    /// Number of mip levels (default: 1).
+    /// Number of mip levels (default: all levels).
     pub mip_count: u32,
     /// Starting array layer (default: 0).
     pub array_layer: u32,
-    /// Number of array layers (default: 1).
+    /// Number of array layers (default: all layers).
     pub layer_count: u32,
 }
 
 impl TextureUsageDecl {
-    /// Create a new texture usage declaration with default subresource range.
+    /// Declare all mips and layers of a texture.
     pub fn new(texture: Arc<Texture>, access: TextureAccessMode) -> Self {
+        let range = crate::TextureSubresourceRange::whole(&texture);
         Self {
             texture,
             access,
+            aspect: range.aspect,
             mip_level: 0,
-            mip_count: 1,
+            mip_count: range.mip_level_count,
             array_layer: 0,
-            layer_count: 1,
+            layer_count: range.array_layer_count,
         }
     }
 
+    pub fn with_range(mut self, range: crate::TextureSubresourceRange) -> Self {
+        self.aspect = range.aspect;
+        self.mip_level = range.base_mip_level;
+        self.mip_count = range.mip_level_count;
+        self.array_layer = range.base_array_layer;
+        self.layer_count = range.array_layer_count;
+        self
+    }
+    pub fn range(&self) -> crate::TextureSubresourceRange {
+        crate::TextureSubresourceRange {
+            aspect: self.aspect,
+            base_mip_level: self.mip_level,
+            mip_level_count: self.mip_count,
+            base_array_layer: self.array_layer,
+            array_layer_count: self.layer_count,
+        }
+    }
     /// Set the mip level range.
     pub fn with_mip_levels(mut self, base: u32, count: u32) -> Self {
         self.mip_level = base;

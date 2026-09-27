@@ -39,6 +39,8 @@ pub enum BoundResource {
 
     /// A texture resource.
     Texture(Arc<Texture>),
+    /// An explicit sampled texture view.
+    TextureView(Arc<crate::TextureView>),
 
     /// A sampler resource.
     Sampler(Arc<Sampler>),
@@ -85,6 +87,9 @@ impl BoundResource {
         Self::Texture(texture)
     }
 
+    pub fn texture_view(view: Arc<crate::TextureView>) -> Self {
+        Self::TextureView(view)
+    }
     /// Create a sampler binding.
     pub fn sampler(sampler: Arc<Sampler>) -> Self {
         Self::Sampler(sampler)
@@ -207,6 +212,10 @@ impl BindingGroupDescriptor {
     }
 
     /// Add a texture binding.
+    pub fn with_texture_view(self, binding: u32, view: Arc<crate::TextureView>) -> Self {
+        self.with_entry(binding, BoundResource::TextureView(view))
+    }
+
     pub fn with_texture(self, binding: u32, texture: Arc<Texture>) -> Self {
         self.with_entry(binding, BoundResource::texture(texture))
     }

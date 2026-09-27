@@ -326,7 +326,7 @@ fn analyze_resource_conflict(a: &PassResourceUsage, b: &PassResourceUsage) -> (b
     // pairs (e.g. pure write vs read-write) still order by the read half.
     for ta in &a.texture_usages {
         for tb in &b.texture_usages {
-            if Arc::ptr_eq(&ta.texture, &tb.texture) {
+            if Arc::ptr_eq(&ta.texture, &tb.texture) && ta.range().overlaps(tb.range()) {
                 if ta.access.is_write() && tb.access.is_write() {
                     has_waw = true;
                 }

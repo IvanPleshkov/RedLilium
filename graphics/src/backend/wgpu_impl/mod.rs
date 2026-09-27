@@ -28,7 +28,7 @@ pub(crate) fn bind_group_layout_key(
     layout
         .entries
         .iter()
-        .map(|e| (e.binding, e.binding_type, e.visibility))
+        .map(|e| (e.binding, e.binding_type.canonical(), e.visibility))
         .collect()
 }
 

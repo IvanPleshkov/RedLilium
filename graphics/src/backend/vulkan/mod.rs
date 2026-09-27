@@ -95,7 +95,7 @@ struct VulkanEncoderScratch {
 }
 
 /// Whether two binding layouts are descriptor-set-layout compatible: identical
-/// bindings, in order, with matching type and stage visibility. A binding group
+/// bindings with matching type and stage visibility. A binding group
 /// created against a layout compatible with the material's set layout binds
 /// correctly (content-equal layouts share the same `VkDescriptorSetLayout` via
 /// the pipeline manager's dedup).
@@ -104,10 +104,12 @@ fn binding_layouts_compatible(
     b: &crate::materials::BindingLayout,
 ) -> bool {
     a.entries.len() == b.entries.len()
-        && a.entries.iter().zip(&b.entries).all(|(x, y)| {
-            x.binding == y.binding
-                && x.binding_type == y.binding_type
-                && x.visibility == y.visibility
+        && a.entries.iter().all(|x| {
+            b.entries.iter().any(|y| {
+                x.binding == y.binding
+                    && x.binding_type.canonical() == y.binding_type.canonical()
+                    && x.visibility == y.visibility
+            })
         })
 }
 
@@ -2313,6 +2315,15 @@ impl VulkanBackend {
                         });
                     }
                 }
+                BoundResource::TextureView(view) => {
+                    if let crate::resources::GpuTextureView::Vulkan { view, .. } = &*view.native {
+                        image_infos.push(
+                            vk::DescriptorImageInfo::default()
+                                .image_view(*view)
+                                .image_layout(sampled_layout),
+                        );
+                    }
+                }
                 BoundResource::Texture(texture) => {
                     if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
                         image_infos.push(vk::DescriptorImageInfo {
@@ -2394,7 +2405,7 @@ impl VulkanBackend {
                         .descriptor_type(descriptor_type)
                         .buffer_info(info)
                 }
-                BoundResource::Texture(_) => {
+                BoundResource::Texture(_) | BoundResource::TextureView(_) => {
                     let info = &image_infos[image_idx..image_idx + 1];
                     image_idx += 1;
                     vk::WriteDescriptorSet::default()
@@ -3334,6 +3345,10 @@ impl VulkanBackend {
         let mut tracker = self.layout_tracker.lock();
 
         // Generate texture (image) barriers
+        let mut seen: std::collections::HashMap<
+            (TextureId, crate::graph::resource_usage::TextureAccessMode),
+            Vec<crate::TextureSubresourceRange>,
+        > = Default::default();
         for decl in &usage.texture_usages {
             // Get Vulkan image info from the texture
             let GpuTexture::Vulkan { image, id, .. } = decl.texture.gpu_handle() else {
@@ -3344,8 +3359,29 @@ impl VulkanBackend {
             // destruction would otherwise alias a stale tracked layout).
             let texture_id = TextureId::from_raw(*id);
             let required_layout = decl.access.to_layout();
-            let (current_layout, foreign_source) =
-                tracker.request_access(texture_id, required_layout, queue, submit_value, waits);
+            let prior = seen.entry((texture_id, decl.access)).or_default();
+            let mut uncovered = vec![decl.range()];
+            for range in prior.iter() {
+                uncovered = uncovered
+                    .into_iter()
+                    .flat_map(|r| r.subtract(*range))
+                    .collect();
+            }
+            prior.extend(uncovered.iter().copied());
+            let transitions: Vec<_> = uncovered
+                .into_iter()
+                .flat_map(|range| {
+                    tracker.request_access_range(
+                        texture_id,
+                        range,
+                        crate::TextureSubresourceRange::whole(&decl.texture),
+                        required_layout,
+                        queue,
+                        submit_value,
+                        waits,
+                    )
+                })
+                .collect();
 
             // Determine aspect mask based on access mode and format
             let is_depth = matches!(
@@ -3377,28 +3413,32 @@ impl VulkanBackend {
             // the timeline wait); a same-queue one uses the previous layout's
             // augmented source scope.
             let dst_stage = tracker.dst_stage(required_layout);
-            if foreign_source {
-                batch.add_image_barrier_with_src_scope(
-                    texture_id,
-                    *image,
-                    current_layout,
-                    required_layout,
-                    aspect_mask,
-                    vk::PipelineStageFlags2::NONE,
-                    vk::AccessFlags2::NONE,
-                    dst_stage,
-                );
-            } else {
-                batch.add_image_barrier_with_src_scope(
-                    texture_id,
-                    *image,
-                    current_layout,
-                    required_layout,
-                    aspect_mask,
-                    tracker.src_stage(current_layout),
-                    current_layout.src_access_mask(),
-                    dst_stage,
-                );
+            for (range, current_layout, foreign_source) in transitions {
+                if foreign_source {
+                    batch.add_image_range_barrier(
+                        texture_id,
+                        *image,
+                        current_layout,
+                        required_layout,
+                        aspect_mask,
+                        vk::PipelineStageFlags2::NONE,
+                        vk::AccessFlags2::NONE,
+                        dst_stage,
+                        range,
+                    );
+                } else {
+                    batch.add_image_range_barrier(
+                        texture_id,
+                        *image,
+                        current_layout,
+                        required_layout,
+                        aspect_mask,
+                        tracker.src_stage(current_layout),
+                        current_layout.src_access_mask(),
+                        dst_stage,
+                        range,
+                    );
+                }
             }
         }
 
@@ -3488,22 +3528,16 @@ impl VulkanBackend {
 
     /// Read host-visible memory after the caller has waited for GPU completion.
     /// Device-local buffers must first be copied through the render graph.
-    /// Non-blocking readback (Vulkan is native-only, so it fills `dst`
-    /// synchronously — the caller drains after the frame fence, so the mapped
-    /// memory is already GPU-complete — and clears the pending flag).
+    /// Invoke completion synchronously: the caller drains after the frame
+    /// fence, so the mapped memory is already GPU-complete.
     pub fn read_buffer_async(
         &self,
         buffer: &GpuBuffer,
         offset: u64,
         size: u64,
-        dst: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-        map_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        complete: crate::readback::ReadbackCallback,
     ) {
-        match self.read_buffer(buffer, offset, size) {
-            Ok(data) => *dst.lock().unwrap_or_else(|e| e.into_inner()) = data,
-            Err(e) => log::error!("read_buffer_async failed: {e}"),
-        }
-        map_pending.store(false, std::sync::atomic::Ordering::Release);
+        complete(self.read_buffer(buffer, offset, size));
     }
 
     pub fn read_buffer(
