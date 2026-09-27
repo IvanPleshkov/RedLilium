@@ -1,9 +1,9 @@
-/// A 64-bit entity handle packed as `id:24 + spawn_tick:40`.
+/// A 64-bit, world-local entity handle packed as `id:24 + generation:40`.
 ///
 /// - **id** (bits 0–23): slot index in the entity store (max ~16M entities)
-/// - **spawn_tick** (bits 24–63): truncated world tick when this entity was
-///   spawned — used for ABA detection when a slot is recycled (~145 years
-///   at 240 FPS before overflow)
+/// - **generation** (bits 24–63): per-slot generation, exposed through
+///   [`Entity::spawn_tick`]. It advances when a slot is recycled, independently
+///   of the world clock, and wraps at 40 bits while skipping the dead sentinel.
 ///
 /// Per-entity mutable state (flags, full spawn tick) lives in [`Entities`],
 /// not in the handle itself, because `Entity` is `Copy` and would go stale.
@@ -97,7 +97,7 @@ impl Entity {
         (self.bits & Self::ID_MASK) as u32
     }
 
-    /// Returns the truncated spawn tick stored in this handle (40-bit).
+    /// Returns the slot generation stored in this handle (40-bit), not a world tick.
     pub fn spawn_tick(&self) -> u64 {
         (self.bits & Self::TICK_MASK) >> Self::TICK_SHIFT
     }

@@ -2,7 +2,7 @@
 
 ## Why a Custom ECS?
 
-Existing ECS solutions treat async compute as an afterthought — something bolted on through external task pools. In a real game engine, CPU cores sit idle while the slowest ECS system in a dependency stage finishes. Background work (navmesh rebuilds, pathfinding, LOD calculations, asset processing) has no way to fill those gaps.
+The engine needs synchronous frame systems and background CPU work (navmesh rebuilds, pathfinding, LOD calculations and asset processing) to share execution capacity. The ECS owns that scheduling boundary while keeping component access scoped and background tasks independent of world borrows.
 
 RedLilium ECS combines synchronous systems with wake-driven async compute. Native systems, parallel entity queries, and background compute share reusable workers through an explicitly owned executor. Background tasks continue between frames; no process-global scheduler or separate compute thread pool is required.
 
@@ -18,51 +18,30 @@ RedLilium ECS combines synchronous systems with wake-driven async compute. Nativ
 
 5. **Cross-platform** — Works on native (multi-threaded) and web (single-threaded). Same API, different scheduling backends.
 
-## Non-Goals
+## Scope
 
-- Competing with archetype-based ECS storage performance for millions of entities
-- Plugin ecosystem or scripting integration (can be added later)
-- Editor/inspector reflection system (can be added later)
+The ECS provides storage, queries, scheduling, compute/IO integration, events,
+observers, hierarchy, inspection metadata and serialization. Source attribution
+and unload barriers support hot reload; module loading and plugin orchestration
+belong to the runtime, and the editor owns its application UI.
+
+The current storage design prioritizes straightforward component mutation and
+explicit access rules. Competing with archetype-oriented iteration performance
+at millions of entities is not its target.
 
 ## Architecture Overview
 
 ### Sync Systems with Lock-Execute Pattern
 
-The key architectural decision: **ECS systems are synchronous functions that access the World through a lock-execute pattern.** Component locks are confined to closures and automatically dropped when the closure returns, preventing deadlocks in multi-threaded execution.
+The key architectural decision: **ECS systems are synchronous functions that access the World through a lock-execute pattern.** `execute` confines component locks to its closure; queries retain locks in a guard. A single request acquires locks in a consistent order. Nested requests still need care, as described under runtime borrow checking.
 
 - **Sync systems** access the World through `ctx.lock::<A>().execute(|items| {...})`. All systems complete within a single `runner.run()` call.
 - **Compute tasks** receive owned data (copies/clones extracted from execute closures). They are polled by the compute executor and may span multiple frames. Systems can wait for results via `compute.block_on()` or fire-and-forget.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│ system with compute (completes within one frame)         │
-│                                                          │
-│  let data = ctx.lock::<(Read<NavMesh>,)>()               │
-│      .execute(|(nav,)| nav.clone());  ← locks released   │
-│                                                          │
-│  let mut handle = ctx.compute().spawn(Priority::High,    │
-│      |ctx| async { heavy_pathfinding(data) });           │
-│  let result = ctx.compute().block_on(&mut handle);       │
-│                      ← ticks pool until task completes   │
-│                                                          │
-│  if let Some(paths) = result {                           │
-│      ctx.commands(move |world| { apply(world, paths); });│
-│  }                                                       │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│ fire-and-forget compute tasks (may span multiple frames) │
-│                                                          │
-│  let geometry = ctx.lock::<(Read<Geometry>,)>()          │
-│      .execute(|(geo,)| extract_geometry(&geo));          │
-│                                                          │
-│  compute.spawn(Priority::Low, |ctx| async move {        │
-│      rebuild_navmesh(geometry)  ← runs across frames    │
-│  });                                                     │
-│  // system returns, task continues in background         │
-│  // next frame: try_recv() to check for results          │
-└─────────────────────────────────────────────────────────┘
-```
+Extract owned data before spawning compute work. To apply a result, reacquire
+component access or enqueue a deferred command. A synchronous system waiting via
+`block_on` still completes within its runner call; a task whose handle is retained
+for a later frame can continue between calls.
 
 ### Execution and parallel queries
 
@@ -130,6 +109,43 @@ Guest async work must enter through `IoRunner::run`; spawning raw Tokio tasks by
 
 The native cross-image regression probe runs with `python3 scripts/check-io-reload.py` (macOS/Linux, no GPU). It builds host and guest from identical Cargo artifacts and exercises timers, poll/destructor panics, TLS teardown and late wakers over three unload/reload cycles.
 
+### Schedule world binding
+
+A `SystemsContainer` binds to the first world admitted by a runner, including
+empty schedules. A later submission to another world returns
+`SystemError::ScheduleWorldMismatch { container_id }` before systems run, results
+are reused or the world's executor/ticks change. The binding belongs to the
+container, so changing runners does not bypass it. An orphan-cache rejection
+happens before binding an unused container; execution setup failures after
+admission do not reset its binding.
+
+Each world has a stable identity marker that survives moves. The container's
+`OnceLock<Weak<()>>` binds atomically without keeping the world alive. The weak
+marker reserves the identity allocation after the world is dropped; a new world
+cannot reuse it. Neither world destruction nor `prepare_reload` permits rebinding.
+Create separate containers and system instances for separate worlds; those worlds
+may still share runners and worker pools. This keeps `last_run` ticks and mutable
+system state in their original world without per-world history maps. Repeated
+runs require a constant-time identity comparison, with no per-system scan.
+
+### Cached result lifecycle
+
+A runner retains previous system results for `reuse_result`. Before admitting a
+new container, it checks cached entries against weak lifetime markers owned by
+their containers. If a destroyed container still has results, the new run returns
+`SystemError::OrphanedScheduleResults { container_ids }` before executing systems
+or changing the world. IDs are sorted; cached values remain untouched on failure.
+Call `runner.prepare_reload(timeout)` while the originating code is still loaded
+before running replacement schedules. This clears the cache and its registrations.
+Dropping a container during the normal reload sequence does not itself report an
+error. Entries without results do not prevent admission.
+
+Known containers, including empty schedules, require an ID lookup and the world
+identity check; orphan scans happen when a new container is submitted. Existing
+schedules may continue running while an unrelated orphan remains. This is a
+lifecycle check, not automatic cache eviction or a change to world/schedule
+ownership.
+
 ### System panic boundaries
 
 For regular, exclusive and read-only exclusive systems, the erased invocation
@@ -170,15 +186,19 @@ The hot path keeps one boxed callback and adds a registration-location pointer p
 
 ### Priority Levels
 
-| Priority | Use Case | Behavior |
-|----------|----------|----------|
-| **Critical** | ECS systems, physics, render prep | Must complete this frame |
-| **High** | AI decisions, animation blending | Should complete this frame |
-| **Low** | Navmesh rebuild, LOD, asset processing | Fills gaps, may span multiple frames |
+These priorities order compute tasks. Ready ECS systems take admission priority
+over compute at every level; already-running compute polls yield cooperatively.
+No compute priority guarantees completion within a frame.
+
+| Priority | Ordering |
+|----------|----------|
+| **Critical** | Highest compute priority |
+| **High** | Ahead of low-priority compute |
+| **Low** | Background work such as navmesh rebuilds, LOD and asset processing |
 
 ### Multiple Worlds
 
-Each World is independent — its own entities, components, resources, and system schedule. Worlds and runners can share an explicitly owned worker pool.
+Each world has independent entities, components, resources and change-detection ticks. Schedules are owned separately, but each container binds to one world. Reuse system code by constructing separate containers and system instances. Worlds can share a runner and an explicitly owned worker pool.
 
 Use cases:
 - **Game + Editor**: Separate simulation from editor state
@@ -191,32 +211,44 @@ Worlds can communicate through channels or shared resources (Arc-wrapped, extern
 
 ## Component Storage: Sparse Sets
 
-We use sparse sets instead of archetypes. The tradeoffs:
+Each component type has a dense value array and a sparse entity-index lookup.
+Adding or removing a component updates that type's storage without migrating
+other components of the entity. Removal uses `swap_remove`, so dense iteration
+order is not stable. Insertion may allocate when the sparse or dense arrays grow.
 
-| | Sparse Sets | Archetypes |
-|---|---|---|
-| **Iteration speed** | Good (dense array, but indirect) | Excellent (contiguous memory) |
-| **Add/remove component** | O(1), no data movement | O(N), moves entity to new archetype |
-| **Memory overhead** | Higher (sparse array per type) | Lower (packed tables) |
-| **Implementation** | ~200 lines | ~1000+ lines |
-| **Cache behavior** | Good for single-component, scattered for multi | Excellent for multi-component |
+Single-component iteration traverses dense storage. Multi-component queries join
+through entity indices, while each registered type pays for its sparse index.
+Change-detection ticks and membership/removal tracking live alongside component
+data. Structural world operations also perform lifecycle hooks and observer work.
 
-For our use case (thousands, not millions of entities), sparse sets are fast enough and dramatically simpler. If iteration performance becomes a bottleneck, we can add archetype storage later without changing the query API.
+Storage changes should follow measurements of representative workloads; the
+choice of sparse sets does not by itself establish a performance guarantee.
 
 ## Query System: Runtime Borrow Checking
 
-Queries borrow component storages at runtime using `RefCell`-like tracking. This is simpler than compile-time checking and catches bugs immediately with clear error messages.
+Queries acquire runtime read/write locks on component and resource storages.
+Within one request, normalized accesses are acquired in TypeId order. Conflicting
+accesses across systems serialize at lock acquisition; systems are not assigned
+static read/write declarations for scheduling.
 
-```rust
-// Read-only access — multiple systems can read simultaneously
-let positions = world.read::<Position>();
-let velocities = world.read::<Velocity>();
+Direct `World::read` returns a read guard; public `World::write` requires
+`&mut World`. Use a query to borrow several writable storages together. System
+contexts expose guarded access through `query` and `lock().execute`.
 
-// Mutable access — exclusive
-let mut transforms = world.write::<Transform>();
-
-// Panics at runtime if another system already has &mut Transform
+```rust,ignore
+{
+    let positions = world.read::<Position>().expect("registered component");
+    let velocities = world.read::<Velocity>().expect("registered component");
+    // Read through both guards.
+}
+let mut transforms = world.write::<Transform>().expect("registered component");
 ```
+
+A system requesting storage it already holds is rejected by held-lock tracking.
+Separate nested requests can still form a cross-system lock-order cycle; combine
+accesses into one request or order the systems explicitly. Native lock acquisition
+has a timeout diagnostic for such stalls. Guard-bound lifetimes and Rust's mutable
+borrows enforce additional safety at compile time.
 
 ### Low-level access safety
 
@@ -260,18 +292,19 @@ within a guard borrow, use `QueryGuard::iter_mut`.
 
 ## System Scheduling
 
-Systems implement the `System` trait: a synchronous `run` method that receives a `SystemContext`. The scheduler resolves dependencies and runs non-conflicting systems in parallel:
+Systems implement the `System` trait: a synchronous `run` method that receives a `SystemContext`. The scheduler resolves explicit dependencies and runs ready regular systems in parallel. Runtime locks serialize conflicting storage accesses; exclusive systems form execution barriers:
 
 ```rust
 struct PhysicsSystem;
 
 impl System for PhysicsSystem {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
         ctx.lock::<(Write<Transform>, Read<RigidBody>)>()
             .execute(|(mut transforms, bodies)| {
                 // ... physics step
             });
+        Ok(())
     }
 }
 
@@ -281,7 +314,10 @@ container.add(PhysicsSystem);
 container.add(AnimationSystem);
 container.add_edge::<PhysicsSystem, AnimationSystem>().unwrap();
 
-runner.run(&mut world, &container); // all systems complete within this call
+let errors = runner.run(&mut world, &container); // synchronous completion
+for error in errors {
+    // Report or handle admission, system and deferred-operation errors.
+}
 ```
 
 ## Compute Integration
@@ -291,7 +327,7 @@ Systems can spawn compute tasks and wait for results within the same frame using
 ```rust
 impl System for PathfindSystem {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
         // Phase 1: extract data (locks released when execute returns)
         let graph = ctx.lock::<(Read<NavMesh>,)>()
             .execute(|(nav,)| {
@@ -312,11 +348,12 @@ impl System for PathfindSystem {
                 });
             }
         }
+        Ok(())
     }
 }
 ```
 
-Fire-and-forget tasks for background work that spans multiple frames:
+Background tasks can span multiple frames; retain the handle when their result is needed:
 
 ```rust
 // Spawn from a system — task continues after the system returns
@@ -337,78 +374,74 @@ if let Some(mesh) = handle.try_recv() {
 
 ## Frame Flow
 
-All systems complete within a single `schedule.run()` call. There is no cross-frame system state — if work is too heavy for one frame, spawn it as a compute task.
+Every system invocation completes within its `runner.run()` call. System
+instances, previous-run ticks and cached results persist between calls. Work that
+continues asynchronously across frames belongs in compute tasks.
 
-```
-1. world.advance_tick();               ← start new frame
+`Schedules::run_startup` executes `Startup` once. A regular
+`Schedules::run_frame(&mut world, &runner, delta_time)` then:
 
-2. runner.run(&mut world, &systems);   ← systems execute by dependency order
-   // Stage 1: [physics, AI, animation] ← parallel, non-conflicting
-   //   shared workers execute ready compute; block_on callers can help
-   // Stage 2: [transform_propagation]  ← depends on physics
-   // Stage 3: [camera_update, culling] ← depends on transforms
+1. Updates `Time`, swaps trigger buffers and advances event queues.
+2. Runs `PreUpdate`, applies state transitions with `OnExit`/`OnEnter`, and
+   advances the world clocks when present.
+3. Runs zero or more `FixedUpdate` steps, bounded by the catch-up limit.
+4. Runs `Update` and `PostUpdate`.
+5. Advances the world tick for owner mutations between frames.
 
-3. world.apply_commands();             ← deferred spawn/despawn/insert
+Within each runner call, regular systems receive their own run ticks. Deferred
+commands from system contexts are applied before exclusive systems and at the
+end of the call; deferred observers are flushed at the end. The separate
+`CommandBuffer` resource is applied explicitly through `World::apply_commands`,
+which returns its errors.
 
-4. render(&world);                     ← render submission
-```
+The host invokes the `Render` schedule separately with the render-graph resource
+available, then submits the graph. Native compute continues on shared workers
+between calls; WASM compute advances through cooperative ticks.
 
 ## Platform Differences
 
 | | Native | Web (WASM) |
 |---|---|---|
 | **Parallel queries** | Shared workers + caller | Sequential |
-| **Systems** | Persistent shared workers with a fixed limit | Sequential on main thread |
+| **Systems** | Multi-thread runner: bounded shared workers; single-thread runner: caller | Sequential on main thread |
 | **Async compute** | Wake-driven shared workers, continuing between frames | Wake-driven cooperative ticks |
 | **IO** | tokio (separate thread) | wasm-bindgen-futures / fetch API |
 | **API** | Same | Same |
 
 On web, parallel queries run sequentially, and async compute tasks tick cooperatively. The query API is identical across platforms.
 
-## Implementation Plan
+## Entity Identity and Flags
 
-### Entity Flags
+`Entity` is a 64-bit, world-local handle: 24 bits for a slot index and 40 bits for
+its generation. The generation is exposed by `Entity::spawn_tick()`, but it is
+independent of the world clock. Recycling a slot advances its generation, so a
+despawn and respawn within the same frame produce distinct handles. Generation
+values wrap at 40 bits, skipping the dead-slot sentinel. `Entity::DANGLING` uses
+that sentinel and never identifies a live entity.
 
-Each entity carries a `u32` flags field in its 128-bit identifier. Flags control query visibility without requiring component insertion/removal:
+`Entities` stores each slot's generation, actual world tick at spawn and mutable
+`u32` flags separately. Flags are not embedded in the copyable entity handle.
+They control query visibility without component insertion/removal:
 
 | Bit | Flag | Description |
 |-----|------|-------------|
-| 0 | `DISABLED` | Manually disabled by user/system |
-| 1 | `INHERITED_DISABLED` | Disabled because a parent was disabled |
-| 2 | `STATIC` | Manually marked static (rarely-changing) |
-| 3 | `INHERITED_STATIC` | Static because a parent was marked static |
+| 0 | `DISABLED` | Disabled state used by query filtering |
+| 1 | `INHERITED_DISABLED` | Disabled state inherited from a parent |
+| 2 | `STATIC` | Static state used by query filtering |
+| 3 | `INHERITED_STATIC` | Static state inherited from a parent |
+| 4 | `EDITOR` | Editor-only state used by query filtering |
+| 5 | `INHERITED_EDITOR` | Editor-only state inherited from a parent |
 
-**Filtering semantics**:
-- `Read<T>` / `Write<T>` — exclude entities with `DISABLED` or `STATIC` set
-- `ReadAll<T>` — exclude `DISABLED` only, include static entities
-- `World::get()` / `World::get_mut()` — no filtering (exclusive system access)
-- `_unfiltered` methods on `Ref`/`RefMut` — bypass all flag checks
+Filtering semantics:
 
-Both disabled and static flags propagate through the parent-child hierarchy. The `INHERITED_*` variants distinguish manual vs propagated state so that `enable`/`unmark_static` preserve manually-flagged children.
+- `Read<T>` / `Write<T>` exclude disabled, static and editor entities.
+- `ReadAll<T>` / `WriteAll<T>` exclude disabled entities, while including static
+  and editor entities.
+- `World::get()` / `World::get_mut()` bypass visibility filtering and validate
+  that the entity is alive.
+- `_unfiltered` methods on storage views bypass their exclusion masks; their
+  guard lifetime and access restrictions still apply.
 
-### Phase 1: Foundation
-- Entity storage (128-bit IDs with spawn_tick and flag bits)
-- Component storage (sparse sets, type-erased)
-- Basic queries (iteration, With/Without filters)
-- Resources (typed singletons)
-- World struct
-
-### Phase 2: Scheduling
-- Thread pool with sync scope + async executor
-- `yield_now()` and priority levels
-- System registration with access declarations
-- Dependency resolution and parallel execution
-- Channel-based result bridge
-
-### Phase 3: Features
-- Change detection (Changed<T>, Added<T>)
-- Commands (deferred spawn/despawn/insert)
-- Events (typed channels between systems)
-- Parent-child hierarchy with cascading delete
-
-### Phase 4: Polish
-- Run conditions
-- App states and transitions
-- On-add / on-remove hooks
-- Profiling integration (Tracy)
-- Multiple world management
+Disabled, static and editor states propagate through the parent-child hierarchy.
+The `INHERITED_*` flags distinguish propagated state from manual markings so
+removing a parent's state preserves independently marked children.

@@ -1,3 +1,4 @@
+mod result_cache;
 pub(crate) mod single;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -204,6 +205,12 @@ impl EcsRunner {
     }
 
     /// Runs all systems in the container, respecting dependency ordering.
+    ///
+    /// A container binds to its first admitted world. Another world is rejected
+    /// with `SystemError::ScheduleWorldMismatch`, including after reload cleanup.
+    /// A new container is rejected with `SystemError::OrphanedScheduleResults`
+    /// if this runner retains results from destroyed containers. Clear those
+    /// through `prepare_reload` before running replacement schedules.
     ///
     /// Systems with no dependencies start immediately. As each system
     /// completes, its dependents become eligible to start.

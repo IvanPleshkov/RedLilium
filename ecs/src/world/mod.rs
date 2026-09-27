@@ -172,6 +172,9 @@ type StampedWorldFn = (crate::type_identity::SourceId, fn(&mut World));
 /// }
 /// ```
 pub struct World {
+    /// Stable identity across moves. Weak schedule bindings keep the allocation
+    /// reserved after world destruction, preventing identity reuse.
+    identity: std::sync::Arc<()>,
     parallel_executor: crate::ParallelExecutor,
     entities: Entities,
     components: HashMap<TypeId, crate::sync::RwLock<ComponentStorage>>,
@@ -266,6 +269,7 @@ impl World {
             crate::type_identity::SourceId::HOST,
         );
         Self {
+            identity: std::sync::Arc::new(()),
             parallel_executor,
             entities: Entities::new(),
             components: HashMap::new(),
@@ -284,6 +288,10 @@ impl World {
             worlds_generations: HashMap::new(),
             migration_registry: crate::MigrationRegistry::new(),
         }
+    }
+
+    pub(crate) fn identity(&self) -> &std::sync::Arc<()> {
+        &self.identity
     }
 
     // ---- Type identity (ADR-020 amendment) ----

@@ -2,7 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use crate::sync::RwLock;
 
@@ -104,6 +104,11 @@ pub(crate) enum SystemEntry {
 ///
 /// Edges work between any combination of regular and exclusive systems.
 ///
+/// The first admitted run binds this container to that world. Later runs on a
+/// different world return `SystemError::ScheduleWorldMismatch`, even after the
+/// original world is dropped or runner caches are cleared. Create a separate
+/// container (and system instances) for each world.
+///
 /// The runner uses this container (immutably) to determine execution order
 /// and access system instances.
 ///
@@ -121,6 +126,10 @@ pub struct SystemsContainer {
     /// schedules driven through one runner cannot leak results into each
     /// other even when their node counts happen to match.
     id: u64,
+    /// Only the container owns a strong reference; runner caches observe it.
+    lifetime: Arc<()>,
+    /// First admitted world; never rebound, even after that world is dropped.
+    bound_world: OnceLock<Weak<()>>,
     /// Registered systems in insertion order.
     systems: Vec<SystemEntry>,
     /// Cached type names to avoid locking just for diagnostics.
@@ -170,6 +179,8 @@ impl SystemsContainer {
             std::sync::atomic::AtomicU64::new(1);
         Self {
             id: NEXT_CONTAINER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            lifetime: Arc::new(()),
+            bound_world: OnceLock::new(),
             systems: Vec::new(),
             names: Vec::new(),
             edges: Vec::new(),
@@ -722,6 +733,25 @@ impl SystemsContainer {
     /// Returns this container's process-unique identity.
     pub(crate) fn container_id(&self) -> u64 {
         self.id
+    }
+
+    /// Binding is shared across runners. OnceLock makes concurrent first
+    /// submissions to different worlds choose exactly one owner.
+    pub(crate) fn bind_world(&self, world: &crate::World) -> Result<(), crate::SystemError> {
+        let owner = self
+            .bound_world
+            .get_or_init(|| Arc::downgrade(world.identity()));
+        if std::ptr::eq(owner.as_ptr(), Arc::as_ptr(world.identity())) {
+            Ok(())
+        } else {
+            Err(crate::SystemError::ScheduleWorldMismatch {
+                container_id: self.id,
+            })
+        }
+    }
+
+    pub(crate) fn lifetime_marker(&self) -> std::sync::Weak<()> {
+        Arc::downgrade(&self.lifetime)
     }
 
     /// Returns the tick of the system's previous run (0 = never ran).

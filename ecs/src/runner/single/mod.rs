@@ -1,6 +1,4 @@
 use crate::sync::Mutex;
-use std::any::Any;
-use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::commands::CommandCollector;
@@ -18,8 +16,7 @@ use crate::world::World;
 
 use super::ShutdownError;
 
-/// Boxed previous-tick results of one schedule, indexed by system node.
-type PrevResults = Vec<Option<Box<dyn Any + Send + Sync>>>;
+use super::result_cache::ResultCache;
 
 /// Single-threaded sequential executor for ECS systems.
 ///
@@ -33,7 +30,7 @@ pub struct EcsRunnerSingleThread {
     io: IoRuntime,
     /// Previous-tick system results for `reuse_result`, keyed by the
     /// container's identity — one runner drives many schedules per frame.
-    prev_results: Mutex<HashMap<u64, PrevResults>>,
+    prev_results: Mutex<ResultCache>,
 }
 
 impl EcsRunnerSingleThread {
@@ -49,7 +46,7 @@ impl EcsRunnerSingleThread {
             executor: executor.clone(),
             compute: ComputePool::with_executor(io.clone(), executor.clone()),
             io,
-            prev_results: Mutex::new(HashMap::new()),
+            prev_results: Mutex::new(ResultCache::default()),
         }
     }
 
@@ -80,6 +77,11 @@ impl EcsRunnerSingleThread {
     /// Command panics are collected per flush in
     /// [`SystemError::DeferredEffectsFailed`](crate::SystemError::DeferredEffectsFailed).
     /// Later commands and systems continue; partial mutations are retained.
+    /// Containers bind to their first admitted world; later runs on another
+    /// world return `SystemError::ScheduleWorldMismatch` before execution.
+    /// New schedules are rejected with `SystemError::OrphanedScheduleResults`
+    /// if cached results of destroyed containers remain. Clear them through
+    /// `EcsRunner::prepare_reload` before replacing schedules.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
         self.run_with(world, systems, &RunDiagnostics::default())
             .errors
@@ -97,6 +99,13 @@ impl EcsRunnerSingleThread {
         diagnostics: &RunDiagnostics,
     ) -> RunResult {
         redlilium_core::profile_scope!("ecs: run (single-thread)");
+
+        if let Err(error) = self.prev_results.lock().validate(systems, world) {
+            return RunResult {
+                errors: vec![error],
+                report: RunReport::default(),
+            };
+        }
 
         let order = systems.single_thread_order();
         if order.is_empty() {
@@ -145,11 +154,7 @@ impl EcsRunnerSingleThread {
         };
 
         // Take previous-tick results (if the system count matches).
-        let prev = self
-            .prev_results
-            .lock()
-            .remove(&systems.container_id())
-            .unwrap_or_default();
+        let prev = self.prev_results.lock().take(systems);
         let mut prev = if prev.len() == n { prev } else { Vec::new() };
 
         {
@@ -319,7 +324,7 @@ impl EcsRunnerSingleThread {
         // Save this tick's results for next tick's reuse.
         self.prev_results
             .lock()
-            .insert(systems.container_id(), results_store.into_prev_results());
+            .store(systems, results_store.into_prev_results());
 
         // Build diagnostic report
         let ambiguities = if diagnostics.detect_ambiguities {

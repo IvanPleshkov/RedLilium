@@ -12,6 +12,18 @@ use crate::world::World;
 /// runner via [`std::panic::catch_unwind`].
 #[derive(Debug, Clone)]
 pub enum SystemError {
+    /// This container is bound to another world. No systems were executed.
+    /// Recreate the container for the new world; clearing runner caches does
+    /// not reset the binding or the systems' internal state.
+    ScheduleWorldMismatch { container_id: u64 },
+    /// A new schedule was submitted while this runner still retains results
+    /// of destroyed containers. No systems in the new schedule were executed.
+    /// Use `EcsRunner::prepare_reload` before replacing schedules; cached values
+    /// are preserved on error and must be cleared before their module unloads.
+    OrphanedScheduleResults {
+        /// Process-local container IDs, sorted for deterministic diagnostics.
+        container_ids: Vec<u64>,
+    },
     /// The system executor could not accept a run (startup/shutdown/reentry).
     ExecutorUnavailable { message: String },
     /// Errors from applying deferred commands and flushing observers.
@@ -34,6 +46,16 @@ pub enum SystemError {
 impl fmt::Display for SystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SystemError::ScheduleWorldMismatch { container_id } => write!(
+                f,
+                "schedule container {container_id} is bound to another world; \
+                 create a separate SystemsContainer for each world"
+            ),
+            SystemError::OrphanedScheduleResults { container_ids } => write!(
+                f,
+                "runner retains results of destroyed schedule containers {container_ids:?}; \
+                 call EcsRunner::prepare_reload before running a replacement schedule"
+            ),
             SystemError::ExecutorUnavailable { message } => {
                 write!(f, "system executor unavailable: {message}")
             }

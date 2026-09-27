@@ -1,6 +1,6 @@
 use crate::sync::Mutex;
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -20,8 +20,7 @@ use crate::world::World;
 
 use super::ShutdownError;
 
-/// Boxed previous-tick results of one schedule, indexed by system node.
-type PrevResults = Vec<Option<Box<dyn Any + Send + Sync>>>;
+use super::result_cache::ResultCache;
 
 /// Multi-threaded executor that runs independent systems in parallel.
 ///
@@ -39,7 +38,7 @@ pub struct EcsRunnerMultiThread {
     executor: crate::ParallelExecutor,
     /// Previous-tick system results for `reuse_result`, keyed by the
     /// container's identity — one runner drives many schedules per frame.
-    prev_results: Mutex<HashMap<u64, PrevResults>>,
+    prev_results: Mutex<ResultCache>,
 }
 
 impl EcsRunnerMultiThread {
@@ -56,7 +55,7 @@ impl EcsRunnerMultiThread {
             compute: ComputePool::with_executor(io.clone(), executor.clone()),
             io,
             executor,
-            prev_results: Mutex::new(HashMap::new()),
+            prev_results: Mutex::new(ResultCache::default()),
         }
     }
 
@@ -104,6 +103,11 @@ impl EcsRunnerMultiThread {
     /// Command panics are collected per flush in
     /// [`SystemError::DeferredEffectsFailed`](crate::SystemError::DeferredEffectsFailed).
     /// Later commands and systems continue; partial mutations are retained.
+    /// Containers bind to their first admitted world; later runs on another
+    /// world return `SystemError::ScheduleWorldMismatch` before execution.
+    /// New schedules are rejected with `SystemError::OrphanedScheduleResults`
+    /// if cached results of destroyed containers remain. Clear them through
+    /// `EcsRunner::prepare_reload` before replacing schedules.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
         self.run_with(world, systems, &RunDiagnostics::default())
             .errors
@@ -121,6 +125,13 @@ impl EcsRunnerMultiThread {
         diagnostics: &RunDiagnostics,
     ) -> RunResult {
         redlilium_core::profile_scope!("ecs: run (multi-thread)");
+
+        if let Err(error) = self.prev_results.lock().validate(systems, world) {
+            return RunResult {
+                errors: vec![error],
+                report: RunReport::default(),
+            };
+        }
 
         let n = systems.node_count();
         if n == 0 {
@@ -170,11 +181,7 @@ impl EcsRunnerMultiThread {
         let mut completed_count = 0usize;
 
         // Take previous-tick results (if the system count matches).
-        let prev = self
-            .prev_results
-            .lock()
-            .remove(&systems.container_id())
-            .unwrap_or_default();
+        let prev = self.prev_results.lock().take(systems);
         let prev = Mutex::new(if prev.len() == n { prev } else { Vec::new() });
 
         while completed_count < n {
@@ -363,7 +370,7 @@ impl EcsRunnerMultiThread {
         // Save this tick's results for next tick's reuse.
         self.prev_results
             .lock()
-            .insert(systems.container_id(), results_store.into_prev_results());
+            .store(systems, results_store.into_prev_results());
 
         // Build diagnostic report
         let ambiguities = if diagnostics.detect_ambiguities {

@@ -66,7 +66,15 @@ fn systems_queries_runners_and_worlds_share_the_same_workers() {
     assert!(first.parallel_executor().shares_workers_with(&executor));
     let other_runner = EcsRunner::multi_thread_with_executor(executor.clone());
     let mut second = world();
-    assert!(other_runner.run(&mut second, &systems).is_empty());
+    // Same system code and workers, but world-local system instances/history.
+    let mut second_systems = SystemsContainer::new();
+    second_systems.add(Work::<0>(seen.clone()));
+    second_systems.add(Work::<1>(seen.clone()));
+    second_systems.add(Work::<2>(seen.clone()));
+    second_systems.add(Work::<3>(seen.clone()));
+    second_systems.add(Work::<4>(seen.clone()));
+    second_systems.add(Work::<5>(seen.clone()));
+    assert!(other_runner.run(&mut second, &second_systems).is_empty());
     assert_eq!(*seen.ids.lock().unwrap(), ids);
     assert_eq!(seen.entities.load(Ordering::Relaxed), 3 * 6 * 513);
     drop(first);
@@ -169,7 +177,9 @@ fn shutdown_joins_shared_worker_tls_and_allows_restart() {
     executor.shutdown_workers().unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
     let mut world = World::new();
-    assert!(runner.run(&mut world, &systems).is_empty());
+    let mut second_systems = SystemsContainer::new();
+    second_systems.add(Install(count.clone()));
+    assert!(runner.run(&mut world, &second_systems).is_empty());
     runner.shutdown_workers().unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 2);
 }
@@ -283,9 +293,11 @@ fn sequential_runner_attaches_shared_query_executor_without_running_systems_on_i
     let seen = Arc::new(Seen::default());
     let mut systems = SystemsContainer::new();
     systems.add(Work::<0>(seen.clone()));
-    for _ in 0..2 {
+    let mut second_systems = SystemsContainer::new();
+    second_systems.add(Work::<0>(seen.clone()));
+    for systems in [&systems, &second_systems] {
         let mut world = world();
-        assert!(runner.run(&mut world, &systems).is_empty());
+        assert!(runner.run(&mut world, systems).is_empty());
         assert!(world.parallel_executor().shares_workers_with(&executor));
     }
     assert!(seen.ids.lock().unwrap().contains(&thread::current().id()));
