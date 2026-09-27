@@ -112,7 +112,7 @@ pub use compute::EcsComputeContext;
 
 // System & scheduling (new API)
 pub use bundle::Bundle;
-pub use commands::{CommandCollector, SpawnBuilder};
+pub use commands::{CommandCollector, CommandError, DeferredCommand, SpawnBuilder};
 pub use query::LockRequest;
 pub use query::{
     AccessSet, Added, Any, Changed, FetchTicks, MainThreadRes, MainThreadResMut, MaybeAdded,
@@ -120,7 +120,6 @@ pub use query::{
     ResMut, Write, WriteAll,
 };
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
-pub use system::ParConfig;
 pub use system::SystemContext;
 pub use system::{
     AccessConflict, AmbiguityInfo, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
@@ -142,6 +141,7 @@ pub use system::{
     ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
     ParForEachSystem, for_each, par_for_each,
 };
+pub use system::{ParConfig, ParallelExecutor};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::EcsRunnerMultiThread;

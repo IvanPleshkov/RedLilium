@@ -272,7 +272,7 @@ impl World {
         let guards = self.acquire_sorted(&infos);
         // SAFETY: the validated, sorted lock plan is held until these items are dropped.
         let items = unsafe { A::fetch_unlocked(self, ticks) };
-        crate::query::QueryGuard::new(guards, items)
+        crate::query::QueryGuard::new(guards, items, self.parallel_executor())
     }
 
     // ---- Unlocked access (for use when locks are held externally) ----

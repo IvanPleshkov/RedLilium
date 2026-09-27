@@ -164,8 +164,9 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         for<'w> A::Item<'w>: Sync,
         F: for<'w> Fn(<A as crate::system::ForEachAccess>::EachItem<'w>) + Send + Sync,
     {
+        let executor = self.ctx.world_for_lock_plumbing().parallel_executor();
         self.execute(|mut items| {
-            A::run_par_for_each(&mut items, &f);
+            A::run_par_for_each(executor, &mut items, &f);
         });
     }
 
@@ -177,8 +178,9 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         for<'w> A::Item<'w>: Sync,
         F: for<'w> Fn(<A as crate::system::ForEachAccess>::EachItem<'w>) + Send + Sync,
     {
+        let executor = self.ctx.world_for_lock_plumbing().parallel_executor();
         self.execute(|mut items| {
-            A::run_par_for_each_with(&mut items, &config, &f);
+            A::run_par_for_each_with(executor, &mut items, &config, &f);
         });
     }
 }

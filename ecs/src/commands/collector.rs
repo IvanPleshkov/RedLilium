@@ -1,11 +1,9 @@
+use super::{CommandError, DeferredCommand, apply_batch};
 use crate::sync::Mutex;
 
 use crate::bundle::Bundle;
 use crate::entity::Entity;
 use crate::world::World;
-
-/// A boxed deferred command that mutates the World.
-type Command = Box<dyn FnOnce(&mut World) + Send>;
 
 /// A boxed insert closure that inserts a component into a specific entity.
 type InsertFn = Box<dyn FnOnce(&mut World, Entity) + Send>;
@@ -18,7 +16,7 @@ type InsertFn = Box<dyn FnOnce(&mut World, Entity) + Send>;
 ///
 /// Multiple systems can push commands concurrently in multi-threaded mode.
 pub struct CommandCollector {
-    commands: Mutex<Vec<Command>>,
+    commands: Mutex<Vec<DeferredCommand>>,
 }
 
 impl CommandCollector {
@@ -32,11 +30,13 @@ impl CommandCollector {
     /// Pushes a deferred command.
     ///
     /// The command will receive `&mut World` when applied after all systems complete.
+    #[track_caller]
     pub fn push(&self, cmd: impl FnOnce(&mut World) + Send + 'static) {
-        self.commands.lock().push(Box::new(cmd));
+        self.commands.lock().push(DeferredCommand::new(cmd));
     }
 
     /// Queues an entity despawn.
+    #[track_caller]
     pub fn despawn(&self, entity: Entity) {
         self.push(move |world| {
             world.despawn(entity);
@@ -45,9 +45,10 @@ impl CommandCollector {
 
     /// Queues a component insertion on an entity.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if the component type has not been registered.
+    /// Applying the command reports an error if the component type has not been registered.
+    #[track_caller]
     pub fn insert<T: Send + Sync + 'static>(&self, entity: Entity, component: T) {
         self.push(move |world| {
             world
@@ -57,6 +58,7 @@ impl CommandCollector {
     }
 
     /// Queues a component removal from an entity.
+    #[track_caller]
     pub fn remove<T: Send + Sync + 'static>(&self, entity: Entity) {
         self.push(move |world| {
             let _ = world.remove::<T>(entity);
@@ -65,9 +67,10 @@ impl CommandCollector {
 
     /// Queues spawning `count` entities, each with a clone of the given bundle.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if any component type has not been registered.
+    /// Applying the command reports an error if any component type has not been registered.
+    #[track_caller]
     pub fn spawn_batch_with(&self, count: u32, bundle: impl Bundle + Clone) {
         self.push(move |world| {
             world
@@ -77,6 +80,7 @@ impl CommandCollector {
     }
 
     /// Queues despawning multiple entities at once.
+    #[track_caller]
     pub fn despawn_batch(&self, entities: Vec<Entity>) {
         self.push(move |world| {
             world.despawn_batch(&entities);
@@ -87,10 +91,11 @@ impl CommandCollector {
     ///
     /// Queues inserting a component on each entity.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if the component type has not been registered
+    /// Applying the command reports an error if the component type has not been registered
     /// or if any entity is dead.
+    #[track_caller]
     pub fn insert_batch<T: Send + Sync + 'static>(&self, items: Vec<(Entity, T)>) {
         self.push(move |world| {
             world.insert_batch(items).expect("insert_batch failed");
@@ -98,6 +103,7 @@ impl CommandCollector {
     }
 
     /// Queues removing a component from multiple entities.
+    #[track_caller]
     pub fn remove_batch<T: Send + Sync + 'static>(&self, entities: Vec<Entity>) {
         self.push(move |world| {
             world.remove_batch::<T>(&entities);
@@ -123,9 +129,10 @@ impl CommandCollector {
 
     /// Queues a bundle of components to be inserted on an entity.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if any component type has not been registered.
+    /// Applying the command reports an error if any component type has not been registered.
+    #[track_caller]
     pub fn insert_bundle(&self, entity: Entity, bundle: impl Bundle) {
         self.push(move |world| {
             bundle.insert_into(world, entity);
@@ -134,9 +141,10 @@ impl CommandCollector {
 
     /// Queues spawning a new entity with a bundle of components.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if any component type has not been registered.
+    /// Applying the command reports an error if any component type has not been registered.
+    #[track_caller]
     pub fn spawn_with(&self, bundle: impl Bundle) {
         self.push(move |world| {
             world
@@ -145,8 +153,17 @@ impl CommandCollector {
         });
     }
 
+    /// Applies one drained batch in queue order, collecting all command panics.
+    /// Later commands continue after a failure; partial mutations are retained.
+    /// Commands queued during application remain pending for the next batch.
+    #[must_use = "inspect deferred command failures"]
+    pub fn apply(&self, world: &mut World) -> Vec<CommandError> {
+        apply_batch(self.drain(), world)
+    }
+
     /// Drains all collected commands, returning them in push order.
-    pub fn drain(&self) -> Vec<Command> {
+    /// Each drained command is applied with [`DeferredCommand::apply`].
+    pub fn drain(&self) -> Vec<DeferredCommand> {
         let mut commands = self.commands.lock();
         std::mem::take(&mut *commands)
     }
@@ -165,9 +182,9 @@ pub struct SpawnBuilder<'a> {
 impl<'a> SpawnBuilder<'a> {
     /// Adds a component to the entity being built.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if the component type has not been registered.
+    /// Applying the command reports an error if the component type has not been registered.
     pub fn with<T: Send + Sync + 'static>(mut self, component: T) -> Self {
         self.inserts.push(Box::new(move |world, entity| {
             world
@@ -179,9 +196,9 @@ impl<'a> SpawnBuilder<'a> {
 
     /// Adds a bundle of components to the entity being built.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if any component type in the bundle has not been registered.
+    /// Applying the command reports an error if any component type in the bundle has not been registered.
     pub fn with_bundle(mut self, bundle: impl Bundle) -> Self {
         self.inserts.push(Box::new(move |world, entity| {
             bundle.insert_into(world, entity);
@@ -190,6 +207,7 @@ impl<'a> SpawnBuilder<'a> {
     }
 
     /// Finalizes the builder, queuing the spawn command.
+    #[track_caller]
     pub fn build(self) {
         let inserts = self.inserts;
         self.collector.push(move |world| {
@@ -222,7 +240,7 @@ mod tests {
 
     fn apply(collector: &CommandCollector, world: &mut World) {
         for cmd in collector.drain() {
-            cmd(world);
+            cmd.apply(world).unwrap();
         }
     }
 

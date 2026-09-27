@@ -153,7 +153,7 @@ pub trait ForEachAccess: AccessSet {
 
     /// Parallel version of [`run_for_each`](Self::run_for_each).
     ///
-    /// Splits matching entities across threads using [`std::thread::scope`].
+    /// Splits matching entities across the executor's reusable workers and caller.
     /// The closure must be `Fn + Sync` since it is called concurrently.
     /// Falls back to sequential on WASM. As in `run_for_each`, callback
     /// references cannot escape or overlap another borrow of the storages.
@@ -165,11 +165,13 @@ pub trait ForEachAccess: AccessSet {
     /// let mut q = world.query::<(Write<u32>,)>();
     /// let mut views = q.items_mut();
     /// let escaped = std::sync::Mutex::new(Vec::new());
-    /// <(Write<u32>,)>::run_par_for_each(&mut views, |(value,)| {
+    /// let executor = redlilium_ecs::ParallelExecutor::new(2);
+    /// <(Write<u32>,)>::run_par_for_each(&executor, &mut views, |(value,)| {
     ///     escaped.lock().unwrap().push(value);
     /// });
     /// ```
     fn run_par_for_each<'w>(
+        executor: &crate::ParallelExecutor,
         items: &mut Self::Item<'w>,
         f: impl for<'q> Fn(Self::EachItem<'q>) + Sync,
     ) where
@@ -178,6 +180,7 @@ pub trait ForEachAccess: AccessSet {
     /// Like [`run_par_for_each`](Self::run_par_for_each), but with explicit
     /// parallelism configuration.
     fn run_par_for_each_with<'w>(
+        executor: &crate::ParallelExecutor,
         items: &mut Self::Item<'w>,
         config: &crate::system::par_for_each::ParConfig,
         f: impl for<'q> Fn(Self::EachItem<'q>) + Sync,
@@ -233,16 +236,18 @@ macro_rules! impl_for_each_access {
             }
 
             fn run_par_for_each<'w>(
+                executor: &crate::ParallelExecutor,
                 items: &mut Self::Item<'w>,
                 f: impl for<'q> Fn(Self::EachItem<'q>) + Sync,
             )
             where
                 Self::Item<'w>: Sync,
             {
-                Self::run_par_for_each_with(items, &crate::system::par_for_each::ParConfig::default(), f);
+                Self::run_par_for_each_with(executor, items, &crate::system::par_for_each::ParConfig::default(), f);
             }
 
             fn run_par_for_each_with<'w>(
+                executor: &crate::ParallelExecutor,
                 items: &mut Self::Item<'w>,
                 config: &crate::system::par_for_each::ParConfig,
                 f: impl for<'q> Fn(Self::EachItem<'q>) + Sync,
@@ -267,6 +272,7 @@ macro_rules! impl_for_each_access {
                 };
 
                 crate::system::par_for_each::par_for_each_entities(
+                    executor,
                     items,
                     &entities,
                     config,
@@ -418,9 +424,13 @@ where
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
         ctx.lock::<A>().execute(|mut items| {
-            A::run_par_for_each(&mut items, |item| {
-                (self.func)(item);
-            });
+            A::run_par_for_each(
+                ctx.world_for_lock_plumbing().parallel_executor(),
+                &mut items,
+                |item| {
+                    (self.func)(item);
+                },
+            );
         });
         Ok(())
     }

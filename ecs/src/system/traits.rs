@@ -6,12 +6,15 @@ use crate::compute::ComputePool;
 use crate::system::SystemContext;
 use crate::world::World;
 
-/// Error type returned by system execution.
+/// Error type returned by system execution and deferred command application.
 ///
 /// Covers explicit failures from system logic and panics caught by the
 /// runner via [`std::panic::catch_unwind`].
 #[derive(Debug, Clone)]
 pub enum SystemError {
+    /// One command-application batch failed. Every command in the batch was
+    /// attempted; errors are listed in application order. Mutations persist.
+    DeferredCommandsFailed { errors: Vec<crate::CommandError> },
     /// The system panicked during execution.
     ///
     /// Contains the system name and panic message.
@@ -26,6 +29,13 @@ pub enum SystemError {
 impl fmt::Display for SystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SystemError::DeferredCommandsFailed { errors } => {
+                write!(f, "{} deferred command(s) failed", errors.len())?;
+                for error in errors {
+                    write!(f, "; {error}")?;
+                }
+                Ok(())
+            }
             SystemError::Panicked { system, message } => {
                 write!(f, "system '{}' panicked: {}", system, message)
             }
@@ -421,6 +431,11 @@ pub fn run_exclusive_system_blocking<S: ExclusiveSystem>(
 /// 2. Applies all deferred commands to the world
 /// 3. Flushes pending observers (may cascade)
 ///
+/// Command panics are collected in [`SystemError::DeferredCommandsFailed`].
+/// All commands are attempted and observers are flushed before returning that
+/// error. Partial mutations are retained. A failed system run still returns
+/// immediately without applying its commands.
+///
 /// Useful for one-shot gameplay actions, event handlers, and testing.
 pub fn run_system_once<S: System>(
     system: &S,
@@ -433,11 +448,13 @@ pub fn run_system_once<S: System>(
         let ctx = SystemContext::new(world, compute, io, &commands);
         system.run(&ctx)?
     };
-    for cmd in commands.drain() {
-        cmd(world);
-    }
+    let errors = commands.apply(world);
     world.flush_observers();
-    Ok(result)
+    if errors.is_empty() {
+        Ok(result)
+    } else {
+        Err(SystemError::DeferredCommandsFailed { errors })
+    }
 }
 
 /// Runs an exclusive system once, flushing observers afterward.

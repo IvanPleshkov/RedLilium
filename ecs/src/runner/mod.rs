@@ -88,6 +88,9 @@ impl EcsRunner {
     ///
     /// All systems always run to completion. Deferred commands are applied
     /// after every system has finished.
+    /// Command panics are collected per flush in
+    /// [`SystemError::DeferredCommandsFailed`](crate::SystemError::DeferredCommandsFailed).
+    /// Later commands and systems continue; partial mutations are retained.
     pub fn run(
         &self,
         world: &mut World,

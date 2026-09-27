@@ -429,30 +429,39 @@ fn unmark_editor_subtree(world: &mut World, entity: Entity) {
 /// Import this trait to use `commands.cmd_set_parent()`, etc.
 pub trait HierarchyCommands {
     /// Queues a [`set_parent`] command.
+    #[track_caller]
     fn cmd_set_parent(&self, entity: Entity, parent: Entity);
 
     /// Queues a [`remove_parent`] command.
+    #[track_caller]
     fn cmd_remove_parent(&self, entity: Entity);
 
     /// Queues a [`despawn_recursive`] command.
+    #[track_caller]
     fn cmd_despawn_recursive(&self, entity: Entity);
 
     /// Queues a [`disable`] command (always recursive).
+    #[track_caller]
     fn cmd_disable(&self, entity: Entity);
 
     /// Queues an [`enable`] command (always recursive).
+    #[track_caller]
     fn cmd_enable(&self, entity: Entity);
 
     /// Queues a [`mark_static`] command (always recursive).
+    #[track_caller]
     fn cmd_mark_static(&self, entity: Entity);
 
     /// Queues an [`unmark_static`] command (always recursive).
+    #[track_caller]
     fn cmd_unmark_static(&self, entity: Entity);
 
     /// Queues a [`mark_editor`] command (always recursive).
+    #[track_caller]
     fn cmd_mark_editor(&self, entity: Entity);
 
     /// Queues an [`unmark_editor`] command (always recursive).
+    #[track_caller]
     fn cmd_unmark_editor(&self, entity: Entity);
 }
 
@@ -805,7 +814,7 @@ mod tests {
             commands.cmd_set_parent(child, parent);
         }
 
-        world.apply_commands();
+        assert!(world.apply_commands().is_empty());
 
         assert_eq!(world.get::<Parent>(child), Some(&Parent(parent)));
     }
@@ -824,7 +833,7 @@ mod tests {
             commands.cmd_despawn_recursive(parent);
         }
 
-        world.apply_commands();
+        assert!(world.apply_commands().is_empty());
 
         assert!(!world.is_alive(parent));
         assert!(!world.is_alive(child));

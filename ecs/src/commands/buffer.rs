@@ -1,11 +1,9 @@
+use super::{CommandError, DeferredCommand, apply_batch};
 use crate::sync::Mutex;
 
 use crate::bundle::Bundle;
 use crate::entity::Entity;
 use crate::world::World;
-
-/// A boxed command closure that mutates the world.
-type Command = Box<dyn FnOnce(&mut World) + Send>;
 
 /// A boxed insert closure that inserts a component into a specific entity.
 type InsertFn = Box<dyn FnOnce(&mut World, crate::entity::Entity) + Send>;
@@ -35,7 +33,7 @@ type InsertFn = Box<dyn FnOnce(&mut World, crate::entity::Entity) + Send>;
 /// world.apply_commands();
 /// ```
 pub struct CommandBuffer {
-    commands: Mutex<Vec<Command>>,
+    commands: Mutex<Vec<DeferredCommand>>,
 }
 
 impl CommandBuffer {
@@ -49,11 +47,13 @@ impl CommandBuffer {
     /// Queues a raw command closure.
     ///
     /// The closure will receive `&mut World` when `apply_commands` is called.
+    #[track_caller]
     pub fn push(&self, cmd: impl FnOnce(&mut World) + Send + 'static) {
-        self.commands.lock().push(Box::new(cmd));
+        self.commands.lock().push(DeferredCommand::new(cmd));
     }
 
     /// Queues an entity despawn.
+    #[track_caller]
     pub fn despawn(&self, entity: crate::entity::Entity) {
         self.push(move |world| {
             world.despawn(entity);
@@ -67,9 +67,10 @@ impl CommandBuffer {
     /// same frame), the insert is skipped — same tolerance as queued
     /// removes.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if the component type has not been registered.
+    /// Applying the command reports an error if the component type has not been registered.
+    #[track_caller]
     pub fn insert<T: Send + Sync + 'static>(&self, entity: crate::entity::Entity, component: T) {
         self.push(move |world| match world.insert(entity, component) {
             Ok(()) => {}
@@ -84,6 +85,7 @@ impl CommandBuffer {
     }
 
     /// Queues a component removal from an entity.
+    #[track_caller]
     pub fn remove<T: Send + Sync + 'static>(&self, entity: crate::entity::Entity) {
         self.push(move |world| {
             let _ = world.remove::<T>(entity);
@@ -92,9 +94,10 @@ impl CommandBuffer {
 
     /// Queues spawning `count` entities, each with a clone of the given bundle.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if any component type has not been registered.
+    /// Applying the command reports an error if any component type has not been registered.
+    #[track_caller]
     pub fn spawn_batch_with(&self, count: u32, bundle: impl Bundle + Clone) {
         self.push(move |world| {
             world
@@ -104,6 +107,7 @@ impl CommandBuffer {
     }
 
     /// Queues despawning multiple entities at once.
+    #[track_caller]
     pub fn despawn_batch(&self, entities: Vec<Entity>) {
         self.push(move |world| {
             world.despawn_batch(&entities);
@@ -115,9 +119,10 @@ impl CommandBuffer {
     /// Entities despawned by the time commands are applied are skipped
     /// (same cross-system race tolerance as [`insert`](Self::insert)).
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if the component type has not been registered.
+    /// Applying the command reports an error if the component type has not been registered.
+    #[track_caller]
     pub fn insert_batch<T: Send + Sync + 'static>(&self, items: Vec<(Entity, T)>) {
         self.push(move |world| {
             let mut items = items;
@@ -148,6 +153,7 @@ impl CommandBuffer {
     }
 
     /// Queues removing a component from multiple entities.
+    #[track_caller]
     pub fn remove_batch<T: Send + Sync + 'static>(&self, entities: Vec<Entity>) {
         self.push(move |world| {
             world.remove_batch::<T>(&entities);
@@ -171,10 +177,19 @@ impl CommandBuffer {
         }
     }
 
+    /// Applies one drained batch in queue order, collecting all command panics.
+    /// Later commands continue after a failure; partial mutations are retained.
+    /// Commands queued during application remain pending for the next batch.
+    #[must_use = "inspect deferred command failures"]
+    pub fn apply(&self, world: &mut World) -> Vec<CommandError> {
+        apply_batch(self.drain(), world)
+    }
+
     /// Drains all queued commands, returning them.
     ///
     /// After this call, the buffer is empty and ready for new commands.
-    pub fn drain(&self) -> Vec<Command> {
+    /// Each drained command is applied with [`DeferredCommand::apply`].
+    pub fn drain(&self) -> Vec<DeferredCommand> {
         std::mem::take(&mut *self.commands.lock())
     }
 
@@ -212,9 +227,9 @@ pub struct SpawnBuilder<'a> {
 impl<'a> SpawnBuilder<'a> {
     /// Adds a component to the entity being built.
     ///
-    /// # Panics
+    /// # Command errors
     ///
-    /// Panics when applied if the component type has not been registered.
+    /// Applying the command reports an error if the component type has not been registered.
     pub fn with<T: Send + Sync + 'static>(mut self, component: T) -> Self {
         self.inserts.push(Box::new(move |world, entity| {
             world
@@ -225,6 +240,7 @@ impl<'a> SpawnBuilder<'a> {
     }
 
     /// Finalizes the builder, queuing the spawn command.
+    #[track_caller]
     pub fn build(self) {
         let inserts = self.inserts;
         self.buffer.push(move |world| {
@@ -293,7 +309,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert!(!world.is_alive(entity));
@@ -310,7 +326,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert_eq!(
@@ -331,7 +347,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert!(world.get::<Health>(entity).is_none());
@@ -354,7 +370,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert_eq!(world.entity_count(), 1);
@@ -385,7 +401,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert_eq!(world.entity_count(), 5);
@@ -406,7 +422,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert_eq!(world.get::<Health>(entity), Some(&Health(150)));
@@ -430,7 +446,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert_eq!(world.entity_count(), 2);
@@ -446,7 +462,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert_eq!(world.entity_count(), 3);
@@ -465,7 +481,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert_eq!(world.entity_count(), 0);
@@ -487,7 +503,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         assert_eq!(world.get::<Health>(entities[0]), Some(&Health(10)));
@@ -509,7 +525,7 @@ mod tests {
 
         let cmds = buffer.drain();
         for cmd in cmds {
-            cmd(&mut world);
+            cmd.apply(&mut world).unwrap();
         }
 
         for e in &entities {

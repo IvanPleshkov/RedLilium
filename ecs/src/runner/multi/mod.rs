@@ -85,6 +85,9 @@ impl EcsRunnerMultiThread {
     ///
     /// All systems always run to completion. Remaining deferred commands
     /// are applied after every system has finished.
+    /// Command panics are collected per flush in
+    /// [`SystemError::DeferredCommandsFailed`](crate::SystemError::DeferredCommandsFailed).
+    /// Later commands and systems continue; partial mutations are retained.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
         self.run_with(world, systems, &RunDiagnostics::default())
             .errors
@@ -235,8 +238,11 @@ impl EcsRunnerMultiThread {
                     // system's `last_run`.
                     world.advance_tick();
                     redlilium_core::profile_scope!("ecs: apply commands (pre-exclusive)");
-                    for cmd in commands.drain() {
-                        cmd(world);
+                    let command_errors = commands.apply(world);
+                    if !command_errors.is_empty() {
+                        errors.push(SystemError::DeferredCommandsFailed {
+                            errors: command_errors,
+                        });
                     }
                 }
 
@@ -336,8 +342,11 @@ impl EcsRunnerMultiThread {
         {
             world.advance_tick();
             redlilium_core::profile_scope!("ecs: apply commands");
-            for cmd in commands.drain() {
-                cmd(world);
+            let command_errors = commands.apply(world);
+            if !command_errors.is_empty() {
+                errors.push(SystemError::DeferredCommandsFailed {
+                    errors: command_errors,
+                });
             }
         }
 

@@ -1041,7 +1041,7 @@ fn hooks_via_commands() {
             let _ = world.insert(entity, Position { x: 1.0, y: 0.0 });
         });
     }
-    world.apply_commands();
+    assert!(world.apply_commands().is_empty());
 
     // Hook should have fired when command was applied
     assert_eq!(world.get::<Marker>(entity), Some(&Marker(99)));
@@ -1357,7 +1357,7 @@ fn deferred_insert_after_despawn_is_skipped_not_a_panic() {
         commands.insert(entity, Health(1));
         commands.insert_batch(vec![(entity, Health(2))]);
     }
-    world.apply_commands(); // must not panic
+    assert!(world.apply_commands().is_empty()); // must not panic
 
     assert!(!world.is_alive(entity));
 }
@@ -2375,4 +2375,44 @@ fn schema_drift_is_tolerated_on_restore() {
             .is_some(),
         "component restored by name under the drifted schema"
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn parallel_workers_drop_tls_on_purge_and_world_drop() {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    struct OnDrop(Arc<AtomicUsize>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    thread_local! {
+        static WORKER_TLS: RefCell<Option<OnDrop>> = const { RefCell::new(None) };
+    }
+    let destroyed = Arc::new(AtomicUsize::new(0));
+    let caller = std::thread::current().id();
+    let mut world = World::new();
+    world.parallel_executor = crate::ParallelExecutor::new(2);
+    let install_tls = |world: &World| {
+        let started = Barrier::new(2);
+        world.parallel_executor().run(2, || {
+            if std::thread::current().id() != caller {
+                WORKER_TLS.with(|tls| *tls.borrow_mut() = Some(OnDrop(destroyed.clone())));
+            }
+            started.wait();
+        });
+    };
+    install_tls(&world);
+    assert_eq!(destroyed.load(Ordering::SeqCst), 0);
+    world.purge_source(crate::SourceId(1));
+    assert_eq!(destroyed.load(Ordering::SeqCst), 1);
+    // The same world starts fresh workers after unloading a source.
+    install_tls(&world);
+    assert_eq!(destroyed.load(Ordering::SeqCst), 1);
+    drop(world);
+    assert_eq!(destroyed.load(Ordering::SeqCst), 2);
 }

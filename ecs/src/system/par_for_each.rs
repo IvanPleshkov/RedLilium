@@ -1,6 +1,6 @@
 //! Parallel per-entity iteration support.
 //!
-//! Splits entity processing across threads using [`std::thread::scope`],
+//! Splits entity processing across reusable workers owned by the world,
 //! falling back to sequential iteration on WASM where threads are
 //! unavailable.
 //!
@@ -13,15 +13,18 @@ use crate::query::QueryItem;
 
 /// Configuration for parallel iteration.
 ///
-/// Controls the number of worker threads and minimum batch size.
+/// Controls maximum participants (including the caller) and minimum batch size.
 /// Use [`Default::default()`] for sensible defaults.
 #[derive(Debug, Clone)]
 pub struct ParConfig {
-    /// Minimum number of entities per batch. Prevents thread overhead
-    /// from dominating for small workloads. Default: 64.
+    /// Minimum number of entities per batch. Prevents scheduling overhead
+    /// from dominating for small workloads. Zero is treated as one. Default: 64.
     pub min_batch_size: usize,
-    /// Number of worker threads. `None` uses
-    /// [`std::thread::available_parallelism`]. Default: `None`.
+    /// Maximum participants, including the calling thread, capped by the
+    /// executor capacity. `None` uses that capacity; zero is treated as one.
+    /// Busy workers, small queries, or startup failure can reduce parallelism.
+    /// Callbacks must not wait for other callbacks to run concurrently.
+    /// Default: `None`.
     pub num_threads: Option<usize>,
 }
 
@@ -34,24 +37,15 @@ impl Default for ParConfig {
     }
 }
 
-impl ParConfig {
-    fn effective_threads(&self) -> usize {
-        self.num_threads.unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        })
-    }
-}
-
 /// Entity count below which parallel iteration is not worth the overhead.
+#[cfg(not(target_arch = "wasm32"))]
 const PARALLEL_THRESHOLD: usize = 128;
 
 /// Parallel iteration over a slice of entity indices.
 ///
-/// Splits `entities` into chunks and processes them on separate threads
-/// via [`std::thread::scope`]. Each thread calls `items.query_get(entity)`
-/// for its chunk and passes matching results to `f`.
+/// Workers and the caller claim disjoint batches from an atomic counter.
+/// Each participant calls `items.query_get(entity)` for its batch and passes
+/// matching results to `f`. All borrowed work completes before returning.
 ///
 /// Falls back to sequential for small entity counts (< [`PARALLEL_THRESHOLD`])
 /// or when `min_batch_size` would result in a single batch.
@@ -69,6 +63,7 @@ const PARALLEL_THRESHOLD: usize = 128;
 ///   owning guard, or protect it with an HRTB closure bound).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn par_for_each_entities<'x, I, F>(
+    executor: &crate::ParallelExecutor,
     items: &I,
     entities: &[u32],
     config: &ParConfig,
@@ -77,9 +72,18 @@ pub(crate) fn par_for_each_entities<'x, I, F>(
     I: QueryItem + Sync,
     F: Fn(u32, I::Item<'x>) + Sync,
 {
-    let count = entities.len();
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    if count < PARALLEL_THRESHOLD || count < config.min_batch_size {
+    let count = entities.len();
+    let min_batch = config.min_batch_size.max(1);
+    let participants = config
+        .num_threads
+        .unwrap_or(executor.parallelism())
+        .max(1)
+        .min(executor.parallelism())
+        .min((count / min_batch).max(1));
+
+    if count < PARALLEL_THRESHOLD || participants == 1 {
         for &entity in entities {
             // SAFETY: entities are unique (sparse set invariant), each
             // index visited exactly once.
@@ -90,23 +94,26 @@ pub(crate) fn par_for_each_entities<'x, I, F>(
         return;
     }
 
-    let num_threads = config.effective_threads().max(1);
-    let batch_size = (count / (num_threads * 4))
-        .max(config.min_batch_size)
-        .max(1);
-
-    std::thread::scope(|scope| {
-        for chunk in entities.chunks(batch_size) {
-            scope.spawn(move || {
-                for &entity in chunk {
-                    // SAFETY: each entity index is unique within the dense
-                    // array, and chunks are disjoint, so no two threads
-                    // access the same entity index.
-                    if let Some(item) = unsafe { items.query_get(entity) } {
-                        f(entity, item);
-                    }
+    let batch_size = count
+        .div_ceil(participants.saturating_mul(4))
+        .max(min_batch);
+    let batches = count.div_ceil(batch_size);
+    let next = AtomicUsize::new(0);
+    executor.run(participants, || {
+        loop {
+            let batch = next.fetch_add(1, Ordering::Relaxed);
+            if batch >= batches {
+                break;
+            }
+            let start = batch * batch_size;
+            let end = start.saturating_add(batch_size).min(count);
+            for &entity in &entities[start..end] {
+                // SAFETY: the atomic counter assigns disjoint batches; entity
+                // indices are unique and the executor drains all borrowed work.
+                if let Some(item) = unsafe { items.query_get(entity) } {
+                    f(entity, item);
                 }
-            });
+            }
         }
     });
 }
@@ -114,6 +121,7 @@ pub(crate) fn par_for_each_entities<'x, I, F>(
 /// WASM fallback: sequential iteration (no threads available).
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn par_for_each_entities<'x, I, F>(
+    _executor: &crate::ParallelExecutor,
     items: &I,
     entities: &[u32],
     _config: &ParConfig,
@@ -138,21 +146,5 @@ mod tests {
         let config = ParConfig::default();
         assert_eq!(config.min_batch_size, 64);
         assert!(config.num_threads.is_none());
-    }
-
-    #[test]
-    fn effective_threads_uses_available_parallelism() {
-        let config = ParConfig::default();
-        let threads = config.effective_threads();
-        assert!(threads >= 1);
-    }
-
-    #[test]
-    fn effective_threads_respects_override() {
-        let config = ParConfig {
-            num_threads: Some(3),
-            ..Default::default()
-        };
-        assert_eq!(config.effective_threads(), 3);
     }
 }

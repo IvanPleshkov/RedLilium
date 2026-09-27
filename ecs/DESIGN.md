@@ -4,27 +4,11 @@
 
 Existing ECS solutions treat async compute as an afterthought — something bolted on through external task pools. In a real game engine, CPU cores sit idle while the slowest ECS system in a dependency stage finishes. Background work (navmesh rebuilds, pathfinding, LOD calculations, asset processing) has no way to fill those gaps.
 
-RedLilium ECS is designed from the ground up with a **unified scheduling model**: ECS systems and background compute tasks share the same thread pool. When a core finishes its system and no other systems are ready, it automatically picks up async compute work. No idle cores.
-
-```
-Traditional ECS (wasted CPU):
-
-Core 1: [physics ████████████████████]
-Core 2: [AI ████] [idle ░░░░░░░░░░░░░]  ← wasted
-Core 3: [anim ██] [idle ░░░░░░░░░░░░░░]  ← wasted
-Core 4: [cull █]  [idle ░░░░░░░░░░░░░░░]  ← wasted
-
-RedLilium ECS (full utilization):
-
-Core 1: [physics ████████████████████]
-Core 2: [AI ████] [navmesh ▒▒▒▒▒▒▒▒▒]  ← async compute fills gap
-Core 3: [anim ██] [LOD ▒▒▒▒] [path ▒▒▒]  ← async compute fills gap
-Core 4: [cull █]  [navmesh ▒▒▒] [LOD ▒▒]  ← async compute fills gap
-```
+RedLilium ECS combines synchronous systems with cooperatively polled async compute. Native systems can run concurrently, and parallel entity queries use reusable workers owned by their world. A unified work-stealing scheduler is a longer-term goal; it is not the current execution model.
 
 ## Goals
 
-1. **Unified scheduling** — ECS systems and compute tasks share one work-stealing thread pool. Idle cores automatically pick up background work.
+1. **Unified scheduling (planned)** — Share execution capacity between ECS systems and compute tasks so idle cores can pick up background work.
 
 2. **Priority-based execution** — Critical systems (physics, rendering) always run first. Background tasks (navmesh, pathfinding) fill gaps without affecting frame time.
 
@@ -47,7 +31,7 @@ Core 4: [cull █]  [navmesh ▒▒▒] [LOD ▒▒]  ← async compute fills ga
 The key architectural decision: **ECS systems are synchronous functions that access the World through a lock-execute pattern.** Component locks are confined to closures and automatically dropped when the closure returns, preventing deadlocks in multi-threaded execution.
 
 - **Sync systems** access the World through `ctx.lock::<A>().execute(|items| {...})`. All systems complete within a single `runner.run()` call.
-- **Compute tasks** receive owned data (copies/clones extracted from execute closures). They run on the shared pool and may span multiple frames. Systems can wait for results via `compute.block_on()` or fire-and-forget.
+- **Compute tasks** receive owned data (copies/clones extracted from execute closures). They are polled by the compute executor and may span multiple frames. Systems can wait for results via `compute.block_on()` or fire-and-forget.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -80,33 +64,37 @@ The key architectural decision: **ECS systems are synchronous functions that acc
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Unified Thread Pool
+### Execution and parallel queries
 
-One pool, two priority levels, work-stealing:
+The current executors have separate responsibilities:
 
-```
-┌──────────────────────────────────────────────────┐
-│            Shared Work-Stealing Pool              │
-│                                                   │
-│  ┌───────────────────┐  ┌─────────────────────┐  │
-│  │ Systems           │  │ Compute Tasks       │  │
-│  │ (high priority)   │  │ (fill gaps)         │  │
-│  │                   │  │                     │  │
-│  │ physics           │  │ navmesh             │  │
-│  │ AI                │  │ pathfind            │  │
-│  │ animation         │  │ LOD                 │  │
-│  │ culling           │  │ terrain             │  │
-│  └───────────────────┘  └─────────────────────┘  │
-│                                                   │
-│  Worker threads: run assigned systems,            │
-│                  tick compute tasks when idle      │
-└──────────────────────────────────────────────────┘
-```
+- `EcsRunnerMultiThread` starts scoped OS threads for ready systems, bounded by the runner's `num_threads`.
+- `ComputePool` stores futures and polls them through `tick` / `block_on`; it does not own persistent worker threads.
+- Each `World` owns a `ParallelExecutor` for synchronous `par_for_each` calls. Its capacity defaults to `available_parallelism`, including the calling thread. Native helpers start lazily and are reused across calls and systems in that world.
 
-Each worker thread loop:
-1. Run assigned system to completion
-2. No systems ready? Tick compute tasks
-3. Nothing at all? Park until woken
+`QueryGuard::par_for_each`, `LockRequest::par_for_each`, and `par_for_each(...)` systems all use the world's executor. Low-level `ForEachAccess::run_par_for_each` / `run_par_for_each_with` take an explicit `&ParallelExecutor`. A standalone executor can be created with `ParallelExecutor::new(num_threads)`.
+
+`ParConfig::num_threads` limits participants **per call**, including its caller, capped by the executor's capacity. `None` uses that capacity; zero means one. `min_batch_size` defaults to 64, and zero means one. Queries with fewer than 128 candidate entities, or insufficient batches for two participants, run sequentially. Other calls distribute disjoint batches through an atomic counter, with no scheduling lock per entity.
+
+Only idle workers receive jobs. Busy workers are skipped and the caller always participates, so nested or concurrent calls can run with fewer participants. A callback must not wait for sibling callbacks to run concurrently. The executor does not poll unrelated compute tasks or steal systems while component locks are held. Nested queries still have to obey component/resource borrow rules.
+
+All submitted borrowed jobs finish before the call returns, including when a callback panics. A panic is propagated on the caller after draining those jobs; workers remain available. Writes performed before a panic are not rolled back. Worker startup failure reduces parallelism instead of losing work.
+
+A world creates at most `capacity - 1` helper threads. Calling system threads are additional participants: this is **not a shared CPU budget** across the runner, compute, and multiple worlds. Integrating those executors is separate scheduler work.
+
+For hot reload, `World::purge_source` stops and joins all query workers before removing source registrations; dropping the world also joins them. This runs worker TLS destructors while game code is still mapped. Queries after a purge lazily start fresh workers. Lazy startup uses the spawn entry point captured when the executor was constructed, so a guest query cannot relocate the worker loop into its own image. An executor must be dropped before the image that constructed it is unloaded; standalone executors running guest callbacks must also be dropped before unloading that guest.
+
+On WASM, the same query API runs sequentially and creates no workers.
+
+### Deferred command failures
+
+Commands from `SystemContext` are collected by the runner and applied before exclusive systems and at the end of a run. Each flush attempts every command in queue order. A panicking command produces a `CommandError` containing its message and enqueue location (`file`, `line`, `column`); later commands and systems continue. Changes made before a panic remain in the world. Command application is not a transaction, and subsequent code sees that partial state.
+
+The runners report one `SystemError::DeferredCommandsFailed { errors }` per failed flush through `run` / `RunResult.errors`. `run_system_once` also collects all command errors, flushes observers, and returns this variant instead of the system result. Errors from system execution remain separate. Observer callbacks invoked later by `flush_observers` have their own execution path and are outside this command boundary.
+
+`World::apply_commands()` applies the separate `CommandBuffer` resource and returns `Vec<CommandError>`. `CommandBuffer::apply` and `CommandCollector::apply` provide the same checked batch application for standalone queues. Commands queued during application wait for the next flush; they do not extend the current batch. `drain()` returns `DeferredCommand` values, each consumed with `apply(&mut world) -> Result<(), CommandError>`.
+
+The panic boundary is inside the generic wrapper created when a command is queued, before erasing its closure type. This keeps guest-command panic capture inside the originating image, following the system panic boundary used for hot reload. Reports own their strings and can outlive that image; pending commands must still be applied or dropped before unloading their module. Queue-location tracking adds a captured location pointer; string copies and error-vector allocation occur only when a command fails.
 
 ### Priority Levels
 
@@ -118,7 +106,7 @@ Each worker thread loop:
 
 ### Multiple Worlds
 
-Each World is independent — its own entities, components, resources, and system schedule. Worlds share the thread pool but not data.
+Each World is independent — its own entities, components, resources, and system schedule. Each world owns its query executor; a runner can drive multiple worlds.
 
 Use cases:
 - **Game + Editor**: Separate simulation from editor state
@@ -126,25 +114,6 @@ Use cases:
 - **Server simulation**: Headless world running game logic
 - **Parallel loading**: Load a new level in a separate world, swap when ready
 - **Testing**: Isolated worlds for deterministic unit tests
-
-```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│  World A    │  │  World B    │  │  World C    │
-│  (Game)     │  │  (Editor)   │  │  (Loading)  │
-│             │  │             │  │             │
-│ entities    │  │ entities    │  │ entities    │
-│ components  │  │ components  │  │ components  │
-│ resources   │  │ resources   │  │ resources   │
-│ schedule    │  │ schedule    │  │ schedule    │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │
-       └────────────────┼────────────────┘
-                        ▼
-              ┌───────────────────┐
-              │   Shared Pool     │
-              │   (N threads)     │
-              └───────────────────┘
-```
 
 Worlds can communicate through channels or shared resources (Arc-wrapped, external to any world).
 
@@ -316,13 +285,13 @@ All systems complete within a single `schedule.run()` call. There is no cross-fr
 
 | | Native | Web (WASM) |
 |---|---|---|
-| **Thread pool** | N worker threads | Single-threaded |
-| **Systems** | Parallel via pool (per stage) | Sequential on main thread |
-| **Async compute** | Multi-core, work-stealing | Cooperative on main thread |
+| **Parallel queries** | Reusable world-owned workers + caller | Sequential |
+| **Systems** | Scoped threads, bounded by the runner | Sequential on main thread |
+| **Async compute** | Cooperatively polled futures | Cooperative on main thread |
 | **IO** | tokio (separate thread) | wasm-bindgen-futures / fetch API |
 | **API** | Same | Same |
 
-On web, `pool.scope()` runs tasks sequentially, and async compute tasks tick cooperatively between frames. The API is identical — only the scheduling backend changes.
+On web, parallel queries run sequentially, and async compute tasks tick cooperatively. The query API is identical across platforms.
 
 ## Implementation Plan
 

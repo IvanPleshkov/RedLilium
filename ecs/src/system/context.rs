@@ -408,7 +408,7 @@ impl<'a> SystemContext<'a> {
         let tracking = self.make_tracking(&sorted);
         // SAFETY: the validated, sorted lock plan is held until these items are dropped.
         let items = unsafe { A::fetch_unlocked(self.world, self.ticks) };
-        QueryGuard::new_tracked(guards, items, tracking)
+        QueryGuard::new_tracked(guards, items, tracking, self.world.parallel_executor())
     }
 
     /// Returns the result produced by a predecessor system.
@@ -494,11 +494,14 @@ impl<'a> SystemContext<'a> {
     /// Pushes a deferred command to be applied after all systems complete.
     ///
     /// Commands receive `&mut World` and can perform structural changes
-    /// like spawning, despawning, and inserting components.
+    /// like spawning, despawning, and inserting components. Command panics
+    /// are reported separately through [`SystemError::DeferredCommandsFailed`](crate::SystemError::DeferredCommandsFailed);
+    /// later commands continue and partial mutations are retained.
     ///
     /// # Panics
     ///
     /// Panics if the system is running in a read-only container.
+    #[track_caller]
     pub fn commands(&self, cmd: impl FnOnce(&mut World) + Send + 'static) {
         self.assert_mutable("commands");
         self.commands.push(cmd);
@@ -509,6 +512,7 @@ impl<'a> SystemContext<'a> {
     /// # Panics
     ///
     /// Panics if the system is running in a read-only container.
+    #[track_caller]
     pub fn despawn(&self, entity: Entity) {
         self.assert_mutable("despawn");
         self.commands.despawn(entity);
@@ -516,10 +520,12 @@ impl<'a> SystemContext<'a> {
 
     /// Queues a component insertion to be applied after all systems complete.
     ///
+    /// Applying the command reports an error if the component is unregistered.
+    ///
     /// # Panics
     ///
-    /// Panics when applied if the component type has not been registered.
     /// Panics if the system is running in a read-only container.
+    #[track_caller]
     pub fn insert<T: Send + Sync + 'static>(&self, entity: Entity, component: T) {
         self.assert_mutable("insert");
         self.commands.insert(entity, component);
@@ -530,6 +536,7 @@ impl<'a> SystemContext<'a> {
     /// # Panics
     ///
     /// Panics if the system is running in a read-only container.
+    #[track_caller]
     pub fn remove<T: Send + Sync + 'static>(&self, entity: Entity) {
         self.assert_mutable("remove");
         self.commands.remove::<T>(entity);
@@ -559,10 +566,12 @@ impl<'a> SystemContext<'a> {
 
     /// Queues a bundle of components to be inserted on an entity.
     ///
+    /// Applying the command reports an error if a component is unregistered.
+    ///
     /// # Panics
     ///
-    /// Panics when applied if any component type has not been registered.
     /// Panics if the system is running in a read-only container.
+    #[track_caller]
     pub fn insert_bundle(&self, entity: Entity, bundle: impl Bundle) {
         self.assert_mutable("insert_bundle");
         self.commands.insert_bundle(entity, bundle);
@@ -570,10 +579,12 @@ impl<'a> SystemContext<'a> {
 
     /// Queues spawning a new entity with a bundle of components.
     ///
+    /// Applying the command reports an error if a component is unregistered.
+    ///
     /// # Panics
     ///
-    /// Panics when applied if any component type has not been registered.
     /// Panics if the system is running in a read-only container.
+    #[track_caller]
     pub fn spawn_with(&self, bundle: impl Bundle) {
         self.assert_mutable("spawn_with");
         self.commands.spawn_with(bundle);
@@ -650,7 +661,7 @@ mod tests {
 
     fn apply(commands: &CommandCollector, world: &mut World) {
         for cmd in commands.drain() {
-            cmd(world);
+            cmd.apply(world).unwrap();
         }
     }
 

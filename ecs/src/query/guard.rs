@@ -46,6 +46,7 @@ use crate::system::context::LockTracking;
 /// [`MainThreadResMut`](crate::MainThreadResMut)) are not supported.
 /// Use `lock().execute()` for those.
 pub struct QueryGuard<'a, A: AccessSet> {
+    executor: &'a crate::ParallelExecutor,
     /// The fetched component/resource data. Private: the unlocked `Ref`s /
     /// `RefMut`s in here are only kept alive by `_guards`, so moving them out
     /// of the guard (possible through a public field) would dangle once the
@@ -64,8 +65,13 @@ impl<'a, A: AccessSet> QueryGuard<'a, A> {
     ///
     /// Used by [`World::query`](crate::World::query) (the world owner is
     /// exclusive, so same-system lock tracking does not apply) and by tests.
-    pub(crate) fn new(guards: SmallVec<[LockGuard<'a>; 8]>, items: A::Item<'a>) -> Self {
+    pub(crate) fn new(
+        guards: SmallVec<[LockGuard<'a>; 8]>,
+        items: A::Item<'a>,
+        executor: &'a crate::ParallelExecutor,
+    ) -> Self {
         Self {
+            executor,
             _guards: guards,
             items,
             _tracking: None,
@@ -76,8 +82,10 @@ impl<'a, A: AccessSet> QueryGuard<'a, A> {
         guards: SmallVec<[LockGuard<'a>; 8]>,
         items: A::Item<'a>,
         tracking: LockTracking<'a>,
+        executor: &'a crate::ParallelExecutor,
     ) -> Self {
         Self {
+            executor,
             _guards: guards,
             items,
             _tracking: Some(tracking),
@@ -256,9 +264,9 @@ where
 
     /// Iterates over matching entities in parallel, calling `f` for each.
     ///
-    /// Splits the entity list into batches and processes them on separate
-    /// threads via [`std::thread::scope`]. On WASM, falls back to
-    /// sequential iteration.
+    /// Processes batches on the world's reusable workers and the caller.
+    /// On WASM, falls back to sequential iteration. A callback must not wait
+    /// for other callbacks to run concurrently.
     ///
     /// The closure receives `(entity_index, item)` for each matching
     /// entity. Since it is called from multiple threads, it must be `Fn`
@@ -297,6 +305,7 @@ where
     {
         if let Some(intersected) = self.items.query_intersected_entities() {
             crate::system::par_for_each::par_for_each_entities(
+                self.executor,
                 &self.items,
                 &intersected,
                 &config,
@@ -304,6 +313,7 @@ where
             );
         } else {
             crate::system::par_for_each::par_for_each_entities(
+                self.executor,
                 &self.items,
                 self.items.query_entities(),
                 &config,
@@ -784,7 +794,7 @@ mod tests {
         let guards = world.acquire_sorted(&A::access_infos());
         // SAFETY: the validated, sorted lock plan is held until these items are dropped.
         let items = unsafe { A::fetch_unlocked(world, ticks) };
-        QueryGuard::new(guards, items)
+        QueryGuard::new(guards, items, world.parallel_executor())
     }
 
     #[test]
@@ -1392,5 +1402,49 @@ mod tests {
             counter.fetch_add(1, Ordering::Relaxed);
         });
         assert_eq!(counter.load(Ordering::SeqCst), 10);
+    }
+    #[test]
+    fn par_config_limits_threads_and_visits_each_entity_once() {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        for _ in 0..1025 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 0.0 }).unwrap();
+        }
+        let caller = std::thread::current().id();
+        // Includes uneven tails, normalized zero values, and overflowing inputs.
+        for (num_threads, min_batch_size) in
+            [(0, 0), (1, 64), (2, 64), (usize::MAX, 0), (2, usize::MAX)]
+        {
+            let threads = Mutex::new(HashSet::new());
+            let mut q = query::<(Write<Position>,)>(&world);
+            q.par_for_each_with(
+                crate::ParConfig {
+                    num_threads: Some(num_threads),
+                    min_batch_size,
+                },
+                |_, (mut pos,)| {
+                    threads.lock().unwrap().insert(std::thread::current().id());
+                    pos.x += 1.0;
+                },
+            );
+            let threads = threads.into_inner().unwrap();
+            assert!(
+                threads.len()
+                    <= num_threads
+                        .max(1)
+                        .min(world.parallel_executor().parallelism())
+            );
+            if num_threads <= 1 || min_batch_size == usize::MAX {
+                assert_eq!(threads, HashSet::from([caller]));
+            }
+        }
+        let q = query::<(Read<Position>,)>(&world);
+        for (_, (pos,)) in q.iter() {
+            assert_eq!(pos.x, 5.0);
+        }
     }
 }

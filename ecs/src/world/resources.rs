@@ -300,14 +300,15 @@ impl World {
     /// were queued.
     ///
     /// Call this after `schedule.run()` or between schedule stages.
-    pub fn apply_commands(&mut self) {
+    /// Returns all command panics; later commands still run and partial
+    /// mutations are retained. Newly queued commands wait for the next call.
+    #[must_use = "inspect deferred command failures"]
+    pub fn apply_commands(&mut self) -> Vec<crate::CommandError> {
         let cmds = {
             let buffer = self.resources.borrow::<CommandBuffer>();
             buffer.drain()
         };
-        for cmd in cmds {
-            cmd(self);
-        }
+        crate::commands::apply_batch(cmds, self)
     }
 
     // ---- Events ----

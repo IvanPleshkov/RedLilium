@@ -172,6 +172,7 @@ type StampedWorldFn = (crate::type_identity::SourceId, fn(&mut World));
 /// }
 /// ```
 pub struct World {
+    parallel_executor: crate::ParallelExecutor,
     entities: Entities,
     components: HashMap<TypeId, crate::sync::RwLock<ComponentStorage>>,
     /// Monotonic counter handed out as each component type's
@@ -225,6 +226,11 @@ pub struct World {
 impl redlilium_core::abstract_editor::Editable for World {}
 
 impl World {
+    /// Shared, lazily started workers used by this world's parallel queries.
+    pub fn parallel_executor(&self) -> &crate::ParallelExecutor {
+        &self.parallel_executor
+    }
+
     /// Creates a new empty world.
     pub fn new() -> Self {
         let mut resources = Resources::new();
@@ -242,6 +248,7 @@ impl World {
             crate::type_identity::SourceId::HOST,
         );
         Self {
+            parallel_executor: crate::ParallelExecutor::default(),
             entities: Entities::new(),
             components: HashMap::new(),
             next_registration_seq: 0,
@@ -418,6 +425,9 @@ impl World {
     /// game-module unload calls this to sever every pointer into the module's
     /// image before the dylib unmaps.
     ///
+    /// All parallel-query workers are stopped and joined first, running their
+    /// TLS destructors. Later parallel queries lazily start fresh workers.
+    ///
     /// **Caller contract:** the module that registered `source` must still be
     /// mapped — storage/resource drop glue and closure destructors run inside
     /// this call. Entities are untouched: components of purged types simply
@@ -438,6 +448,9 @@ impl World {
             crate::type_identity::SourceId::HOST,
             "purge_source(HOST) would strip the world's own registrations"
         );
+
+        // Run worker TLS destructors while the source image is still mapped.
+        self.parallel_executor.shutdown();
 
         // Component storages: dropping the lock runs the storage's drop glue
         // (per-component destructors monomorphized in the source's image), so
@@ -690,6 +703,7 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
+        self.parallel_executor.shutdown();
         // Decrement registration counts in the shared registry for each type
         // this world registered, per generation — the unit must match
         // `record_type_source`, which increments once per type. (Decrementing
