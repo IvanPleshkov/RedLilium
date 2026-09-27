@@ -175,6 +175,7 @@ pub trait System: Send + Sync + 'static {
     /// Receive the previous tick's result so allocated memory can be reused.
     ///
     /// Called by the runner before [`run()`](System::run) each tick.
+    /// A panic is reported as `SystemError::Panicked` and skips this tick's run.
     /// The default implementation drops the value. Override this to store
     /// the previous result internally (e.g. in a `Mutex<Option<Vec<…>>>`)
     /// and reuse its allocation in the next [`run()`](System::run).
@@ -189,15 +190,15 @@ pub(crate) trait DynSystem: Send + Sync {
     fn run_boxed<'a>(
         &'a self,
         ctx: &'a SystemContext<'a>,
+        prev: Option<Box<dyn Any + Send + Sync>>,
     ) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
-
-    fn reuse_result_boxed(&self, prev: Box<dyn Any + Send + Sync>);
 }
 
 impl<S: System> DynSystem for S {
     fn run_boxed<'a>(
         &'a self,
         ctx: &'a SystemContext<'a>,
+        prev: Option<Box<dyn Any + Send + Sync>>,
     ) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
         // In-image panic shield (#84). This generic impl monomorphizes into
         // the crate that registers the system — for a game cdylib's systems
@@ -206,18 +207,22 @@ impl<S: System> DynSystem for S {
         // crossing into the host's catch_unwind is a "foreign exception" (a
         // per-image canary static mismatch) and std aborts the process. The
         // panic crosses the image boundary as a plain `Err` value instead.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(ctx)))
-            .map_err(|payload| SystemError::Panicked {
-                system: std::any::type_name::<S>().to_string(),
-                message: panic_payload_to_string(&*payload),
-            })??;
+        // Reuse is part of this same call: its default implementation destroys
+        // the previous result, and both that destructor and an overridden hook
+        // can panic. On failure, skip run and return no result for this tick.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(prev) = prev {
+                if let Ok(typed) = prev.downcast::<S::Result>() {
+                    self.reuse_result(*typed);
+                }
+            }
+            self.run(ctx)
+        }))
+        .map_err(|payload| SystemError::Panicked {
+            system: std::any::type_name::<S>().to_string(),
+            message: panic_payload_to_string(&*payload),
+        })??;
         Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
-    }
-
-    fn reuse_result_boxed(&self, prev: Box<dyn Any + Send + Sync>) {
-        if let Ok(typed) = prev.downcast::<S::Result>() {
-            self.reuse_result(*typed);
-        }
     }
 }
 
@@ -272,32 +277,41 @@ pub trait ExclusiveSystem: Send + Sync + 'static {
     /// Receive the previous tick's result so allocated memory can be reused.
     ///
     /// Called by the runner before [`run()`](ExclusiveSystem::run) each tick.
-    /// The default implementation drops the value.
+    /// The default implementation drops the value. A panic is reported as
+    /// `SystemError::Panicked` and skips this tick's run.
     #[allow(unused_variables)]
     fn reuse_result(&mut self, prev: Self::Result) {}
 }
 
 /// Object-safe version of [`ExclusiveSystem`] used internally for type erasure.
 pub(crate) trait DynExclusiveSystem: Send + Sync {
-    fn run_boxed(&mut self, world: &mut World) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
-    fn reuse_result_boxed(&mut self, prev: Box<dyn Any + Send + Sync>);
+    fn run_boxed(
+        &mut self,
+        world: &mut World,
+        prev: Option<Box<dyn Any + Send + Sync>>,
+    ) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
 }
 
 impl<S: ExclusiveSystem> DynExclusiveSystem for S {
-    fn run_boxed(&mut self, world: &mut World) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
+    fn run_boxed(
+        &mut self,
+        world: &mut World,
+        prev: Option<Box<dyn Any + Send + Sync>>,
+    ) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
         // In-image panic shield (#84) — see `DynSystem::run_boxed`.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(world)))
-            .map_err(|payload| SystemError::Panicked {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(prev) = prev {
+                if let Ok(typed) = prev.downcast::<S::Result>() {
+                    self.reuse_result(*typed);
+                }
+            }
+            self.run(world)
+        }))
+        .map_err(|payload| SystemError::Panicked {
             system: std::any::type_name::<S>().to_string(),
             message: panic_payload_to_string(&*payload),
         })??;
         Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
-    }
-
-    fn reuse_result_boxed(&mut self, prev: Box<dyn Any + Send + Sync>) {
-        if let Ok(typed) = prev.downcast::<S::Result>() {
-            self.reuse_result(*typed);
-        }
     }
 }
 
@@ -340,32 +354,41 @@ pub trait ReadOnlyExclusiveSystem: Send + Sync + 'static {
     /// Receive the previous tick's result so allocated memory can be reused.
     ///
     /// Called by the runner before [`run()`](Self::run) each tick.
-    /// The default implementation drops the value.
+    /// The default implementation drops the value. A panic is reported as
+    /// `SystemError::Panicked` and skips this tick's run.
     #[allow(unused_variables)]
     fn reuse_result(&self, prev: Self::Result) {}
 }
 
 /// Object-safe version of [`ReadOnlyExclusiveSystem`] used internally for type erasure.
 pub(crate) trait DynReadOnlyExclusiveSystem: Send + Sync {
-    fn run_boxed(&self, world: &World) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
-    fn reuse_result_boxed(&self, prev: Box<dyn Any + Send + Sync>);
+    fn run_boxed(
+        &self,
+        world: &World,
+        prev: Option<Box<dyn Any + Send + Sync>>,
+    ) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
 }
 
 impl<S: ReadOnlyExclusiveSystem> DynReadOnlyExclusiveSystem for S {
-    fn run_boxed(&self, world: &World) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
+    fn run_boxed(
+        &self,
+        world: &World,
+        prev: Option<Box<dyn Any + Send + Sync>>,
+    ) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
         // In-image panic shield (#84) — see `DynSystem::run_boxed`.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(world)))
-            .map_err(|payload| SystemError::Panicked {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(prev) = prev {
+                if let Ok(typed) = prev.downcast::<S::Result>() {
+                    self.reuse_result(*typed);
+                }
+            }
+            self.run(world)
+        }))
+        .map_err(|payload| SystemError::Panicked {
             system: std::any::type_name::<S>().to_string(),
             message: panic_payload_to_string(&*payload),
         })??;
         Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
-    }
-
-    fn reuse_result_boxed(&self, prev: Box<dyn Any + Send + Sync>) {
-        if let Ok(typed) = prev.downcast::<S::Result>() {
-            self.reuse_result(*typed);
-        }
     }
 }
 

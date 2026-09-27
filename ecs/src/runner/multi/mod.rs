@@ -282,11 +282,8 @@ impl EcsRunnerMultiThread {
                     if systems.is_read_only_exclusive(exc_idx) {
                         let system = systems.get_read_only_exclusive_system(exc_idx);
                         let guard = system.read();
-                        if let Some(prev_result) = prev_result {
-                            guard.reuse_result_boxed(prev_result);
-                        }
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            guard.run_boxed(world)
+                            guard.run_boxed(world, prev_result)
                         })) {
                             Ok(Ok(result)) => results_store.store(exc_idx, result),
                             Ok(Err(e)) => errors.push(e),
@@ -300,11 +297,8 @@ impl EcsRunnerMultiThread {
                     } else {
                         let system = systems.get_exclusive_system(exc_idx);
                         let mut guard = system.write();
-                        if let Some(prev_result) = prev_result {
-                            guard.reuse_result_boxed(prev_result);
-                        }
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            guard.run_boxed(world)
+                            guard.run_boxed(world, prev_result)
                         })) {
                             Ok(Ok(result)) => results_store.store(exc_idx, result),
                             Ok(Err(e)) => errors.push(e),
@@ -499,11 +493,8 @@ impl EcsRunnerMultiThread {
 
                                     let system = systems.get_system(idx);
                                     let guard = system.read();
-                                    if let Some(prev_result) = prev_result {
-                                        guard.reuse_result_boxed(prev_result);
-                                    }
                                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || guard.run_boxed(&ctx),
+                                        || guard.run_boxed(&ctx, prev_result),
                                     )) {
                                         Ok(Ok(result)) => results_ref.store(idx, result),
                                         Ok(Err(e)) => errors_ref.lock().push(e),

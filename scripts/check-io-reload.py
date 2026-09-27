@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "ecs/tests/fixtures/io_reload"
 
 
-def main():
+def main(fixtures=FIXTURES):
     if sys.platform not in ("darwin", "linux"):
         raise SystemExit("This dlopen probe requires macOS or Linux")
     build = subprocess.run(
@@ -49,11 +49,11 @@ def main():
         guest = temporary / ("guest.dylib" if sys.platform == "darwin" else "guest.so")
         host = temporary / "host"
         subprocess.run(
-            base + ["--crate-type=cdylib", str(FIXTURES / "guest.rs"), "-o", str(guest)],
+            base + ["--crate-type=cdylib", str(fixtures / "guest.rs"), "-o", str(guest)],
             check=True, timeout=60,
         )
         subprocess.run(
-            base + [str(FIXTURES / "host.rs"), "-o", str(host)], check=True, timeout=60,
+            base + [str(fixtures / "host.rs"), "-o", str(host)], check=True, timeout=60,
         )
         subprocess.run([str(host), str(guest)], check=True, timeout=30)
 

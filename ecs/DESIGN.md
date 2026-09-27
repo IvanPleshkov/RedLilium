@@ -130,6 +130,20 @@ Guest async work must enter through `IoRunner::run`; spawning raw Tokio tasks by
 
 The native cross-image regression probe runs with `python3 scripts/check-io-reload.py` (macOS/Linux, no GPU). It builds host and guest from identical Cargo artifacts and exercises timers, poll/destructor panics, TLS teardown and late wakers over three unload/reload cycles.
 
+### System panic boundaries
+
+For regular, exclusive and read-only exclusive systems, the erased invocation
+runs `reuse_result` and `run` inside the same panic boundary in the system's
+originating image. A panic from the reuse hook, including the default hook's
+result destructor, returns `SystemError::Panicked` and skips `run` for that
+invocation. No result is published; ordinary dependents still run and condition
+gates retain their existing behavior. The next invocation can execute again
+without a previous result. Partial side effects are not rolled back.
+
+`python3 scripts/check-system-panics.py` verifies both runners and all three
+system kinds against a real guest cdylib, including default result destruction,
+continued scheduling, recovery and owned diagnostics surviving unload.
+
 ### Deferred command failures
 
 Commands from `SystemContext` are collected by the runner and applied before exclusive systems and at the end of a run. Each flush attempts every command in queue order. A panicking command produces a `CommandError` containing its message and enqueue location (`file`, `line`, `column`); later commands and systems continue. Changes made before a panic remain in the world. Command application is not a transaction, and subsequent code sees that partial state.
