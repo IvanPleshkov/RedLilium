@@ -1,3 +1,4 @@
+use super::waiters::Waiters;
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::future::Future;
@@ -12,7 +13,7 @@ const WRITER: i32 = -1;
 /// State value indicating no readers or writers.
 const UNLOCKED: i32 = 0;
 
-/// A reader-writer lock designed for cooperative async executors with noop wakers.
+/// A reader-writer lock designed for cooperative async executors with wake notifications.
 ///
 /// Allows multiple concurrent readers **or** a single exclusive writer.
 /// When contended in an async context, returns `Poll::Pending` instead of
@@ -45,6 +46,7 @@ const UNLOCKED: i32 = 0;
 pub struct ComputeRwLock<T> {
     /// 0 = unlocked, positive = reader count, -1 = writer.
     state: AtomicI32,
+    waiters: Waiters,
     /// Number of writers currently waiting to acquire. While this is non-zero,
     /// `try_read` refuses to admit *new* readers so that a continuous stream of
     /// readers cannot starve a pending writer (writer preference). Existing
@@ -64,6 +66,7 @@ impl<T> ComputeRwLock<T> {
     pub fn new(value: T) -> Self {
         Self {
             state: AtomicI32::new(UNLOCKED),
+            waiters: Waiters::default(),
             writers_waiting: AtomicI32::new(0),
             data: UnsafeCell::new(value),
         }
@@ -120,7 +123,10 @@ impl<T> ComputeRwLock<T> {
     /// Each poll attempts [`try_read()`](Self::try_read). If a writer is
     /// active, returns `Poll::Pending`.
     pub fn read(&self) -> ComputeRwLockRead<'_, T> {
-        ComputeRwLockRead { lock: self }
+        ComputeRwLockRead {
+            lock: self,
+            waiter: None,
+        }
     }
 
     /// Returns a future that acquires an exclusive write lock.
@@ -131,6 +137,7 @@ impl<T> ComputeRwLock<T> {
         ComputeRwLockWrite {
             lock: self,
             registered: false,
+            waiter: None,
         }
     }
 
@@ -197,7 +204,9 @@ impl<T> Deref for ComputeReadGuard<'_, T> {
 
 impl<T> Drop for ComputeReadGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.state.fetch_sub(1, Ordering::Release);
+        if self.lock.state.fetch_sub(1, Ordering::Release) == 1 {
+            self.lock.waiters.wake_all();
+        }
     }
 }
 
@@ -238,6 +247,7 @@ impl<T> DerefMut for ComputeWriteGuard<'_, T> {
 impl<T> Drop for ComputeWriteGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.state.store(UNLOCKED, Ordering::Release);
+        self.lock.waiters.wake_all();
     }
 }
 
@@ -257,16 +267,31 @@ impl<T: fmt::Debug> fmt::Debug for ComputeWriteGuard<'_, T> {
 /// active, returns `Poll::Pending`.
 pub struct ComputeRwLockRead<'a, T> {
     lock: &'a ComputeRwLock<T>,
+    waiter: Option<u64>,
 }
 
 impl<'a, T> Future for ComputeRwLockRead<'a, T> {
     type Output = ComputeReadGuard<'a, T>;
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.lock.try_read() {
-            Some(guard) => Poll::Ready(guard),
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(guard) = this.lock.try_read() {
+            this.lock.waiters.remove(this.waiter.take());
+            return Poll::Ready(guard);
+        }
+        this.lock.waiters.register(&mut this.waiter, cx.waker());
+        match this.lock.try_read() {
+            Some(guard) => {
+                this.lock.waiters.remove(this.waiter.take());
+                Poll::Ready(guard)
+            }
             None => Poll::Pending,
         }
+    }
+}
+impl<T> Drop for ComputeRwLockRead<'_, T> {
+    fn drop(&mut self) {
+        self.lock.waiters.remove(self.waiter);
     }
 }
 
@@ -281,22 +306,28 @@ pub struct ComputeRwLockWrite<'a, T> {
     /// Whether this future has incremented `writers_waiting` and not yet
     /// released it.
     registered: bool,
+    waiter: Option<u64>,
 }
 
 impl<'a, T> Future for ComputeRwLockWrite<'a, T> {
     type Output = ComputeWriteGuard<'a, T>;
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         // Announce intent before attempting, so readers start yielding to us.
         if !this.registered {
             this.lock.writers_waiting.fetch_add(1, Ordering::Relaxed);
             this.registered = true;
         }
-        match this.lock.try_write() {
+        let acquired = this.lock.try_write().or_else(|| {
+            this.lock.waiters.register(&mut this.waiter, cx.waker());
+            this.lock.try_write()
+        });
+        match acquired {
             Some(guard) => {
                 this.lock.writers_waiting.fetch_sub(1, Ordering::Relaxed);
                 this.registered = false;
+                this.lock.waiters.remove(this.waiter.take());
                 Poll::Ready(guard)
             }
             None => Poll::Pending,
@@ -308,8 +339,10 @@ impl<T> Drop for ComputeRwLockWrite<'_, T> {
     fn drop(&mut self) {
         // If dropped (cancelled) while still waiting, release our reservation so
         // we don't permanently block readers.
+        self.lock.waiters.remove(self.waiter);
         if self.registered {
             self.lock.writers_waiting.fetch_sub(1, Ordering::Relaxed);
+            self.lock.waiters.wake_all();
         }
     }
 }

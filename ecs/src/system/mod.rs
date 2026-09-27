@@ -4,7 +4,7 @@ pub(crate) mod context;
 pub mod diagnostics;
 pub(crate) mod function;
 pub(crate) mod par_for_each;
-mod parallel_executor;
+pub(crate) mod parallel_executor;
 pub use parallel_executor::{ExecutorBusy, ParallelExecutor};
 pub(crate) mod results_store;
 pub(crate) mod schedule;

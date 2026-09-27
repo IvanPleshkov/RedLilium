@@ -4,13 +4,13 @@
 
 Existing ECS solutions treat async compute as an afterthought — something bolted on through external task pools. In a real game engine, CPU cores sit idle while the slowest ECS system in a dependency stage finishes. Background work (navmesh rebuilds, pathfinding, LOD calculations, asset processing) has no way to fill those gaps.
 
-RedLilium ECS combines synchronous systems with cooperatively polled async compute. Native systems and parallel entity queries share reusable workers through an explicitly owned executor. Sharing those workers with compute is a longer-term goal; it is not the current execution model.
+RedLilium ECS combines synchronous systems with wake-driven async compute. Native systems, parallel entity queries, and background compute share reusable workers through an explicitly owned executor. Background tasks continue between frames; no process-global scheduler or separate compute thread pool is required.
 
 ## Goals
 
-1. **Unified scheduling (planned)** — Share execution capacity between ECS systems and compute tasks so idle cores can pick up background work.
+1. **Unified scheduling** — Share execution capacity between ECS systems and compute tasks so idle cores can pick up background work.
 
-2. **Priority-based execution** — Critical systems (physics, rendering) always run first. Background tasks (navmesh, pathfinding) fill gaps without affecting frame time.
+2. **Priority-based execution** — Ready systems take precedence over queued compute. Background tasks fill idle capacity and yield cooperatively; a long non-yielding poll can delay a system and affect frame time.
 
 3. **Multiple worlds** — First-class support for multiple independent ECS worlds. Use cases: game world + editor world + preview world, server-side simulation, parallel scene loading.
 
@@ -84,13 +84,27 @@ The coordinator maintains a ready queue and submits systems only to available wo
 
 The coordinating thread services main-thread resource requests throughout a parallel phase. On coordinator unwind, its request receiver is dropped before the borrowed task scope drains, releasing waiting workers' result channels. System-job completion is published even if system setup or result reuse panics. Persistent threads do not imply persistent borrows: every phase drains before world mutation resumes. Per-system dispatch allocates one job; query helpers borrow one shared batch closure without allocating a job per entity or per helper.
 
-`ComputePool` remains a cooperatively polled future queue. It does not use these workers yet; the coordinator and explicit `block_on` calls drive it. This pool bounds system/query workers across all sharing worlds and runners, not arbitrary external callers or separate executor instances. Compute integration is a later stage. A single-thread runner executes systems on its caller and shares its executor across their parallel queries; `single_thread_with_executor` permits explicit sharing. It starts no workers until a query needs helpers.
+Both runners attach their compute queue to the same executor used by their systems and queries. Native workers poll ready compute tasks whenever no system is waiting for worker capacity, and continue doing so between `runner.run()` calls. Sources sharing the pool get round-robin service; each compute queue preserves priority ordering with fairness rounds. Even `Priority::Critical` compute yields admission to a ready system. Already-running polls are not preempted: expensive tasks must use checkpoints.
 
-Before hot reload, stop guest producers, quiesce compute, then call `runner.prepare_reload()`. It joins workers (including TLS destruction) and drops cached system results before guest code is unmapped. Standalone/shared pools outside that runner must also be stopped with `shutdown_workers()`; all runners retaining guest results need preparation. Shutdown rejects active scopes with `ExecutorBusy`, and admissions are rejected while workers are joining. Later execution can restart workers lazily. The editor reload path aborts the swap if worker shutdown fails.
+The coordinator sleeps on system-completion, main-thread-request, and worker-availability events; it does not periodically poll compute or delay dispatch until a timer expires. A single-thread runner still executes systems on its caller, while its parallel queries and compute share background workers. This pool bounds background workers across sharing worlds and runners; explicit callers of `block_on` or query iteration are additional participants.
+
+Before hot reload, stop guest producers, quiesce compute, then call `runner.prepare_reload()`. It joins workers (including TLS destruction) and drops cached system results before guest code is unmapped. Standalone/shared pools outside that runner must also be stopped with `shutdown_workers()`; all runners retaining guest results need preparation. Shutdown rejects active scopes and live registered compute tasks with `ExecutorBusy`, and admissions are rejected while workers are joining. Later execution can restart workers lazily. The editor reload path aborts the swap if worker shutdown fails.
 
 Dropping a world stops workers only when it owns the last executor handle; a pool shared with a runner survives that world. `World::purge_source` joins the world's executor before removing registrations and rejects an active shared executor. The constructor's image owns the stored worker-start function pointer and must outlive the pool. Pending guest code and TLS must be drained before unloading that guest.
 
-On WASM, queries run sequentially and create no workers; systems use the single-thread runner.
+On WASM, queries run sequentially and create no workers; the single-thread runner drives ready compute work cooperatively between systems and at frame end. IO callbacks mark tasks ready for subsequent ticks. Blocking waits cannot drive the browser event loop; await handles from async code when progress depends on IO.
+
+### Wake-driven compute
+
+`ComputePool::new(io)` is a standalone manually driven queue. `ComputePool::with_executor(io, executor)` registers it for autonomous native execution; runner constructors use this form. `tick`, `tick_all`, and `tick_with_budget` execute only ready tasks, and return zero when all tasks are asleep. A task is initially ready, then after `Pending` waits until its waker fires. Repeated wakes coalesce; a wake during polling schedules a subsequent poll without permitting concurrent polling of the same future.
+
+`TaskHandle` and `IoHandle` are notifying futures. Result publication and sender destruction wake their awaiters. `IoHandle::channel()` returns an `IoSender` and receiver together so a sender cannot forget the notification. Cancellation through any `CancellationToken` clone wakes the task for its final cleanup poll. Cancellation is a request: awaiting the handle waits for a result or sender destruction, and the final poll may still produce a result. `ComputeMutex` and `ComputeRwLock` register waiters and wake them on unlock; dropped waits unregister themselves.
+
+`block_on` helps ready compute work on its caller and parks when there is nothing ready, waking on new work or the awaited result. Release all ECS borrows before calling it; this method can execute other compute tasks. It never steals unrelated systems or query jobs. One-worker configurations therefore make progress even when a system synchronously waits for compute using IO.
+
+The ready queue stores task IDs and reuses each task's waker state; worker polling does not allocate a fresh job for every poll. Task creation allocates the boxed future and shared notification/cancellation state. No entity-query helper allocations are added by compute integration. Idle workers sleep on a condition variable, rather than polling waiting IO.
+
+Create shared compute pools in the host image. Waker constructors are captured there, so a late external wake after guest task destruction only sees a completed task; it cannot call a guest vtable. The constructor's image must outlive retained wakers, even after pool destruction. Pools unregister their background source when dropped, discard queued futures, and let in-flight polls finish cleanup. Before guest unload, quiesce explicitly and join workers instead of relying on dropping one shared owner. Outstanding guest IO operations must also finish before their image is unloaded; dropping an IO result handle does not cancel the IO operation.
 
 ### Compute task lifetime
 
@@ -100,7 +114,7 @@ On WASM, queries run sequentially and create no workers; systems use the single-
 
 Polling and future destruction have generic panic boundaries inside the originating image. Panic payloads are converted into owned strings before returning to the host, and failures remain available through `TaskHandle::panic_message()`. `is_done()` becomes true after future destruction, including cancellation; receiving a result may happen earlier. Quiescence does not destroy results retained by handles or guest thread-local state: those owners must also be released, and guest execution threads joined, before module unload.
 
-Lifetime tracking adds one shared counter allocation per pool and one `Arc` clone per task, with no additional per-task allocation or per-poll counter update. The future remains a single boxed allocation. Wake-driven scheduling and sharing compute work with the system executor remain separate follow-up work.
+Lifetime tracking shares the pool progress signal and updates its active counter at task admission and final destruction. The future remains a single boxed allocation. Shutdown uses the same progress notifications as blocking waits, and does not poll sleeping tasks repeatedly.
 
 ### Deferred command failures
 
@@ -302,7 +316,7 @@ All systems complete within a single `schedule.run()` call. There is no cross-fr
 
 2. runner.run(&mut world, &systems);   ← systems execute by dependency order
    // Stage 1: [physics, AI, animation] ← parallel, non-conflicting
-   //   coordinator ticks compute pool; block_on callers also drive compute
+   //   shared workers execute ready compute; block_on callers can help
    // Stage 2: [transform_propagation]  ← depends on physics
    // Stage 3: [camera_update, culling] ← depends on transforms
 
@@ -317,7 +331,7 @@ All systems complete within a single `schedule.run()` call. There is no cross-fr
 |---|---|---|
 | **Parallel queries** | Shared workers + caller | Sequential |
 | **Systems** | Persistent shared workers with a fixed limit | Sequential on main thread |
-| **Async compute** | Cooperatively polled futures | Cooperative on main thread |
+| **Async compute** | Wake-driven shared workers, continuing between frames | Wake-driven cooperative ticks |
 | **IO** | tokio (separate thread) | wasm-bindgen-futures / fetch API |
 | **API** | Same | Same |
 

@@ -49,11 +49,11 @@ impl EcsRunnerMultiThread {
         Self::with_executor(crate::ParallelExecutor::new(num_threads))
     }
 
-    /// Share CPU workers with other runners/worlds. Compute stays separate.
+    /// Share CPU workers for systems, queries, and compute with other runners/worlds.
     pub fn with_executor(executor: crate::ParallelExecutor) -> Self {
         let io = IoRuntime::new();
         Self {
-            compute: ComputePool::new(io.clone()),
+            compute: ComputePool::with_executor(io.clone(), executor.clone()),
             io,
             executor,
             prev_results: Mutex::new(HashMap::new()),
@@ -371,12 +371,6 @@ impl EcsRunnerMultiThread {
             .lock()
             .insert(systems.container_id(), results_store.into_prev_results());
 
-        // Opportunistically tick remaining compute tasks (time-budgeted).
-        if self.compute.pending_count() > 0 {
-            redlilium_core::profile_scope!("ecs: compute drain");
-            self.compute.tick_with_budget(Duration::from_millis(2));
-        }
-
         // Build diagnostic report
         let ambiguities = if diagnostics.detect_ambiguities {
             Some(analyze_ambiguities(
@@ -438,9 +432,11 @@ impl EcsRunnerMultiThread {
             // draining. Pending main-thread requests then release their result
             // senders, unblocking every waiting worker.
             let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
+            scope.notify_available(event_tx.clone());
             let mut active_count = 0usize;
             let mut ready: VecDeque<usize> = initial_ready.iter().copied().collect();
             let mut barrier_ready = false;
+            scope.set_systems_ready(!ready.is_empty());
             macro_rules! spawn_system {
                 ($i:expr) => {{
                     let tx = event_tx.clone();
@@ -558,10 +554,11 @@ impl EcsRunnerMultiThread {
                         break;
                     }
                 }
+                scope.set_systems_ready(!barrier_ready && !ready.is_empty());
                 if active_count == 0 && (barrier_ready || ready.is_empty()) {
                     break;
                 }
-                match event_rx.recv_timeout(Duration::from_millis(1)) {
+                match event_rx.recv() {
                     Ok(RunnerEvent::SystemCompleted(completed_idx)) => {
                         active_count -= 1;
                         *completed_count += 1;
@@ -614,11 +611,11 @@ impl EcsRunnerMultiThread {
                             });
                         }
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Ok(RunnerEvent::WorkerAvailable) => {}
+                    Err(_) => break,
                 }
 
-                self.compute.tick_with_budget(Duration::from_millis(1));
+                scope.set_systems_ready(!barrier_ready && !ready.is_empty());
             }
 
             drop(event_tx);
@@ -630,16 +627,11 @@ impl EcsRunnerMultiThread {
     /// Drains compute tasks, including concurrent polls and destructors.
     /// Request cancellation separately; stop task producers before shutdown.
     pub fn graceful_shutdown(&self, time_budget: Duration) -> Result<(), ShutdownError> {
-        let start = Instant::now();
-        while self.compute.active_count() > 0 {
-            if start.elapsed() >= time_budget {
-                return Err(ShutdownError::Timeout {
-                    remaining_tasks: self.compute.active_count(),
-                });
-            }
-            self.compute.tick_all();
-        }
-        Ok(())
+        self.compute
+            .quiesce(time_budget)
+            .map_err(|error| ShutdownError::Timeout {
+                remaining_tasks: error.remaining_tasks,
+            })
     }
 }
 

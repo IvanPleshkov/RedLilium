@@ -1,7 +1,8 @@
 /// Priority level for task execution.
 ///
 /// Higher priority tasks are executed before lower priority tasks.
-/// Sync ECS systems always run at Critical priority.
+/// These priorities order compute work; ready ECS systems take precedence
+/// over background compute regardless of its priority.
 ///
 /// # Ordering
 ///
@@ -12,9 +13,9 @@ pub enum Priority {
     /// Fills gaps when higher-priority work is unavailable.
     /// May span multiple frames.
     Low,
-    /// Should complete this frame. Used for important async tasks.
+    /// Important async tasks, ahead of low-priority work.
     High,
-    /// Must complete this frame. Used for ECS systems.
+    /// Highest-priority compute work. Frame completion is not guaranteed.
     Critical,
 }
 

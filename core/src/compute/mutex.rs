@@ -1,3 +1,4 @@
+use super::waiters::Waiters;
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::future::Future;
@@ -7,12 +8,11 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-/// A mutex designed for cooperative async executors with noop wakers.
+/// A mutex designed for cooperative async executors with wake notifications.
 ///
 /// Unlike `std::sync::Mutex`, calling `.lock().await` on a contended
 /// `ComputeMutex` returns `Poll::Pending` instead of blocking the thread.
-/// The executor polls the task again later, at which point the lock may
-/// be available.
+/// Unlocking wakes registered waiters.
 ///
 /// This is critical for [`ComputePool`](crate::compute) tasks: if two tasks
 /// on the same thread contend for a `std::sync::Mutex`, the thread blocks
@@ -42,6 +42,7 @@ use std::task::{Context, Poll};
 /// ```
 pub struct ComputeMutex<T> {
     locked: AtomicBool,
+    waiters: Waiters,
     data: UnsafeCell<T>,
 }
 
@@ -55,6 +56,7 @@ impl<T> ComputeMutex<T> {
     pub fn new(value: T) -> Self {
         Self {
             locked: AtomicBool::new(false),
+            waiters: Waiters::default(),
             data: UnsafeCell::new(value),
         }
     }
@@ -76,10 +78,12 @@ impl<T> ComputeMutex<T> {
     ///
     /// Each poll attempts [`try_lock()`](Self::try_lock). If contended,
     /// the future returns `Poll::Pending` so the cooperative executor
-    /// can poll other tasks. Does not register wakers — relies on the
-    /// executor re-polling all pending tasks (noop waker model).
+    /// can poll other tasks. Unlocking wakes the waiting task.
     pub fn lock(&self) -> ComputeMutexLock<'_, T> {
-        ComputeMutexLock { mutex: self }
+        ComputeMutexLock {
+            mutex: self,
+            waiter: None,
+        }
     }
 
     /// Consumes the mutex and returns the inner value.
@@ -151,6 +155,7 @@ impl<T> DerefMut for ComputeMutexGuard<'_, T> {
 impl<T> Drop for ComputeMutexGuard<'_, T> {
     fn drop(&mut self) {
         self.mutex.locked.store(false, Ordering::Release);
+        self.mutex.waiters.wake_all();
     }
 }
 
@@ -167,16 +172,31 @@ impl<T: fmt::Debug> fmt::Debug for ComputeMutexGuard<'_, T> {
 /// `Poll::Pending` so the cooperative executor can poll other tasks.
 pub struct ComputeMutexLock<'a, T> {
     mutex: &'a ComputeMutex<T>,
+    waiter: Option<u64>,
 }
 
 impl<'a, T> Future for ComputeMutexLock<'a, T> {
     type Output = ComputeMutexGuard<'a, T>;
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.mutex.try_lock() {
-            Some(guard) => Poll::Ready(guard),
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(guard) = this.mutex.try_lock() {
+            this.mutex.waiters.remove(this.waiter.take());
+            return Poll::Ready(guard);
+        }
+        this.mutex.waiters.register(&mut this.waiter, cx.waker());
+        match this.mutex.try_lock() {
+            Some(guard) => {
+                this.mutex.waiters.remove(this.waiter.take());
+                Poll::Ready(guard)
+            }
             None => Poll::Pending,
         }
+    }
+}
+impl<T> Drop for ComputeMutexLock<'_, T> {
+    fn drop(&mut self) {
+        self.mutex.waiters.remove(self.waiter);
     }
 }
 

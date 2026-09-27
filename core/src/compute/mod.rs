@@ -15,10 +15,11 @@ mod io_handle;
 mod mutex;
 mod priority;
 mod rwlock;
+mod waiters;
 mod yield_now;
 
-pub use cancellation::{CancellationToken, Cancelled, Checkpoint};
-pub use io_handle::IoHandle;
+pub use cancellation::{CancellationRegistration, CancellationToken, Cancelled, Checkpoint};
+pub use io_handle::{IoHandle, IoSender};
 pub use mutex::{ComputeMutex, ComputeMutexGuard, ComputeMutexLock};
 pub use priority::Priority;
 pub use rwlock::{
@@ -30,9 +31,8 @@ use std::future::Future;
 
 /// Trait for spawning real async IO operations.
 ///
-/// Bridges a cooperative executor (noop wakers, manual polling) with a real
-/// async runtime that can drive IO futures. Results are delivered via
-/// [`IoHandle`], which works with noop wakers by checking a channel.
+/// Bridges compute with a real async runtime. Results delivered through
+/// [`IoHandle`] wake the awaiting task on completion or sender destruction.
 ///
 /// # Implementors
 ///
@@ -44,8 +44,7 @@ pub trait IoRunner: Clone + Send + Sync + 'static {
     /// Spawns an async IO future on the real runtime.
     ///
     /// Returns an [`IoHandle`] that can be `.await`ed or polled via
-    /// `try_recv()`. The handle works with noop wakers — it checks
-    /// a channel internally.
+    /// `try_recv()`. Completion wakes the awaiting task.
     fn run<T, F>(&self, future: F) -> IoHandle<T>
     where
         T: Send + 'static,

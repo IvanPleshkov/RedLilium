@@ -12,8 +12,10 @@ pub(crate) type MainThreadWork = Box<dyn FnOnce() + Send>;
 /// Events processed by the multi-threaded runner's main loop.
 ///
 /// Unifies system completion signals and main-thread dispatch requests
-/// into a single channel, so `recv_timeout` wakes on either event type.
+/// and worker availability into one channel so the coordinator can sleep.
 pub(crate) enum RunnerEvent {
+    /// Shared capacity became available for a queued system.
+    WorkerAvailable,
     /// A system at the given index has finished execution.
     SystemCompleted(usize),
     /// A worker requests that a closure be executed on the main thread.

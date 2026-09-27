@@ -46,8 +46,8 @@ impl EcsRunnerSingleThread {
     pub fn with_executor(executor: crate::ParallelExecutor) -> Self {
         let io = IoRuntime::new();
         Self {
-            executor,
-            compute: ComputePool::new(io.clone()),
+            executor: executor.clone(),
+            compute: ComputePool::with_executor(io.clone(), executor.clone()),
             io,
             prev_results: Mutex::new(HashMap::new()),
         }
@@ -293,11 +293,8 @@ impl EcsRunnerSingleThread {
                     }
                 }
 
-                // Give compute tasks CPU between systems (the multi-threaded
-                // runner does this in its coordination loop). Without it a
-                // task spawned by an earlier system makes no progress until
-                // the end-of-run drain, and anything waiting on it inside a
-                // later system waits the whole run.
+                // Native workers drive compute independently of frame execution.
+                #[cfg(target_arch = "wasm32")]
                 if self.compute.pending_count() > 0 {
                     self.compute.tick_all();
                 }
@@ -322,6 +319,7 @@ impl EcsRunnerSingleThread {
         }
 
         // Drain remaining compute tasks (one poll per task)
+        #[cfg(target_arch = "wasm32")]
         if self.compute.pending_count() > 0 {
             redlilium_core::profile_scope!("ecs: compute drain");
             self.compute.tick_all();
@@ -372,18 +370,25 @@ impl EcsRunnerSingleThread {
     /// Request cancellation separately; stop task producers before shutdown.
     pub fn graceful_shutdown(&self, _time_budget: Duration) -> Result<(), ShutdownError> {
         #[cfg(not(target_arch = "wasm32"))]
-        let start = std::time::Instant::now();
-
-        while self.compute.active_count() > 0 {
-            #[cfg(not(target_arch = "wasm32"))]
-            if start.elapsed() >= _time_budget {
-                return Err(ShutdownError::Timeout {
-                    remaining_tasks: self.compute.active_count(),
-                });
-            }
-            self.compute.tick_all();
+        {
+            self.compute
+                .quiesce(_time_budget)
+                .map_err(|error| ShutdownError::Timeout {
+                    remaining_tasks: error.remaining_tasks,
+                })
         }
-        Ok(())
+        #[cfg(target_arch = "wasm32")]
+        {
+            while self.compute.active_count() > 0 {
+                if self.compute.tick_all() == 0 {
+                    // Synchronous shutdown cannot drive the browser event loop.
+                    return Err(ShutdownError::Timeout {
+                        remaining_tasks: self.compute.active_count(),
+                    });
+                }
+            }
+            Ok(())
+        }
     }
 }
 

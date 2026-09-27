@@ -1,8 +1,9 @@
+use super::waiters::Waiters;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use super::yield_now::{YieldNow, yield_now};
 
@@ -40,25 +41,59 @@ impl std::error::Error for Cancelled {}
 /// Calling [`cancel()`](CancellationToken::cancel) on any clone affects all.
 #[derive(Clone)]
 pub struct CancellationToken {
-    flag: Arc<AtomicBool>,
+    state: Arc<CancellationState>,
+}
+
+struct CancellationState {
+    flag: AtomicBool,
+    waiters: Waiters,
+}
+
+/// Removes a cancellation listener when its task is destroyed.
+pub struct CancellationRegistration {
+    state: Arc<CancellationState>,
+    key: Option<u64>,
+}
+impl Drop for CancellationRegistration {
+    fn drop(&mut self) {
+        self.state.waiters.remove(self.key);
+    }
 }
 
 impl CancellationToken {
     /// Creates a new cancellation token (not cancelled).
     pub fn new() -> Self {
         Self {
-            flag: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(CancellationState {
+                flag: AtomicBool::new(false),
+                waiters: Waiters::default(),
+            }),
         }
     }
 
     /// Signals cancellation.
     pub fn cancel(&self) {
-        self.flag.store(true, Ordering::Release);
+        self.state.flag.store(true, Ordering::Release);
+        self.state.waiters.wake_all();
+    }
+
+    /// Wake a task when any clone requests cancellation. Keep the registration
+    /// alive while waiting; dropping it releases the stored waker.
+    pub fn on_cancel(&self, waker: &Waker) -> CancellationRegistration {
+        let mut key = None;
+        self.state.waiters.register(&mut key, waker);
+        if self.is_cancelled() {
+            self.state.waiters.wake_all();
+        }
+        CancellationRegistration {
+            state: self.state.clone(),
+            key,
+        }
     }
 
     /// Returns whether cancellation has been signalled.
     pub fn is_cancelled(&self) -> bool {
-        self.flag.load(Ordering::Acquire)
+        self.state.flag.load(Ordering::Acquire)
     }
 }
 

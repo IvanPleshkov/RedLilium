@@ -1,8 +1,37 @@
-//! Shared workers for systems and synchronous borrowed queries.
+//! Shared workers for systems, borrowed queries, and owned compute tasks.
 //! Ready systems are queued by their runner. Query helpers use only idle
 //! workers; a waiting query never steals unrelated systems or compute work.
 
 use std::sync::Arc;
+
+/// An owned compute queue registered with the shared CPU workers.
+pub(crate) trait BackgroundWork: Send + Sync {
+    fn ready_count(&self) -> usize;
+    fn active_count(&self) -> usize;
+    fn poll_one(&self);
+}
+
+#[derive(Clone)]
+pub(crate) struct BackgroundNotifier {
+    #[cfg(not(target_arch = "wasm32"))]
+    pool: std::sync::Weak<native::Pool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    source: u64,
+}
+impl BackgroundNotifier {
+    pub(crate) fn unregister(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(pool) = self.pool.upgrade() {
+            pool.unregister_background(self.source);
+        }
+    }
+    pub(crate) fn notify(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(pool) = self.pool.upgrade() {
+            pool.notify_background();
+        }
+    }
+}
 
 /// Shared CPU workers. Clones refer to the same pool, including across worlds.
 ///
@@ -19,12 +48,12 @@ pub struct ParallelExecutor {
     identity: Arc<()>,
 }
 
-/// Workers cannot be stopped while borrowed execution scopes are active.
+/// Workers cannot be stopped while borrowed scopes or registered compute tasks are active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutorBusy;
 impl std::fmt::Display for ExecutorBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("executor has active scopes or is stopping workers")
+        f.write_str("executor has active scopes/compute tasks or is stopping workers")
     }
 }
 impl std::error::Error for ExecutorBusy {}
@@ -71,9 +100,10 @@ impl ParallelExecutor {
     }
 
     /// Join all workers, including their TLS destructors. Fails without stopping
-    /// anything if a borrowed scope is active. Admissions are rejected during
+    /// anything if a borrowed scope or registered compute task is active. Admissions are rejected during
     /// shutdown; later calls may lazily restart workers. The caller must keep
-    /// guest producers stopped until unloading completes.
+    /// guest producers stopped until unloading completes. Quiesce all attached
+    /// compute pools first, including sleeping tasks.
     pub fn shutdown_workers(&self) -> Result<(), ExecutorBusy> {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -82,6 +112,25 @@ impl ParallelExecutor {
         #[cfg(target_arch = "wasm32")]
         {
             Ok(())
+        }
+    }
+
+    pub(crate) fn register_background(
+        &self,
+        source: &Arc<dyn BackgroundWork>,
+    ) -> BackgroundNotifier {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let id = self.native.register_background(source);
+            BackgroundNotifier {
+                source: id,
+                pool: Arc::downgrade(&self.native),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = source;
+            BackgroundNotifier {}
         }
     }
 
@@ -125,9 +174,13 @@ impl Default for ParallelExecutor {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use super::ExecutorBusy;
+    use super::{BackgroundWork, ExecutorBusy};
+    use crate::main_thread_dispatcher::RunnerEvent;
     use std::any::Any;
     use std::marker::PhantomData;
+    use std::sync::Weak;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::Sender;
     use std::sync::{Arc, Condvar, Mutex, MutexGuard};
     use std::thread::JoinHandle;
 
@@ -187,45 +240,94 @@ mod native {
     struct SlotState {
         job: Option<Job>,
         busy: bool,
-        stop: bool,
+        background: bool,
     }
     #[derive(Default)]
     struct Slot {
         state: Mutex<SlotState>,
-        wake: Condvar,
     }
     struct Worker {
         slot: Arc<Slot>,
         thread: JoinHandle<()>,
     }
-    type Spawn = fn(Arc<Slot>, usize) -> std::io::Result<JoinHandle<()>>;
-    // Store this entry point at construction: lazy startup from a guest must
-    // keep the persistent loop in the constructor's image.
+    type Spawn = fn(Arc<Shared>, Arc<Slot>, usize) -> std::io::Result<JoinHandle<()>>;
     #[inline(never)]
-    fn spawn_worker(slot: Arc<Slot>, index: usize) -> std::io::Result<JoinHandle<()>> {
+    fn spawn_worker(
+        shared: Arc<Shared>,
+        slot: Arc<Slot>,
+        index: usize,
+    ) -> std::io::Result<JoinHandle<()>> {
         std::thread::Builder::new()
             .name(format!("ecs-worker-{index}"))
             .spawn(move || {
+                enum Work {
+                    Borrowed(Job),
+                    Background(Arc<dyn BackgroundWork>),
+                }
                 loop {
-                    let job = {
-                        let mut state = lock(&slot.state);
-                        while state.job.is_none() && !state.stop {
-                            state = slot.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+                    let work = {
+                        let mut state = lock(&shared.state);
+                        loop {
+                            if state.stopping {
+                                return;
+                            }
+                            if let Some(job) = lock(&slot.state).job.take() {
+                                break Work::Borrowed(job);
+                            }
+                            if state.system_demand == 0 {
+                                let len = state.background.len();
+                                let mut source = None;
+                                for offset in 0..len {
+                                    let index = (state.next_background + offset) % len;
+                                    if let Some(candidate) = state.background[index].1.upgrade()
+                                        && candidate.ready_count() != 0
+                                    {
+                                        source = Some(candidate);
+                                        state.next_background = (index + 1) % len;
+                                        break;
+                                    }
+                                }
+                                if let Some(source) = source {
+                                    {
+                                        let mut slot = lock(&slot.state);
+                                        slot.busy = true;
+                                        slot.background = true;
+                                    }
+                                    state.background_running += 1;
+                                    break Work::Background(source);
+                                }
+                            }
+                            state = shared.wake.wait(state).unwrap_or_else(|e| e.into_inner());
                         }
-                        if state.stop {
-                            break;
-                        }
-                        state.job.take().expect("notified with a job")
                     };
-                    // SAFETY: the submitting scope retains the data until finish.
-                    unsafe {
-                        (job.run)(job.data);
-                    }
-                    lock(&slot.state).busy = false;
-                    // Publish completion after releasing the slot, so a coordinator
-                    // can immediately dispatch its next ready system to this worker.
-                    unsafe {
-                        (job.finish)(job.data);
+                    match work {
+                        Work::Borrowed(job) => {
+                            // SAFETY: the submitting scope retains data through finish.
+                            unsafe {
+                                (job.run)(job.data);
+                            }
+                            {
+                                let state = lock(&shared.state);
+                                lock(&slot.state).busy = false;
+                                state.notify_available();
+                            }
+                            shared.wake.notify_all();
+                            unsafe {
+                                (job.finish)(job.data);
+                            }
+                        }
+                        Work::Background(source) => {
+                            // Future polling/destruction have their own in-image shields.
+                            source.poll_one();
+                            drop(source);
+                            {
+                                let mut state = lock(&shared.state);
+                                lock(&slot.state).busy = false;
+                                state.background_running -= 1;
+                                state.notify_available();
+                            }
+                            shared.wake.notify_all();
+                        }
                     }
                 }
             })
@@ -236,10 +338,31 @@ mod native {
         scopes: usize,
         stopping: bool,
         coordinators: Vec<std::thread::ThreadId>,
+        background: Vec<(u64, Weak<dyn BackgroundWork>)>,
+        next_source: u64,
+        next_listener: u64,
+        listeners: Vec<(u64, Sender<RunnerEvent>)>,
+        background_running: usize,
+        next_background: usize,
+        system_demand: usize,
+    }
+    impl PoolState {
+        fn notify_available(&self) {
+            if self.system_demand != 0 {
+                for (_, sender) in &self.listeners {
+                    let _ = sender.send(RunnerEvent::WorkerAvailable);
+                }
+            }
+        }
+    }
+    #[derive(Default)]
+    struct Shared {
+        state: Mutex<PoolState>,
+        wake: Condvar,
     }
     pub(super) struct Pool {
         pub(super) capacity: usize,
-        state: Mutex<PoolState>,
+        shared: Arc<Shared>,
         spawn: Spawn,
     }
     pub(crate) struct Lease<'a> {
@@ -248,7 +371,7 @@ mod native {
     }
     impl Drop for Lease<'_> {
         fn drop(&mut self) {
-            let mut state = lock(&self.pool.state);
+            let mut state = lock(&self.pool.shared.state);
             state.scopes -= 1;
             if let Some(id) = self.coordinator {
                 state.coordinators.retain(|other| *other != id);
@@ -260,12 +383,12 @@ mod native {
         pub(super) fn new(capacity: usize) -> Self {
             Self {
                 capacity,
-                state: Mutex::new(PoolState::default()),
+                shared: Arc::new(Shared::default()),
                 spawn: spawn_worker,
             }
         }
         fn enter(&self) -> Lease<'_> {
-            let mut state = lock(&self.state);
+            let mut state = lock(&self.shared.state);
             assert!(!state.stopping, "executor is stopping workers");
             state.scopes += 1;
             Lease {
@@ -275,12 +398,12 @@ mod native {
         }
         fn start(&self, state: &mut PoolState) -> std::io::Result<()> {
             let slot = Arc::new(Slot::default());
-            let thread = (self.spawn)(slot.clone(), state.workers.len())?;
+            let thread = (self.spawn)(self.shared.clone(), slot.clone(), state.workers.len())?;
             state.workers.push(Worker { slot, thread });
             Ok(())
         }
         pub(super) fn prepare_run(&self, needs_worker: bool) -> Result<Lease<'_>, String> {
-            let mut state = lock(&self.state);
+            let mut state = lock(&self.shared.state);
             if state.stopping {
                 return Err(ExecutorBusy.to_string());
             }
@@ -305,7 +428,7 @@ mod native {
         // Only idle slots accept jobs. A waiting query cannot enqueue work
         // behind its own blocked system and cannot steal unrelated systems.
         fn submit(&self, make: impl FnOnce() -> Job) -> bool {
-            let mut pool = lock(&self.state);
+            let mut pool = lock(&self.shared.state);
             let idle = pool.workers.iter().position(|w| !lock(&w.slot.state).busy);
             let index = if let Some(index) = idle {
                 index
@@ -324,26 +447,95 @@ mod native {
             let mut state = lock(&slot.state);
             state.job = Some(make());
             state.busy = true;
-            slot.wake.notify_one();
+            state.background = false;
+            self.shared.wake.notify_all();
             true
         }
+        pub(super) fn register_background(&self, source: &Arc<dyn BackgroundWork>) -> u64 {
+            let mut state = lock(&self.shared.state);
+            let id = state.next_source;
+            state.next_source += 1;
+            state.background.push((id, Arc::downgrade(source)));
+            id
+        }
+        pub(super) fn unregister_background(&self, id: u64) {
+            let removed = {
+                let mut state = lock(&self.shared.state);
+                state
+                    .background
+                    .iter()
+                    .position(|(key, _)| *key == id)
+                    .map(|index| state.background.swap_remove(index))
+            };
+            drop(removed);
+            self.shared.wake.notify_all();
+        }
+        pub(super) fn notify_background(&self) {
+            let mut state = lock(&self.shared.state);
+            if state.stopping {
+                return;
+            }
+            let (ready, active) = state
+                .background
+                .iter()
+                .filter_map(|(_, source)| source.upgrade())
+                .fold((0, 0), |(ready, active), source| {
+                    (ready + source.ready_count(), active + source.active_count())
+                });
+            let (busy, borrowed) = state
+                .workers
+                .iter()
+                .fold((0, 0), |(busy, borrowed), worker| {
+                    let slot = lock(&worker.slot.state);
+                    (
+                        busy + usize::from(slot.busy),
+                        borrowed + usize::from(slot.busy && !slot.background),
+                    )
+                });
+            // A self-wake can publish the next poll before the previous worker
+            // releases its slot. Do not count that as a second compute task.
+            let desired = (busy + ready).min(borrowed + active).min(self.capacity);
+            while state.workers.len() < desired {
+                if let Err(error) = self.start(&mut state) {
+                    drop(state);
+                    log::warn!(
+                        "compute worker startup failed: {error}; manual ticking remains available"
+                    );
+                    return;
+                }
+            }
+            self.shared.wake.notify_all();
+        }
         pub(super) fn shutdown(&self) -> Result<(), ExecutorBusy> {
+            self.stop(false)
+        }
+        fn stop(&self, dropping: bool) -> Result<(), ExecutorBusy> {
             let workers = {
-                let mut state = lock(&self.state);
-                if state.scopes != 0 || state.stopping {
+                let mut state = lock(&self.shared.state);
+                if !dropping
+                    && (state.scopes != 0
+                        || state.stopping
+                        || state
+                            .background
+                            .iter()
+                            .filter_map(|(_, source)| source.upgrade())
+                            .any(|s| s.active_count() != 0))
+                {
                     return Err(ExecutorBusy);
                 }
                 state.stopping = true;
+                self.shared.wake.notify_all();
                 std::mem::take(&mut state.workers)
             };
-            for worker in &workers {
-                lock(&worker.slot.state).stop = true;
-                worker.slot.wake.notify_one();
-            }
+            let current = std::thread::current().id();
             for worker in workers {
-                let _ = worker.thread.join();
+                if worker.thread.thread().id() != current {
+                    let _ = worker.thread.join();
+                }
             }
-            lock(&self.state).stopping = false;
+            if !dropping {
+                lock(&self.shared.state).stopping = false;
+            }
             Ok(())
         }
         pub(super) fn scope<'env, R>(
@@ -351,10 +543,16 @@ mod native {
             f: impl for<'scope> FnOnce(&'scope TaskScope<'scope, 'env>) -> R,
         ) -> R {
             let _lease = self.enter();
+            let demand = SystemDemand {
+                pool: self,
+                ready: AtomicBool::new(false),
+                listener: Mutex::new(None),
+            };
             let scope = TaskScope {
                 pool: self,
                 done: Arc::new(Done::default()),
                 marker: PhantomData,
+                systems_ready: &demand,
             };
             let _drain = Drain(&scope.done);
             let result = f(&scope);
@@ -395,7 +593,7 @@ mod native {
     }
     impl Drop for Pool {
         fn drop(&mut self) {
-            self.shutdown().expect("last pool owner has no scopes");
+            let _ = self.stop(true);
         }
     }
 
@@ -419,6 +617,7 @@ mod native {
         pool: &'env Pool,
         done: Arc<Done>,
         marker: PhantomData<(&'scope mut &'scope (), &'env mut &'env ())>,
+        systems_ready: &'scope SystemDemand<'env>,
     }
     struct Task<F, C> {
         work: Option<F>,
@@ -427,6 +626,16 @@ mod native {
         done: Arc<Done>,
     }
     impl<'scope, 'env> TaskScope<'scope, 'env> {
+        pub(crate) fn notify_available(&self, sender: Sender<RunnerEvent>) {
+            let mut state = lock(&self.pool.shared.state);
+            let id = state.next_listener;
+            state.next_listener += 1;
+            assert!(lock(&self.systems_ready.listener).replace(id).is_none());
+            state.listeners.push((id, sender));
+        }
+        pub(crate) fn set_systems_ready(&self, ready: bool) {
+            self.systems_ready.set(ready);
+        }
         pub(crate) fn try_spawn<F, C>(&'scope self, work: F, complete: C) -> bool
         where
             F: FnOnce() + Send + 'scope,
@@ -446,6 +655,36 @@ mod native {
                     finish: task_finish::<F, C>,
                 }
             })
+        }
+    }
+    struct SystemDemand<'a> {
+        pool: &'a Pool,
+        ready: AtomicBool,
+        listener: Mutex<Option<u64>>,
+    }
+    impl SystemDemand<'_> {
+        fn set(&self, ready: bool) {
+            let mut state = lock(&self.pool.shared.state);
+            if self.ready.swap(ready, Ordering::Relaxed) != ready {
+                if ready {
+                    state.system_demand += 1;
+                } else {
+                    state.system_demand -= 1;
+                }
+                self.pool.shared.wake.notify_all();
+            }
+        }
+    }
+    impl Drop for SystemDemand<'_> {
+        fn drop(&mut self) {
+            self.set(false);
+            let id = lock(&self.listener).take();
+            let sender = {
+                let mut state = lock(&self.pool.shared.state);
+                id.and_then(|id| state.listeners.iter().position(|(key, _)| *key == id))
+                    .map(|index| state.listeners.swap_remove(index))
+            };
+            drop(sender);
         }
     }
     unsafe fn task_run<F: FnOnce(), C>(data: *mut ()) {
@@ -472,7 +711,7 @@ mod native {
         #[test]
         fn startup_failure_is_reported_and_queries_fall_back_inline() {
             let mut pool = Pool::new(2);
-            pool.spawn = |_, _| Err(std::io::Error::other("unavailable"));
+            pool.spawn = |_, _, _| Err(std::io::Error::other("unavailable"));
             assert!(pool.prepare_run(true).is_err());
             let calls = AtomicUsize::new(0);
             pool.run(3, &|| {
@@ -526,6 +765,82 @@ mod tests {
         {
             std::panic::resume_unwind(panic);
         }
+    }
+
+    #[test]
+    fn coordinator_unwind_releases_queued_main_thread_requests() {
+        with_timeout(|| {
+            let executor = ParallelExecutor::new(1);
+            let (sent_tx, sent_rx) = mpsc::channel();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                executor.scope(|scope| {
+                    let (tx, rx) = mpsc::channel();
+                    scope.notify_available(tx.clone());
+                    assert!(scope.try_spawn(
+                        move || {
+                            let (answer_tx, answer_rx) = mpsc::channel::<()>();
+                            tx.send(
+                                crate::main_thread_dispatcher::RunnerEvent::MainThreadRequest(
+                                    Box::new(move || {
+                                        let _ = answer_tx.send(());
+                                    }),
+                                ),
+                            )
+                            .unwrap();
+                            sent_tx.send(()).unwrap();
+                            assert!(answer_rx.recv().is_err());
+                        },
+                        || {}
+                    ));
+                    sent_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    drop(rx);
+                    panic!("coordinator failed");
+                });
+            }));
+            assert!(result.is_err());
+            executor.shutdown_workers().unwrap();
+        });
+    }
+
+    #[test]
+    fn ready_system_takes_the_next_worker_before_background_compute() {
+        with_timeout(|| {
+            let executor = ParallelExecutor::new(1);
+            let compute =
+                crate::ComputePool::with_executor(crate::IoRuntime::new(), executor.clone());
+            let order = Arc::new(Mutex::new(Vec::new()));
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let first = compute.spawn(crate::Priority::Low, move |_| async move {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let recorded = order.clone();
+            let second = compute.spawn(crate::Priority::Critical, move |_| async move {
+                recorded.lock().unwrap().push("compute");
+            });
+            executor.scope(|scope| {
+                scope.set_systems_ready(true);
+                release_tx.send(()).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !scope.try_spawn(
+                    || {
+                        order.lock().unwrap().push("system");
+                    },
+                    || {},
+                ) {
+                    assert!(std::time::Instant::now() < deadline);
+                    thread::yield_now();
+                }
+                scope.set_systems_ready(false);
+            });
+            assert_eq!(first.recv_timeout(Duration::from_secs(5)), Some(()));
+            assert_eq!(second.recv_timeout(Duration::from_secs(5)), Some(()));
+            assert_eq!(*order.lock().unwrap(), ["system", "compute"]);
+            compute.quiesce(Duration::from_secs(1)).unwrap();
+            executor.shutdown_workers().unwrap();
+        });
     }
 
     #[test]

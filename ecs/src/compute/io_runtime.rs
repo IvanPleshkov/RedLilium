@@ -5,7 +5,7 @@ use redlilium_core::compute::{IoHandle, IoRunner};
 
 /// Runtime for spawning real async IO operations.
 ///
-/// Bridges the ECS custom executor (noop wakers, manual polling) with a
+/// Bridges the ECS compute executor with a
 /// real async runtime that can drive IO futures:
 /// - **Native**: tokio multi-thread runtime with 1 worker thread
 /// - **WASM**: `wasm_bindgen_futures::spawn_local`
@@ -99,23 +99,22 @@ impl IoRunner for IoRuntime {
     /// Spawns an async IO future on tokio's worker thread.
     ///
     /// Returns an [`IoHandle`] that can be `.await`ed or polled via
-    /// `try_recv()`. The handle works with the ECS noop waker — it
-    /// checks a channel internally.
+    /// `try_recv()`. Completion wakes the waiting compute task.
     ///
-    /// Results are available within the same frame.
+    /// IO progresses independently of frame execution.
     fn run<T, F>(&self, future: F) -> IoHandle<T>
     where
         T: Send + 'static,
         F: Future<Output = T> + Send + 'static,
     {
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, handle) = IoHandle::channel();
 
         self.inner.runtime().spawn(async move {
             let result = future.await;
             let _ = sender.send(result);
         });
 
-        IoHandle::new(receiver)
+        handle
     }
 }
 
@@ -129,14 +128,14 @@ impl IoRunner for IoRuntime {
         T: Send + 'static,
         F: Future<Output = T> + Send + 'static,
     {
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, handle) = IoHandle::channel();
 
         wasm_bindgen_futures::spawn_local(async move {
             let result = future.await;
             let _ = sender.send(result);
         });
 
-        IoHandle::new(receiver)
+        handle
     }
 }
 

@@ -62,7 +62,8 @@ fn shutdown_waits_for_destructors_on_every_tick_path() {
                 Err(ShutdownError::Timeout { remaining_tasks: 1 })
             ));
             release_tx.send(()).unwrap();
-            assert_eq!(thread.join().unwrap(), 1);
+            thread.join().unwrap();
+            runner.compute().quiesce(Duration::from_secs(1)).unwrap();
             assert!(handle.is_done());
             assert!(handle.is_cancelled());
             assert!(runner.compute().quiesce(Duration::ZERO).is_ok());
