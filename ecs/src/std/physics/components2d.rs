@@ -8,7 +8,7 @@
 use redlilium_core::math::Vec2;
 
 /// 2D collider shape.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ColliderShape2D {
     /// Circle defined by radius.
     Ball { radius: f32 },
@@ -19,7 +19,7 @@ pub enum ColliderShape2D {
 }
 
 /// 2D rigid body type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RigidBodyType2D {
     /// Affected by forces and gravity.
     #[default]
@@ -35,10 +35,10 @@ pub enum RigidBodyType2D {
 /// Describes a 2D rigid body's type and physical properties.
 ///
 /// Attach this component to an entity along with [`Collider2D`] and
-/// [`Transform`](crate::Transform), then call [`build_physics_world_2d`]
-/// to create the corresponding rapier physics objects.
+/// [`Transform`](crate::Transform), then run
+/// [`SyncPhysicsBodies2D`](super::physics2d::SyncPhysicsBodies2D).
+/// Sync validates settings before creating or updating Rapier objects.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
-#[skip_serialization]
 pub struct RigidBody2D {
     /// Body type.
     pub body_type: RigidBodyType2D,
@@ -108,7 +108,6 @@ impl Default for RigidBody2D {
 
 /// Describes a 2D collider's shape and material properties.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
-#[skip_serialization]
 pub struct Collider2D {
     /// Collider shape.
     pub shape: ColliderShape2D,
@@ -187,7 +186,7 @@ impl Default for Collider2D {
 // ---------------------------------------------------------------------------
 
 /// 2D joint type descriptor.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum JointType2D {
     /// Hinge joint (rotation around Z axis). In 2D the rotation axis is implicit.
     Revolute { anchor1: Vec2, anchor2: Vec2 },
@@ -195,6 +194,7 @@ pub enum JointType2D {
     Fixed { anchor1: Vec2, anchor2: Vec2 },
     /// Sliding joint along an axis.
     Prismatic {
+        /// Finite nonzero direction; normalized when applied to Rapier.
         axis: Vec2,
         anchor1: Vec2,
         anchor2: Vec2,
@@ -210,7 +210,6 @@ pub enum JointType2D {
 /// Entity references are automatically remapped during prefab instantiation
 /// via the `#[derive(Component)]` macro.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
-#[skip_serialization]
 pub struct ImpulseJoint2D {
     /// First body entity.
     pub body1: crate::Entity,
@@ -325,6 +324,13 @@ impl Collider2D {
     }
 }
 
+// The descriptor is validated before conversion; rescaling handles very small
+// and very large finite directions without changing their orientation.
+fn joint_axis(axis: &redlilium_core::math::Vec2) -> Vector {
+    let n = (axis / axis.amax()).normalize();
+    Vector::new(n.x as Real, n.y as Real)
+}
+
 impl ImpulseJoint2D {
     /// Convert this descriptor into a rapier `GenericJoint`.
     pub(crate) fn to_rapier_joint(&self) -> GenericJoint {
@@ -343,7 +349,7 @@ impl ImpulseJoint2D {
                 axis,
                 anchor1,
                 anchor2,
-            } => PrismaticJointBuilder::new(Vector::new(axis.x as Real, axis.y as Real))
+            } => PrismaticJointBuilder::new(joint_axis(axis))
                 .local_anchor1(Vector::new(anchor1.x as Real, anchor1.y as Real))
                 .local_anchor2(Vector::new(anchor2.x as Real, anchor2.y as Real))
                 .into(),
@@ -362,10 +368,12 @@ impl ImpulseJoint2D {
 /// [`RigidBody2DHandle`] component on the entity.
 ///
 /// Call this once after spawning all physics entities in a scene.
+/// Returns [`SystemError::InvalidConfiguration`](crate::SystemError::InvalidConfiguration)
+/// for invalid descriptors or transforms, before replacing the physics resource.
 #[deprecated(
     note = "Use `SyncPhysicsBodies2D` exclusive system instead, which automatically tracks spawns and despawns."
 )]
-pub fn build_physics_world_2d(world: &mut crate::World) {
+pub fn build_physics_world_2d(world: &mut crate::World) -> Result<(), crate::SystemError> {
     // Phase 1: collect entity data (clone non-Copy components, copy the rest)
     let entities: Vec<_> = world
         .iter_entities()
@@ -376,6 +384,16 @@ pub fn build_physics_world_2d(world: &mut crate::World) {
             Some((entity, body, collider, transform))
         })
         .collect();
+
+    for (entity, body, collider, transform) in &entities {
+        body.validate(*entity)?;
+        collider.validate(*entity)?;
+        super::validation::transform(
+            *entity,
+            transform,
+            world.get::<crate::Parent>(*entity).is_some(),
+        )?;
+    }
 
     // Phase 2: build rapier world
     let mut physics = PhysicsWorld2D::default();
@@ -400,6 +418,7 @@ pub fn build_physics_world_2d(world: &mut crate::World) {
     for (entity, handle) in handle_pairs {
         let _ = world.insert(entity, RigidBody2DHandle(handle));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -474,7 +493,7 @@ mod tests {
         let _ = world.insert(g, Collider2D::cuboid(20.0, 0.1));
         let _ = world.insert(g, crate::Transform::IDENTITY);
 
-        build_physics_world_2d(&mut world);
+        build_physics_world_2d(&mut world).unwrap();
 
         assert!(world.get::<RigidBody2DHandle>(e).is_some());
         assert!(world.get::<RigidBody2DHandle>(g).is_some());

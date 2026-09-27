@@ -107,6 +107,47 @@ change. Other bodies and joints remain intact. If an endpoint is unavailable,
 the old joint is removed and creation waits for valid endpoints. Physics-world
 caches retain the last applied descriptors to avoid rebuilding unchanged objects.
 
+### Validation
+
+Both regular and exclusive sync systems validate descriptors before changing
+Rapier objects. Invalid settings return `SystemError::InvalidConfiguration`
+with the entity and offending parameter. The failing sync invocation leaves
+its previously applied bodies/colliders or joints intact; correct the descriptor
+and run sync again. This is not a transaction across the whole schedule.
+
+All numeric settings must be finite. Additional constraints are:
+
+| Setting | Accepted values |
+|---|---|
+| Linear/angular damping, friction, density | Nonnegative |
+| Restitution | From 0 to 1 inclusive |
+| Gravity scale | Any finite value, including negative |
+| Radius, cuboid half extents, cylinder half height | Positive |
+| Capsule half height | Nonnegative (zero gives a sphere/circle) |
+| Joint anchors | Finite coordinates |
+| Joint axis | Finite, nonzero direction; normalized during conversion |
+| Joint endpoints | Different entities; unavailable bodies remain pending |
+
+Constructing, editing or deserializing descriptors does not itself validate
+them. Validation happens at sync, before creation or application of edits.
+The deprecated `build_physics_world_*` helpers also return a validation `Result`
+before replacing the physics resource. Direct Rapier access bypasses these checks.
+
+## Serialization
+
+`RigidBody2D/3D`, `Collider2D/3D` and `ImpulseJoint2D/3D` support the standard
+scene/world and prefab serialization paths, including every shape and joint
+variant. Call `register_std_components` in the destination world before loading.
+Joint endpoint references are remapped to the newly created entities, including
+when instantiating the same prefab multiple times.
+
+Rapier handles and the physics world are runtime state and are not serialized.
+After loading, run body sync followed by joint sync to rebuild them from the
+descriptors and transforms. This saves scene configuration, not a simulation
+checkpoint: runtime velocities, contacts and solver state are not preserved.
+Bodies loaded as children of a prefab root must be detached before physics sync,
+as required by the root-body contract above.
+
 ## 3D Physics
 
 ### Setup

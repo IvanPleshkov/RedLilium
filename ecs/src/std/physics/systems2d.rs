@@ -203,19 +203,18 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
             .iter_entities()
             .filter(|e| !world.is_excluded_from_game(*e))
         {
-            if world
-                .get::<super::components2d::RigidBody2D>(entity)
-                .is_some()
-                && world
-                    .get::<super::components2d::Collider2D>(entity)
-                    .is_some()
-                && let Some(t) = world.get::<crate::Transform>(entity)
-            {
-                super::validation::transform(
-                    entity,
-                    t,
-                    world.get::<crate::Parent>(entity).is_some(),
-                )?;
+            if let Some(body) = world.get::<super::components2d::RigidBody2D>(entity) {
+                body.validate(entity)?;
+                if let Some(collider) = world.get::<super::components2d::Collider2D>(entity) {
+                    collider.validate(entity)?;
+                    if let Some(t) = world.get::<crate::Transform>(entity) {
+                        super::validation::transform(
+                            entity,
+                            t,
+                            world.get::<crate::Parent>(entity).is_some(),
+                        )?;
+                    }
+                }
             }
         }
 
@@ -325,6 +324,15 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints2D {
 
         if !world.has_resource::<PhysicsWorld2D>() {
             return Ok(());
+        }
+
+        for entity in world
+            .iter_entities()
+            .filter(|e| !world.is_excluded_from_game(*e))
+        {
+            if let Some(joint) = world.get::<super::components2d::ImpulseJoint2D>(entity) {
+                joint.validate(entity)?;
+            }
         }
 
         // Phase 1: Find stale joints (entity dead, disabled, or lost ImpulseJoint2D component)
@@ -449,12 +457,19 @@ impl crate::System for SyncPhysicsBodiesSystem2D {
                 crate::Read<crate::Parent>,
             )>()
             .execute(|(mut physics, bodies, colliders, transforms, parents)| {
-                for (idx, _) in bodies.iter() {
-                    if colliders.get(idx).is_some()
-                        && let Some(t) = transforms.get(idx)
-                        && let Some(entity) = ctx.raw_world().entity_at_index(idx)
-                    {
-                        super::validation::transform(entity, t, parents.get(idx).is_some())?;
+                for (idx, body) in bodies.iter() {
+                    if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
+                        body.validate(entity)?;
+                        if let Some(collider) = colliders.get(idx) {
+                            collider.validate(entity)?;
+                            if let Some(t) = transforms.get(idx) {
+                                super::validation::transform(
+                                    entity,
+                                    t,
+                                    parents.get(idx).is_some(),
+                                )?;
+                            }
+                        }
                     }
                 }
                 // Remove stale: entity dead (full-identity check, so a recycled
@@ -558,6 +573,11 @@ impl crate::System for SyncPhysicsJointsSystem2D {
                 crate::Read<super::components2d::ImpulseJoint2D>,
             )>()
             .execute(|(mut physics, joints)| {
+                for (idx, joint) in joints.iter() {
+                    if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
+                        joint.validate(entity)?;
+                    }
+                }
                 // Remove stale: entity dead (full-identity check), disabled, or
                 // lost the ImpulseJoint2D component.
                 let mut stale: Vec<crate::Entity> = physics
@@ -605,8 +625,8 @@ impl crate::System for SyncPhysicsJointsSystem2D {
                     }
                 }
 
-                (new_pairs, stale)
-            });
+                Ok::<_, crate::SystemError>((new_pairs, stale))
+            })?;
 
         if !new_entities.is_empty() || !stale_entities.is_empty() {
             ctx.commands(move |world| {

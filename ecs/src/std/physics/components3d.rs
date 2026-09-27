@@ -37,8 +37,9 @@ pub enum RigidBodyType {
 /// Describes a 3D rigid body's type and physical properties.
 ///
 /// Attach this component to an entity along with [`Collider3D`] and
-/// [`Transform`](crate::Transform), then call [`build_physics_world_3d`]
-/// to create the corresponding rapier physics objects.
+/// [`Transform`](crate::Transform), then run
+/// [`SyncPhysicsBodies3D`](super::physics3d::SyncPhysicsBodies3D).
+/// Sync validates settings before creating or updating Rapier objects.
 // Serialized: scenes/prefabs must carry physics authoring data (#101/#106).
 // The rapier handle components stay unserialized — SyncPhysicsBodies3D
 // rebuilds live bodies from these descriptors after a restore.
@@ -201,12 +202,13 @@ impl Default for Collider3D {
 // ---------------------------------------------------------------------------
 
 /// 3D joint type descriptor.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum JointType3D {
     /// Ball-and-socket joint with anchor points on each body.
     Spherical { anchor1: Vec3, anchor2: Vec3 },
     /// Hinge joint around an axis.
     Revolute {
+        /// Finite nonzero direction; normalized when applied to Rapier.
         axis: Vec3,
         anchor1: Vec3,
         anchor2: Vec3,
@@ -215,6 +217,7 @@ pub enum JointType3D {
     Fixed { anchor1: Vec3, anchor2: Vec3 },
     /// Sliding joint along an axis.
     Prismatic {
+        /// Finite nonzero direction; normalized when applied to Rapier.
         axis: Vec3,
         anchor1: Vec3,
         anchor2: Vec3,
@@ -241,7 +244,6 @@ pub enum JointType3D {
 /// ));
 /// ```
 #[derive(Debug, Clone, PartialEq, crate::Component)]
-#[skip_serialization]
 pub struct ImpulseJoint3D {
     /// First body entity.
     pub body1: crate::Entity,
@@ -321,6 +323,13 @@ impl ImpulseJoint3D {
 use super::rapier3d::prelude::*;
 use super::world3d::{PhysicsWorld3D, RigidBody3DHandle};
 
+// The descriptor is validated before conversion; rescaling handles very small
+// and very large finite directions without changing their orientation.
+fn joint_axis(axis: &redlilium_core::math::Vec3) -> Vector {
+    let n = (axis / axis.amax()).normalize();
+    Vector::new(n.x as Real, n.y as Real, n.z as Real)
+}
+
 impl ImpulseJoint3D {
     /// Convert this descriptor into a rapier `GenericJoint`.
     pub(crate) fn to_rapier_joint(&self) -> GenericJoint {
@@ -343,22 +352,18 @@ impl ImpulseJoint3D {
                 axis,
                 anchor1,
                 anchor2,
-            } => RevoluteJointBuilder::new(Vector::new(
-                axis.x as Real,
-                axis.y as Real,
-                axis.z as Real,
-            ))
-            .local_anchor1(Vector::new(
-                anchor1.x as Real,
-                anchor1.y as Real,
-                anchor1.z as Real,
-            ))
-            .local_anchor2(Vector::new(
-                anchor2.x as Real,
-                anchor2.y as Real,
-                anchor2.z as Real,
-            ))
-            .into(),
+            } => RevoluteJointBuilder::new(joint_axis(axis))
+                .local_anchor1(Vector::new(
+                    anchor1.x as Real,
+                    anchor1.y as Real,
+                    anchor1.z as Real,
+                ))
+                .local_anchor2(Vector::new(
+                    anchor2.x as Real,
+                    anchor2.y as Real,
+                    anchor2.z as Real,
+                ))
+                .into(),
             JointType3D::Fixed { anchor1, anchor2 } => FixedJointBuilder::new()
                 .local_anchor1(Vector::new(
                     anchor1.x as Real,
@@ -375,22 +380,18 @@ impl ImpulseJoint3D {
                 axis,
                 anchor1,
                 anchor2,
-            } => PrismaticJointBuilder::new(Vector::new(
-                axis.x as Real,
-                axis.y as Real,
-                axis.z as Real,
-            ))
-            .local_anchor1(Vector::new(
-                anchor1.x as Real,
-                anchor1.y as Real,
-                anchor1.z as Real,
-            ))
-            .local_anchor2(Vector::new(
-                anchor2.x as Real,
-                anchor2.y as Real,
-                anchor2.z as Real,
-            ))
-            .into(),
+            } => PrismaticJointBuilder::new(joint_axis(axis))
+                .local_anchor1(Vector::new(
+                    anchor1.x as Real,
+                    anchor1.y as Real,
+                    anchor1.z as Real,
+                ))
+                .local_anchor2(Vector::new(
+                    anchor2.x as Real,
+                    anchor2.y as Real,
+                    anchor2.z as Real,
+                ))
+                .into(),
         }
     }
 }
@@ -459,6 +460,8 @@ impl Collider3D {
 /// [`RigidBody3DHandle`] component on the entity.
 ///
 /// Call this once after spawning all physics entities in a scene.
+/// Returns [`SystemError::InvalidConfiguration`](crate::SystemError::InvalidConfiguration)
+/// for invalid descriptors or transforms, before replacing the physics resource.
 ///
 /// # Example
 ///
@@ -469,13 +472,13 @@ impl Collider3D {
 /// world.insert(e, Transform::from_translation(Vec3::new(0.0, 10.0, 0.0)));
 /// world.insert(e, GlobalTransform::IDENTITY);
 ///
-/// build_physics_world_3d(world);
+/// build_physics_world_3d(world).unwrap();
 /// // Now the entity has a RigidBody3DHandle and a PhysicsWorld3D resource exists.
 /// ```
 #[deprecated(
     note = "Use `SyncPhysicsBodies3D` exclusive system instead, which automatically tracks spawns and despawns."
 )]
-pub fn build_physics_world_3d(world: &mut crate::World) {
+pub fn build_physics_world_3d(world: &mut crate::World) -> Result<(), crate::SystemError> {
     // Phase 1: collect entity data (clone non-Copy components, copy the rest)
     let entities: Vec<_> = world
         .iter_entities()
@@ -486,6 +489,16 @@ pub fn build_physics_world_3d(world: &mut crate::World) {
             Some((entity, body, collider, transform))
         })
         .collect();
+
+    for (entity, body, collider, transform) in &entities {
+        body.validate(*entity)?;
+        collider.validate(*entity)?;
+        super::validation::transform(
+            *entity,
+            transform,
+            world.get::<crate::Parent>(*entity).is_some(),
+        )?;
+    }
 
     // Phase 2: build rapier world from descriptors
     let mut physics = PhysicsWorld3D::default();
@@ -510,6 +523,7 @@ pub fn build_physics_world_3d(world: &mut crate::World) {
     for (entity, handle) in handle_pairs {
         let _ = world.insert(entity, RigidBody3DHandle(handle));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -603,7 +617,7 @@ mod tests {
         let _ = world.insert(g, Collider3D::cuboid(20.0, 0.1, 20.0));
         let _ = world.insert(g, crate::Transform::IDENTITY);
 
-        build_physics_world_3d(&mut world);
+        build_physics_world_3d(&mut world).unwrap();
 
         // Check that handles were inserted
         assert!(world.get::<RigidBody3DHandle>(e).is_some());
