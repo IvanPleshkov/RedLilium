@@ -105,6 +105,7 @@ impl World {
     ///     println!("Entity {entity} gained {hp:?}");
     /// });
     /// ```
+    #[track_caller]
     pub fn observe_add<T: 'static>(
         &mut self,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
@@ -117,6 +118,7 @@ impl World {
     /// component `T` (both first-time additions and replacements).
     ///
     /// The new value is readable via `world.get::<T>(entity)`.
+    #[track_caller]
     pub fn observe_insert<T: 'static>(
         &mut self,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
@@ -131,6 +133,7 @@ impl World {
     /// **Note**: By the time the observer runs, the component has already
     /// been removed. For cleanup that requires reading the component value,
     /// use [`on_remove`](World::on_remove) hooks instead.
+    #[track_caller]
     pub fn observe_remove<T: 'static>(
         &mut self,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
@@ -145,18 +148,12 @@ impl World {
     /// cascading: observer handlers that perform mutations will queue
     /// new triggers, which are processed in subsequent iterations.
     ///
-    /// # Panics
-    ///
-    /// Panics if cascading exceeds 100 iterations.
-    pub(crate) fn flush_observers(&mut self) {
-        if !self.observers.has_pending() {
-            return;
-        }
-        let world_ptr: *mut World = self;
-        // SAFETY: `world_ptr` is derived from the exclusive `&mut self`; no
-        // other borrow of the world exists, and `self` is not touched again
-        // until flush returns.
-        unsafe { crate::observer::flush(world_ptr) };
+    /// Returns all callback panics and cascade-limit errors. After 100 waves,
+    /// pending triggers are discarded. Registrations and partial mutations
+    /// remain. Nested calls leave work for the active outer flush.
+    #[must_use = "inspect deferred observer failures"]
+    pub(crate) fn flush_observers(&mut self) -> Vec<crate::ObserverError> {
+        crate::observer::flush(self)
     }
 
     // ---- Reactive trigger buffers ----

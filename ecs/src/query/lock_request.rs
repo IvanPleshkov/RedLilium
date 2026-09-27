@@ -121,7 +121,7 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
                 });
 
                 // SAFETY: The closure captures `&'a World` and `F` which live for
-                // the duration of `std::thread::scope` in the runner. The main
+                // the duration of the runner's borrowed task scope. The main
                 // thread executes this closure within the same scope, so all
                 // captured references are valid at the time of execution. The
                 // closure is consumed (FnOnce) before the scope exits.

@@ -12,9 +12,14 @@ use crate::world::World;
 /// runner via [`std::panic::catch_unwind`].
 #[derive(Debug, Clone)]
 pub enum SystemError {
-    /// One command-application batch failed. Every command in the batch was
-    /// attempted; errors are listed in application order. Mutations persist.
-    DeferredCommandsFailed { errors: Vec<crate::CommandError> },
+    /// The system executor could not accept a run (startup/shutdown/reentry).
+    ExecutorUnavailable { message: String },
+    /// Errors from applying deferred commands and flushing observers.
+    /// Each list follows execution order. Partial mutations are retained.
+    DeferredEffectsFailed {
+        commands: Vec<crate::CommandError>,
+        observers: Vec<crate::ObserverError>,
+    },
     /// The system panicked during execution.
     ///
     /// Contains the system name and panic message.
@@ -29,9 +34,23 @@ pub enum SystemError {
 impl fmt::Display for SystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SystemError::DeferredCommandsFailed { errors } => {
-                write!(f, "{} deferred command(s) failed", errors.len())?;
-                for error in errors {
+            SystemError::ExecutorUnavailable { message } => {
+                write!(f, "system executor unavailable: {message}")
+            }
+            SystemError::DeferredEffectsFailed {
+                commands,
+                observers,
+            } => {
+                write!(
+                    f,
+                    "{} deferred command(s) and {} observer error(s)",
+                    commands.len(),
+                    observers.len()
+                )?;
+                for error in commands {
+                    write!(f, "; {error}")?;
+                }
+                for error in observers {
                     write!(f, "; {error}")?;
                 }
                 Ok(())
@@ -44,6 +63,22 @@ impl fmt::Display for SystemError {
 }
 
 impl std::error::Error for SystemError {}
+
+impl SystemError {
+    pub(crate) fn deferred_effects(
+        commands: Vec<crate::CommandError>,
+        observers: Vec<crate::ObserverError>,
+    ) -> Result<(), Self> {
+        if commands.is_empty() && observers.is_empty() {
+            Ok(())
+        } else {
+            Err(Self::DeferredEffectsFailed {
+                commands,
+                observers,
+            })
+        }
+    }
+}
 
 /// Extracts a human-readable message from a panic payload.
 ///
@@ -431,7 +466,7 @@ pub fn run_exclusive_system_blocking<S: ExclusiveSystem>(
 /// 2. Applies all deferred commands to the world
 /// 3. Flushes pending observers (may cascade)
 ///
-/// Command panics are collected in [`SystemError::DeferredCommandsFailed`].
+/// Command and observer errors are collected in [`SystemError::DeferredEffectsFailed`].
 /// All commands are attempted and observers are flushed before returning that
 /// error. Partial mutations are retained. A failed system run still returns
 /// immediately without applying its commands.
@@ -448,13 +483,10 @@ pub fn run_system_once<S: System>(
         let ctx = SystemContext::new(world, compute, io, &commands);
         system.run(&ctx)?
     };
-    let errors = commands.apply(world);
-    world.flush_observers();
-    if errors.is_empty() {
-        Ok(result)
-    } else {
-        Err(SystemError::DeferredCommandsFailed { errors })
-    }
+    let commands = commands.apply(world);
+    let observers = world.flush_observers();
+    SystemError::deferred_effects(commands, observers)?;
+    Ok(result)
 }
 
 /// Runs an exclusive system once, flushing observers afterward.
@@ -467,7 +499,7 @@ pub fn run_exclusive_system_once<S: ExclusiveSystem>(
     world: &mut World,
 ) -> Result<S::Result, SystemError> {
     let result = system.run(world)?;
-    world.flush_observers();
+    SystemError::deferred_effects(Vec::new(), world.flush_observers())?;
     Ok(result)
 }
 

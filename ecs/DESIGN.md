@@ -4,7 +4,7 @@
 
 Existing ECS solutions treat async compute as an afterthought — something bolted on through external task pools. In a real game engine, CPU cores sit idle while the slowest ECS system in a dependency stage finishes. Background work (navmesh rebuilds, pathfinding, LOD calculations, asset processing) has no way to fill those gaps.
 
-RedLilium ECS combines synchronous systems with cooperatively polled async compute. Native systems can run concurrently, and parallel entity queries use reusable workers owned by their world. A unified work-stealing scheduler is a longer-term goal; it is not the current execution model.
+RedLilium ECS combines synchronous systems with cooperatively polled async compute. Native systems and parallel entity queries share reusable workers through an explicitly owned executor. Sharing those workers with compute is a longer-term goal; it is not the current execution model.
 
 ## Goals
 
@@ -66,35 +66,55 @@ The key architectural decision: **ECS systems are synchronous functions that acc
 
 ### Execution and parallel queries
 
-The current executors have separate responsibilities:
+Native systems and parallel queries share a `ParallelExecutor`. It owns a fixed maximum number of persistent workers, started lazily; clones share the same pool. There is no process-global executor. `ParallelExecutor::new(worker_threads)` counts background CPU workers, **excluding** coordinating/calling threads and IO threads; zero means one. The default reserves one available CPU for the caller, with at least one worker.
 
-- `EcsRunnerMultiThread` starts scoped OS threads for ready systems, bounded by the runner's `num_threads`.
-- `ComputePool` stores futures and polls them through `tick` / `block_on`; it does not own persistent worker threads.
-- Each `World` owns a `ParallelExecutor` for synchronous `par_for_each` calls. Its capacity defaults to `available_parallelism`, including the calling thread. Native helpers start lazily and are reused across calls and systems in that world.
+```rust
+let executor = ParallelExecutor::new(4);
+let runner = EcsRunner::multi_thread_with_executor(executor.clone());
+let mut world = World::with_parallel_executor(executor.clone());
+```
 
-`QueryGuard::par_for_each`, `LockRequest::par_for_each`, and `par_for_each(...)` systems all use the world's executor. Low-level `ForEachAccess::run_par_for_each` / `run_par_for_each_with` take an explicit `&ParallelExecutor`. A standalone executor can be created with `ParallelExecutor::new(num_threads)`.
+`EcsRunner::multi_thread(n)` creates its own pool with at most `n` workers. When run, a runner attaches its executor to the world, so all query entry points use the same workers, including queries in exclusive systems. Attaching a different executor joins the previous pool first and fails if that pool has active scopes. `World::new()` remains a standalone world with a lazy default executor. Sharing handles explicitly avoids pool switches when several runners drive the same worlds.
 
-`ParConfig::num_threads` limits participants **per call**, including its caller, capped by the executor's capacity. `None` uses that capacity; zero means one. `min_batch_size` defaults to 64, and zero means one. Queries with fewer than 128 candidate entities, or insufficient batches for two participants, run sequentially. Other calls distribute disjoint batches through an atomic counter, with no scheduling lock per entity.
+The coordinator maintains a ready queue and submits systems only to available workers. Completion releases the worker before notifying the coordinator and unlocks DAG dependents. A ready exclusive system stops new admissions; already running systems finish before the exclusive system receives `&mut World`. Conditions, virtual nodes, result reuse, change ticks, command flushes, and diagnostics retain their roles. Workers and coordinator cannot recursively invoke a runner on the same executor: that reports `SystemError::ExecutorUnavailable` instead of waiting for themselves. Systems must express scheduling dependencies through the DAG, not synchronously wait for another queued system to start.
 
-Only idle workers receive jobs. Busy workers are skipped and the caller always participates, so nested or concurrent calls can run with fewer participants. A callback must not wait for sibling callbacks to run concurrently. The executor does not poll unrelated compute tasks or steal systems while component locks are held. Nested queries still have to obey component/resource borrow rules.
+`QueryGuard::par_for_each`, `LockRequest::par_for_each`, and parallel function systems use the world's executor. Low-level `ForEachAccess::run_par_for_each*` take an explicit `&ParallelExecutor`. Queries claim disjoint batches through an atomic counter, with no scheduling lock per entity. They submit helpers only to idle workers and always execute work on the caller; saturated nested queries therefore finish inline. Waiting queries never steal unrelated systems or compute jobs while holding component locks. Query callbacks must not wait for sibling callbacks to run concurrently.
 
-All submitted borrowed jobs finish before the call returns, including when a callback panics. A panic is propagated on the caller after draining those jobs; workers remain available. Writes performed before a panic are not rolled back. Worker startup failure reduces parallelism instead of losing work.
+`ParConfig::num_threads` limits participants per query call, including the caller. An external caller can use up to `worker_threads + 1` participants; a caller already running on a worker can use only the remaining idle workers as helpers. `None` uses executor capacity; zero means one. `min_batch_size` defaults to 64 and normalizes zero to one. Fewer than 128 candidate entities, or insufficient batches for two participants, use sequential iteration. All submitted work drains before return or panic propagation.
 
-A world creates at most `capacity - 1` helper threads. Calling system threads are additional participants: this is **not a shared CPU budget** across the runner, compute, and multiple worlds. Integrating those executors is separate scheduler work.
+The coordinating thread services main-thread resource requests throughout a parallel phase. On coordinator unwind, its request receiver is dropped before the borrowed task scope drains, releasing waiting workers' result channels. System-job completion is published even if system setup or result reuse panics. Persistent threads do not imply persistent borrows: every phase drains before world mutation resumes. Per-system dispatch allocates one job; query helpers borrow one shared batch closure without allocating a job per entity or per helper.
 
-For hot reload, `World::purge_source` stops and joins all query workers before removing source registrations; dropping the world also joins them. This runs worker TLS destructors while game code is still mapped. Queries after a purge lazily start fresh workers. Lazy startup uses the spawn entry point captured when the executor was constructed, so a guest query cannot relocate the worker loop into its own image. An executor must be dropped before the image that constructed it is unloaded; standalone executors running guest callbacks must also be dropped before unloading that guest.
+`ComputePool` remains a cooperatively polled future queue. It does not use these workers yet; the coordinator and explicit `block_on` calls drive it. This pool bounds system/query workers across all sharing worlds and runners, not arbitrary external callers or separate executor instances. Compute integration is a later stage. A single-thread runner executes systems on its caller and shares its executor across their parallel queries; `single_thread_with_executor` permits explicit sharing. It starts no workers until a query needs helpers.
 
-On WASM, the same query API runs sequentially and creates no workers.
+Before hot reload, stop guest producers, quiesce compute, then call `runner.prepare_reload()`. It joins workers (including TLS destruction) and drops cached system results before guest code is unmapped. Standalone/shared pools outside that runner must also be stopped with `shutdown_workers()`; all runners retaining guest results need preparation. Shutdown rejects active scopes with `ExecutorBusy`, and admissions are rejected while workers are joining. Later execution can restart workers lazily. The editor reload path aborts the swap if worker shutdown fails.
+
+Dropping a world stops workers only when it owns the last executor handle; a pool shared with a runner survives that world. `World::purge_source` joins the world's executor before removing registrations and rejects an active shared executor. The constructor's image owns the stored worker-start function pointer and must outlive the pool. Pending guest code and TLS must be drained before unloading that guest.
+
+On WASM, queries run sequentially and create no workers; systems use the single-thread runner.
 
 ### Deferred command failures
 
 Commands from `SystemContext` are collected by the runner and applied before exclusive systems and at the end of a run. Each flush attempts every command in queue order. A panicking command produces a `CommandError` containing its message and enqueue location (`file`, `line`, `column`); later commands and systems continue. Changes made before a panic remain in the world. Command application is not a transaction, and subsequent code sees that partial state.
 
-The runners report one `SystemError::DeferredCommandsFailed { errors }` per failed flush through `run` / `RunResult.errors`. `run_system_once` also collects all command errors, flushes observers, and returns this variant instead of the system result. Errors from system execution remain separate. Observer callbacks invoked later by `flush_observers` have their own execution path and are outside this command boundary.
+The runners report one `SystemError::DeferredEffectsFailed { commands, observers }` per failed flush through `run` / `RunResult.errors`. `run_system_once` also collects all command errors, flushes observers, and returns this variant instead of the system result. Errors from system execution remain separate. At the end of the run, both command and observer errors are retained in the report; pre-exclusive command flushes have an empty observer list.
 
 `World::apply_commands()` applies the separate `CommandBuffer` resource and returns `Vec<CommandError>`. `CommandBuffer::apply` and `CommandCollector::apply` provide the same checked batch application for standalone queues. Commands queued during application wait for the next flush; they do not extend the current batch. `drain()` returns `DeferredCommand` values, each consumed with `apply(&mut world) -> Result<(), CommandError>`.
 
 The panic boundary is inside the generic wrapper created when a command is queued, before erasing its closure type. This keeps guest-command panic capture inside the originating image, following the system panic boundary used for hot reload. Reports own their strings and can outlive that image; pending commands must still be applied or dropped before unloading their module. Queue-location tracking adds a captured location pointer; string copies and error-vector allocation occur only when a command fails.
+
+### Deferred observer failures
+
+Each deferred observer invocation has an in-image panic boundary installed by `observe_add` / `observe_insert` / `observe_remove`. `ObserverError::Panicked` identifies the registration source, trigger type, entity, panic message, and registration location. Its strings are owned, so reports may outlive a game module. Other handlers and triggers continue after a callback failure, and partial mutations remain.
+
+During a flush, a guard owns the detached handler map and restores it on every exit, including unwinding. New registrations join the original handlers at the end of each wave, preserving registration order; they start receiving events in the next wave. A nested flush leaves pending work to the active outer flush, which owns the cascade budget and reports its errors.
+
+One flush processes at most 100 waves. If work remains afterward, it returns `ObserverError::CascadeLimitExceeded { iterations, discarded_triggers }` and discards the remaining queued triggers. Completing exactly on wave 100 succeeds. Registrations survive the limit, and later newly generated triggers work normally; a stopped cascade is not replayed automatically next frame.
+
+Runners and both `run_system_once` helpers report observer failures through `SystemError::DeferredEffectsFailed`. `run_system_once` retains command errors and observer errors together. Immediate component lifecycle hooks (`on_add`, `on_insert`, `on_replace`, `on_remove`) remain a separate mechanism from deferred observers.
+
+Callbacks execute under their registration source, so observers/resources registered from a guest callback are attributed to that guest even if it subsequently panics. The previous source is restored after the call. `purge_source` is rejected before mutation while a flush is active; source unloading must wait until callbacks finish. Outside a flush, purging removes the source's handlers and pending triggers whose keys have no surviving handlers, preventing delivery of old triggers to replacement registrations.
+
+The hot path keeps one boxed callback and adds a registration-location pointer plus a panic boundary per invocation. Restoring the handler map uses safe disjoint borrows, without cloning all callbacks or locking each entity. Error text and report storage are allocated only on failure.
 
 ### Priority Levels
 
@@ -106,7 +126,7 @@ The panic boundary is inside the generic wrapper created when a command is queue
 
 ### Multiple Worlds
 
-Each World is independent — its own entities, components, resources, and system schedule. Each world owns its query executor; a runner can drive multiple worlds.
+Each World is independent — its own entities, components, resources, and system schedule. Worlds and runners can share an explicitly owned worker pool.
 
 Use cases:
 - **Game + Editor**: Separate simulation from editor state
@@ -272,7 +292,7 @@ All systems complete within a single `schedule.run()` call. There is no cross-fr
 
 2. runner.run(&mut world, &systems);   ← systems execute by dependency order
    // Stage 1: [physics, AI, animation] ← parallel, non-conflicting
-   //   idle threads tick compute pool
+   //   coordinator ticks compute pool; block_on callers also drive compute
    // Stage 2: [transform_propagation]  ← depends on physics
    // Stage 3: [camera_update, culling] ← depends on transforms
 
@@ -285,8 +305,8 @@ All systems complete within a single `schedule.run()` call. There is no cross-fr
 
 | | Native | Web (WASM) |
 |---|---|---|
-| **Parallel queries** | Reusable world-owned workers + caller | Sequential |
-| **Systems** | Scoped threads, bounded by the runner | Sequential on main thread |
+| **Parallel queries** | Shared workers + caller | Sequential |
+| **Systems** | Persistent shared workers with a fixed limit | Sequential on main thread |
 | **Async compute** | Cooperatively polled futures | Cooperative on main thread |
 | **IO** | tokio (separate thread) | wasm-bindgen-futures / fetch API |
 | **API** | Same | Same |

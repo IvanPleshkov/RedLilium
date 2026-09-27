@@ -495,7 +495,7 @@ impl<'a> SystemContext<'a> {
     ///
     /// Commands receive `&mut World` and can perform structural changes
     /// like spawning, despawning, and inserting components. Command panics
-    /// are reported separately through [`SystemError::DeferredCommandsFailed`](crate::SystemError::DeferredCommandsFailed);
+    /// are reported separately through [`SystemError::DeferredEffectsFailed`](crate::SystemError::DeferredEffectsFailed);
     /// later commands continue and partial mutations are retained.
     ///
     /// # Panics

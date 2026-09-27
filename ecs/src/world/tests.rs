@@ -2396,7 +2396,7 @@ fn parallel_workers_drop_tls_on_purge_and_world_drop() {
     let destroyed = Arc::new(AtomicUsize::new(0));
     let caller = std::thread::current().id();
     let mut world = World::new();
-    world.parallel_executor = crate::ParallelExecutor::new(2);
+    world.parallel_executor = crate::ParallelExecutor::new(1);
     let install_tls = |world: &World| {
         let started = Barrier::new(2);
         world.parallel_executor().run(2, || {

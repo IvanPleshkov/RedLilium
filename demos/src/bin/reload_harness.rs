@@ -160,6 +160,9 @@ fn run_panic_child(path: &str, engine: &EngineContext) -> ! {
     assert!(!std::thread::panicking());
     drop(world);
     drop(schedules);
+    runner
+        .prepare_reload()
+        .expect("workers quiescent before unload");
     drop(module3);
     let _ = std::fs::remove_file(&path3);
     println!("panic-child: contained (in-image shield active)");

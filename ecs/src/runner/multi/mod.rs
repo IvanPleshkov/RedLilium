@@ -1,6 +1,6 @@
 use crate::sync::Mutex;
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,8 @@ type PrevResults = Vec<Option<Box<dyn Any + Send + Sync>>>;
 
 /// Multi-threaded executor that runs independent systems in parallel.
 ///
-/// Systems are dispatched to OS threads via `std::thread::scope`.
+/// Systems use shared persistent workers; the calling thread coordinates
+/// dependencies and services main-thread resource requests.
 /// Component access is synchronized through per-TypeId RwLocks acquired
 /// in sorted order to prevent deadlocks.
 ///
@@ -35,20 +36,26 @@ type PrevResults = Vec<Option<Box<dyn Any + Send + Sync>>>;
 pub struct EcsRunnerMultiThread {
     compute: ComputePool,
     io: IoRuntime,
-    num_threads: usize,
+    executor: crate::ParallelExecutor,
     /// Previous-tick system results for `reuse_result`, keyed by the
     /// container's identity — one runner drives many schedules per frame.
     prev_results: Mutex<HashMap<u64, PrevResults>>,
 }
 
 impl EcsRunnerMultiThread {
-    /// Creates a new multi-threaded runner with the specified thread count.
+    /// Creates a runner with this many background workers, excluding the
+    /// coordinating thread. Zero is treated as one.
     pub fn new(num_threads: usize) -> Self {
+        Self::with_executor(crate::ParallelExecutor::new(num_threads))
+    }
+
+    /// Share CPU workers with other runners/worlds. Compute stays separate.
+    pub fn with_executor(executor: crate::ParallelExecutor) -> Self {
         let io = IoRuntime::new();
         Self {
             compute: ComputePool::new(io.clone()),
             io,
-            num_threads: num_threads.max(1),
+            executor,
             prev_results: Mutex::new(HashMap::new()),
         }
     }
@@ -58,12 +65,21 @@ impl EcsRunnerMultiThread {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2);
-        Self::new(threads)
+        Self::new(threads.saturating_sub(1).max(1))
     }
 
-    /// Returns the configured thread count.
+    /// Returns the worker limit, excluding the coordinating thread.
     pub fn num_threads(&self) -> usize {
-        self.num_threads
+        self.executor.worker_threads()
+    }
+
+    pub fn executor(&self) -> &crate::ParallelExecutor {
+        &self.executor
+    }
+
+    pub(crate) fn clear_cached_results(&self) {
+        let results = std::mem::take(&mut *self.prev_results.lock());
+        drop(results);
     }
 
     /// Returns a reference to the compute pool.
@@ -86,7 +102,7 @@ impl EcsRunnerMultiThread {
     /// All systems always run to completion. Remaining deferred commands
     /// are applied after every system has finished.
     /// Command panics are collected per flush in
-    /// [`SystemError::DeferredCommandsFailed`](crate::SystemError::DeferredCommandsFailed).
+    /// [`SystemError::DeferredEffectsFailed`](crate::SystemError::DeferredEffectsFailed).
     /// Later commands and systems continue; partial mutations are retained.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
         self.run_with(world, systems, &RunDiagnostics::default())
@@ -115,6 +131,23 @@ impl EcsRunnerMultiThread {
         }
 
         let mut errors = Vec::new();
+        let _run = match self.executor.prepare_systems() {
+            Ok(lease) => lease,
+            Err(message) => {
+                return RunResult {
+                    errors: vec![SystemError::ExecutorUnavailable { message }],
+                    report: RunReport::default(),
+                };
+            }
+        };
+        if let Err(error) = world.set_parallel_executor(self.executor.clone()) {
+            return RunResult {
+                errors: vec![SystemError::ExecutorUnavailable {
+                    message: error.to_string(),
+                }],
+                report: RunReport::default(),
+            };
+        }
         let commands = CommandCollector::new();
         let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
 
@@ -211,25 +244,6 @@ impl EcsRunnerMultiThread {
             }
 
             if let Some(exc_idx) = exclusive_ready {
-                // Run any ready regular systems first (they may be independent
-                // of the exclusive system) to maximize parallelism before the barrier.
-                if !regular_ready.is_empty() {
-                    errors.extend(self.run_parallel_phase(
-                        world,
-                        systems,
-                        &commands,
-                        &results_store,
-                        &mut remaining_deps,
-                        &mut started,
-                        &mut completed_count,
-                        &regular_ready,
-                        &prev,
-                        &recorder,
-                        collect_timings,
-                        &system_timings,
-                    ));
-                }
-
                 // Apply pending deferred commands so the exclusive system
                 // sees structural changes from predecessors.
                 {
@@ -239,10 +253,8 @@ impl EcsRunnerMultiThread {
                     world.advance_tick();
                     redlilium_core::profile_scope!("ecs: apply commands (pre-exclusive)");
                     let command_errors = commands.apply(world);
-                    if !command_errors.is_empty() {
-                        errors.push(SystemError::DeferredCommandsFailed {
-                            errors: command_errors,
-                        });
+                    if let Err(error) = SystemError::deferred_effects(command_errors, Vec::new()) {
+                        errors.push(error);
                     }
                 }
 
@@ -339,21 +351,19 @@ impl EcsRunnerMultiThread {
         }
 
         // Apply remaining deferred commands
-        {
+        let command_errors = {
             world.advance_tick();
             redlilium_core::profile_scope!("ecs: apply commands");
-            let command_errors = commands.apply(world);
-            if !command_errors.is_empty() {
-                errors.push(SystemError::DeferredCommandsFailed {
-                    errors: command_errors,
-                });
-            }
-        }
+            commands.apply(world)
+        };
 
-        // Flush deferred observers (may cascade)
-        {
+        // Flush deferred observers (may cascade), retaining both error lists.
+        let observer_errors = {
             redlilium_core::profile_scope!("ecs: flush observers");
-            world.flush_observers();
+            world.flush_observers()
+        };
+        if let Err(error) = SystemError::deferred_effects(command_errors, observer_errors) {
+            errors.push(error);
         }
 
         // Save this tick's results for next tick's reuse.
@@ -385,7 +395,7 @@ impl EcsRunnerMultiThread {
             Some(TimingReport {
                 wall_time,
                 total_cpu_time,
-                num_threads: self.num_threads,
+                num_threads: self.num_threads(),
                 systems: collected,
             })
         } else {
@@ -401,10 +411,10 @@ impl EcsRunnerMultiThread {
         }
     }
 
-    /// Runs a batch of regular systems in parallel using a scoped thread pool.
+    /// Runs a batch of regular systems in parallel using borrowed jobs on the shared worker pool.
     ///
     /// Systems that become ready during execution (due to completions) are
-    /// also spawned -- unless they are exclusive, in which case they are
+    /// also queued -- unless they are exclusive, in which case they are
     /// deferred to the caller.
     #[allow(clippy::too_many_arguments)]
     fn run_parallel_phase(
@@ -422,21 +432,22 @@ impl EcsRunnerMultiThread {
         collect_timings: bool,
         timing_out: &Mutex<Vec<SystemTiming>>,
     ) -> Vec<SystemError> {
-        let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
-        let dispatcher = MainThreadDispatcher::new(event_tx.clone());
-        let mut active_count = 0usize;
         let thread_errors = Mutex::new(Vec::<SystemError>::new());
-
-        std::thread::scope(|scope| {
+        self.executor.scope(|scope| {
+            // On coordinator unwind the receiver is dropped BEFORE scope
+            // draining. Pending main-thread requests then release their result
+            // senders, unblocking every waiting worker.
+            let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
+            let mut active_count = 0usize;
+            let mut ready: VecDeque<usize> = initial_ready.iter().copied().collect();
+            let mut barrier_ready = false;
             macro_rules! spawn_system {
                 ($i:expr) => {{
-                    started[$i] = true;
-                    active_count += 1;
                     let tx = event_tx.clone();
                     let compute_ref = &self.compute;
                     let io_ref = &self.io;
                     let commands_ref = commands;
-                    let dispatcher_ref = &dispatcher;
+                    let dispatcher = MainThreadDispatcher::new(event_tx.clone());
                     let results_ref = results_store;
                     let prev_ref = prev_results;
                     let world_ref: &World = world;
@@ -448,85 +459,108 @@ impl EcsRunnerMultiThread {
                     let timing_ref = timing_out;
                     let do_timings = collect_timings;
                     let ro = systems.is_read_only();
-                    // Fresh tick for this run; becomes the system's last_run
-                    // after completion (see single-thread runner).
-                    let ticks = crate::query::FetchTicks {
-                        last_run: systems.last_run(idx),
-                        this_run: world_ref.next_tick(),
-                    };
-                    scope.spawn(move || {
-                        redlilium_core::set_thread_name!("ecs: worker");
-                        redlilium_core::profile_scope_dynamic!(system_name);
+                    let accepted = scope.try_spawn(
+                        move || {
+                            let outcome =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    redlilium_core::set_thread_name!("ecs: worker");
+                                    redlilium_core::profile_scope_dynamic!(system_name);
 
-                        let mut ctx = SystemContext::with_dispatcher(
-                            world_ref,
-                            compute_ref,
-                            io_ref,
-                            commands_ref,
-                            dispatcher_ref,
-                        )
-                        .with_read_only(ro)
-                        .with_ticks(ticks)
-                        .with_system_results(results_ref, accessible);
-                        if let Some(rec) = recorder_ref {
-                            ctx = ctx.with_access_recorder(rec, idx);
-                        }
+                                    // Fresh tick for this run; becomes the system's last_run
+                                    // after completion (see single-thread runner).
+                                    let ticks = crate::query::FetchTicks {
+                                        last_run: systems.last_run(idx),
+                                        this_run: world_ref.next_tick(),
+                                    };
+                                    let mut ctx = SystemContext::with_dispatcher(
+                                        world_ref,
+                                        compute_ref,
+                                        io_ref,
+                                        commands_ref,
+                                        &dispatcher,
+                                    )
+                                    .with_read_only(ro)
+                                    .with_ticks(ticks)
+                                    .with_system_results(results_ref, accessible);
+                                    if let Some(rec) = recorder_ref {
+                                        ctx = ctx.with_access_recorder(rec, idx);
+                                    }
 
-                        let prev_result = {
-                            let mut prev_guard = prev_ref.lock();
-                            if idx < prev_guard.len() {
-                                prev_guard[idx].take()
-                            } else {
-                                None
-                            }
-                        };
+                                    let prev_result = {
+                                        let mut prev_guard = prev_ref.lock();
+                                        if idx < prev_guard.len() {
+                                            prev_guard[idx].take()
+                                        } else {
+                                            None
+                                        }
+                                    };
 
-                        let sys_start = if do_timings {
-                            Some(Instant::now())
-                        } else {
-                            None
-                        };
+                                    let sys_start = if do_timings {
+                                        Some(Instant::now())
+                                    } else {
+                                        None
+                                    };
 
-                        let system = systems.get_system(idx);
-                        let guard = system.read();
-                        if let Some(prev_result) = prev_result {
-                            guard.reuse_result_boxed(prev_result);
-                        }
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            guard.run_boxed(&ctx)
-                        })) {
-                            Ok(Ok(result)) => results_ref.store(idx, result),
-                            Ok(Err(e)) => errors_ref.lock().push(e),
-                            Err(payload) => {
+                                    let system = systems.get_system(idx);
+                                    let guard = system.read();
+                                    if let Some(prev_result) = prev_result {
+                                        guard.reuse_result_boxed(prev_result);
+                                    }
+                                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || guard.run_boxed(&ctx),
+                                    )) {
+                                        Ok(Ok(result)) => results_ref.store(idx, result),
+                                        Ok(Err(e)) => errors_ref.lock().push(e),
+                                        Err(payload) => {
+                                            errors_ref.lock().push(SystemError::Panicked {
+                                                system: system_name.to_string(),
+                                                message: panic_payload_to_string(&*payload),
+                                            });
+                                        }
+                                    }
+                                    systems.set_last_run(idx, ticks.this_run);
+
+                                    if let Some(start) = sys_start {
+                                        timing_ref.lock().push(SystemTiming {
+                                            name: system_name,
+                                            duration: start.elapsed(),
+                                        });
+                                    }
+                                }));
+                            if let Err(payload) = outcome {
                                 errors_ref.lock().push(SystemError::Panicked {
-                                    system: system_name.to_string(),
+                                    system: system_name.to_owned(),
                                     message: panic_payload_to_string(&*payload),
                                 });
                             }
-                        }
-                        systems.set_last_run(idx, ticks.this_run);
-
-                        if let Some(start) = sys_start {
-                            timing_ref.lock().push(SystemTiming {
-                                name: system_name,
-                                duration: start.elapsed(),
-                            });
-                        }
-
-                        let _ = tx.send(RunnerEvent::SystemCompleted(idx));
-                    });
+                        },
+                        move || {
+                            let _ = tx.send(RunnerEvent::SystemCompleted(idx));
+                        },
+                    );
+                    if accepted {
+                        started[$i] = true;
+                        active_count += 1;
+                    }
+                    accepted
                 }};
             }
 
-            // Start initial ready regular systems
-            for &i in initial_ready {
-                spawn_system!(i);
-            }
-
-            // Coordination loop -- runs until all active systems complete.
-            // Newly ready regular systems are spawned immediately;
-            // exclusive systems are left for the outer loop.
-            while active_count > 0 {
+            // Ready nodes remain queued until a shared worker is available.
+            while active_count > 0 || (!barrier_ready && !ready.is_empty()) {
+                while !barrier_ready {
+                    let Some(&idx) = ready.front() else {
+                        break;
+                    };
+                    if spawn_system!(idx) {
+                        ready.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                if active_count == 0 && (barrier_ready || ready.is_empty()) {
+                    break;
+                }
                 match event_rx.recv_timeout(Duration::from_millis(1)) {
                     Ok(RunnerEvent::SystemCompleted(completed_idx)) => {
                         active_count -= 1;
@@ -547,11 +581,13 @@ impl EcsRunnerMultiThread {
                                     continue;
                                 }
                                 if systems.is_exclusive(dep) {
-                                    // Exclusive systems deferred to outer loop
+                                    // Stop admitting systems at an exclusive barrier;
+                                    // queued nodes remain unstarted for the next phase.
+                                    barrier_ready = true;
                                     continue;
                                 }
                                 if systems.check_conditions(dep, results_store) {
-                                    spawn_system!(dep);
+                                    ready.push_back(dep);
                                 } else {
                                     // Skip: mark done, cascade to its dependents
                                     started[dep] = true;
@@ -565,7 +601,7 @@ impl EcsRunnerMultiThread {
                         redlilium_core::profile_scope!("ecs: main-thread dispatch");
                         // A panic here must not unwind the coordination loop:
                         // workers would block forever on their result
-                        // channels while `thread::scope` waits for them. On
+                        // channels while the borrowed task scope waits for them. On
                         // panic the work's result sender is dropped, the
                         // requesting worker's `recv()` fails, and the error
                         // surfaces through that system's catch_unwind.

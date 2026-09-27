@@ -5,8 +5,8 @@ use std::sync::mpsc;
 /// Uses `'static` bound to avoid invariance issues with `mpsc::Sender`.
 /// The actual closures may capture shorter-lived references — the caller
 /// uses `unsafe` transmute to erase the lifetime, which is safe because
-/// `std::thread::scope` guarantees the closure is consumed before the
-/// captured references expire.
+/// the runner's borrowed task scope drains workers before captured references
+/// expire. Its receiver is dropped before draining on coordinator unwind.
 pub(crate) type MainThreadWork = Box<dyn FnOnce() + Send>;
 
 /// Events processed by the multi-threaded runner's main loop.
@@ -40,7 +40,7 @@ impl MainThreadDispatcher {
     ///
     /// The caller is responsible for ensuring the work closure is valid
     /// (i.e., all captured references are alive) at the time of execution.
-    /// This is guaranteed by the runner's `std::thread::scope`.
+    /// This is guaranteed by the runner's borrowed task scope.
     pub fn send_work(&self, work: MainThreadWork) {
         self.sender
             .send(RunnerEvent::MainThreadRequest(work))

@@ -69,10 +69,48 @@ impl EcsRunner {
         Self::SingleThread(EcsRunnerSingleThread::new())
     }
 
-    /// Creates a multi-threaded runner with the specified thread count.
+    /// Sequential systems with parallel queries on an explicit shared pool.
+    pub fn single_thread_with_executor(executor: crate::ParallelExecutor) -> Self {
+        Self::SingleThread(EcsRunnerSingleThread::with_executor(executor))
+    }
+
+    /// Creates a runner with this many background workers, excluding the
+    /// coordinating thread. Zero is treated as one.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn multi_thread(num_threads: usize) -> Self {
         Self::MultiThread(EcsRunnerMultiThread::new(num_threads))
+    }
+
+    /// Creates a runner sharing an explicit CPU worker pool.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn multi_thread_with_executor(executor: crate::ParallelExecutor) -> Self {
+        Self::MultiThread(EcsRunnerMultiThread::with_executor(executor))
+    }
+
+    /// Stop system/query workers before unloading a game image. Standalone
+    /// world executors must also be shut down or have their last handle dropped
+    /// while their guest code is still mapped.
+    pub fn shutdown_workers(&self) -> Result<(), crate::ExecutorBusy> {
+        match self {
+            Self::SingleThread(runner) => runner.executor().shutdown_workers(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::MultiThread(runner) => runner.executor().shutdown_workers(),
+        }
+    }
+
+    /// Prepare this runner for game-module unload. The caller must stop game
+    /// producers and quiesce compute first, and keep them stopped until reload
+    /// finishes. Joins workers/TLS and drops cached system results while their
+    /// guest vtables and destructors are still mapped. Other runners sharing
+    /// the pool must also release their caches before unloading their guests.
+    pub fn prepare_reload(&self) -> Result<(), crate::ExecutorBusy> {
+        self.shutdown_workers()?;
+        match self {
+            Self::SingleThread(runner) => runner.clear_cached_results(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::MultiThread(runner) => runner.clear_cached_results(),
+        }
+        Ok(())
     }
 
     /// Creates a multi-threaded runner using available parallelism.
@@ -89,7 +127,7 @@ impl EcsRunner {
     /// All systems always run to completion. Deferred commands are applied
     /// after every system has finished.
     /// Command panics are collected per flush in
-    /// [`SystemError::DeferredCommandsFailed`](crate::SystemError::DeferredCommandsFailed).
+    /// [`SystemError::DeferredEffectsFailed`](crate::SystemError::DeferredEffectsFailed).
     /// Later commands and systems continue; partial mutations are retained.
     pub fn run(
         &self,

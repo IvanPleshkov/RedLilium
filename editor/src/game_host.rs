@@ -399,7 +399,8 @@ pub struct ReloadOptions {
 ///    adopt shell-owned resources from the old world
 /// 3. drop the old world/history — the old image is still mapped, so game
 ///    storage drop glue and system destructors are sound
-/// 4. quiesce the compute pool (abort on timeout: keep the old module)
+/// 4. quiesce compute, join CPU workers, clear cached system results
+///    (abort on failure: keep the old module)
 /// 5. swap the module image (fresh temp copy, fresh generation)
 /// 6. re-run `Plugin::register_types` into the replacement (the scene comes
 ///    from the snapshot; game systems never live in the editing world)
@@ -472,6 +473,24 @@ pub fn reload_game(
                 .unwrap_or_default()
         );
         return (fresh, Err(msg));
+    }
+
+    // Persistent system/query workers may retain guest TLS even when idle.
+    // Keep the old image mapped if an execution scope still uses this pool.
+    if let Err(error) = runner.prepare_reload() {
+        host.register_into(&mut fresh);
+        let restore = restore_into(&mut fresh, &snapshot, opts.aspect);
+        return (
+            fresh,
+            Err(format!(
+                "worker shutdown failed; old module kept mapped: {error}{}",
+                restore
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("; restore: {e}"))
+                    .unwrap_or_default()
+            )),
+        );
     }
 
     // 5. Swap the image (dylib: unmap + fresh temp copy + new generation).

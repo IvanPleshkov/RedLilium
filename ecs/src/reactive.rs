@@ -165,7 +165,7 @@ mod tests {
         assert!(world.resource::<Triggers<OnAdd<Health>>>().is_empty());
 
         // Flush observers — observer pushes to collecting
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
 
         // Still empty in readable (haven't swapped yet)
         assert!(world.resource::<Triggers<OnAdd<Health>>>().is_empty());
@@ -191,7 +191,7 @@ mod tests {
             .insert_batch(entities.iter().copied().zip(components))
             .unwrap();
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         world.update_triggers();
 
         let triggers = world.resource::<Triggers<OnAdd<Health>>>();
@@ -209,7 +209,7 @@ mod tests {
 
         let entity = world.spawn();
         world.insert(entity, Health(100)).unwrap();
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         world.update_triggers();
 
         assert_eq!(world.resource::<Triggers<OnAdd<Health>>>().len(), 1);
@@ -231,7 +231,7 @@ mod tests {
         world.insert(entity, Health(100)).unwrap(); // add
         world.insert(entity, Health(200)).unwrap(); // replace
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         world.update_triggers();
 
         let triggers = world.resource::<Triggers<OnInsert<Health>>>();
@@ -248,7 +248,7 @@ mod tests {
         world.insert(entity, Health(100)).unwrap();
         let _ = world.remove::<Health>(entity);
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         world.update_triggers();
 
         let triggers = world.resource::<Triggers<OnRemove<Health>>>();
@@ -266,7 +266,7 @@ mod tests {
         world.insert(entity, Health(100)).unwrap();
         world.despawn(entity);
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         world.update_triggers();
 
         let triggers = world.resource::<Triggers<OnRemove<Health>>>();
@@ -281,7 +281,7 @@ mod tests {
 
         let entity = world.spawn();
         world.insert(entity, Health(100)).unwrap();
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         world.update_triggers();
 
         let condition = HasTriggers::<OnAdd<Health>>::new();
@@ -315,7 +315,7 @@ mod tests {
 
         // Several ticks with no mutations
         for _ in 0..5 {
-            world.flush_observers();
+            assert!(world.flush_observers().is_empty());
             world.update_triggers();
         }
 
@@ -367,7 +367,7 @@ mod tests {
         world.insert(e1, Health(100)).unwrap();
         let e2 = world.spawn();
         world.insert(e2, Health(200)).unwrap();
-        world.flush_observers(); // simulate end-of-frame observer flush
+        assert!(world.flush_observers().is_empty()); // simulate end-of-frame observer flush
 
         // Frame 2: reactive system should run and see 2 triggers
         world.update_triggers();

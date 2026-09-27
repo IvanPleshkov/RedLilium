@@ -89,7 +89,7 @@ pub use entity::Entity;
 pub use events::{EventCursor, EventIter, Events};
 pub use generation::{GameGenerationRegistry, GenerationInUseError, UnloadStrategy};
 pub use migration::MigrationRegistry;
-pub use observer::{OnAdd, OnInsert, OnRemove};
+pub use observer::{ObserverError, OnAdd, OnInsert, OnRemove};
 pub use prefab::Prefab;
 pub use query::{
     AddedFilter, AnyFilter, ChangedFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With,
@@ -133,6 +133,7 @@ pub use system::{
     run_exclusive_system_blocking, run_exclusive_system_once,
     run_read_only_exclusive_system_blocking, run_system_blocking, run_system_once,
 };
+pub use system::{ExecutorBusy, ParConfig, ParallelExecutor};
 pub use system::{
     FixedUpdate, PostUpdate, PreUpdate, RawFrameDelta, Render, ScheduleId, ScheduleLabel,
     Schedules, Startup, Time, Update,
@@ -141,7 +142,6 @@ pub use system::{
     ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
     ParForEachSystem, for_each, par_for_each,
 };
-pub use system::{ParConfig, ParallelExecutor};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::EcsRunnerMultiThread;

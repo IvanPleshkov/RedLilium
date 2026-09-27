@@ -1,51 +1,114 @@
-//! Reusable workers for synchronous, borrowed parallel queries.
-//!
-//! Jobs go only to idle workers. Callers also execute work and never wait for
-//! queued jobs to start, so nested calls cannot starve a fixed-size pool. This
-//! executor never steals arbitrary systems/compute tasks while a query holds
-//! component locks. Native synchronization uses std primitives across dylibs.
+//! Shared workers for systems and synchronous borrowed queries.
+//! Ready systems are queued by their runner. Query helpers use only idle
+//! workers; a waiting query never steals unrelated systems or compute work.
 
-/// Reusable execution capacity for parallel queries.
+use std::sync::Arc;
+
+/// Shared CPU workers. Clones refer to the same pool, including across worlds.
 ///
-/// A world owns one executor, shared by all its queries. `num_threads` includes
-/// the calling thread; workers are started lazily and joined when the executor
-/// is dropped. On wasm execution is sequential. The executor must be destroyed
-/// while the image that constructed it is still loaded. Standalone executors
-/// that run guest callbacks must also be dropped before unloading that guest,
-/// so worker TLS destructors cannot outlive its code.
+/// The configured count excludes calling/coordinating threads and IO workers.
+/// Startup is lazy. Before unloading a guest, stop its producers, drain compute,
+/// and call [`shutdown_workers`](Self::shutdown_workers) to run worker TLS
+/// destructors. Dropping one world does not stop a pool shared with a runner.
+/// The image that constructed the pool must outlive all its handles.
+#[derive(Clone)]
 pub struct ParallelExecutor {
     #[cfg(not(target_arch = "wasm32"))]
-    native: native::Pool,
+    native: Arc<native::Pool>,
+    #[cfg(target_arch = "wasm32")]
+    identity: Arc<()>,
 }
 
+/// Workers cannot be stopped while borrowed execution scopes are active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutorBusy;
+impl std::fmt::Display for ExecutorBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("executor has active scopes or is stopping workers")
+    }
+}
+impl std::error::Error for ExecutorBusy {}
+
 impl ParallelExecutor {
-    /// Set the maximum parallelism of one call, including its caller.
-    /// Zero is treated as one. Workers are created only when needed.
-    pub fn new(num_threads: usize) -> Self {
-        let _ = num_threads;
+    /// Maximum number of background CPU workers. Zero is treated as one.
+    /// The main/coordinating thread is additional. WASM creates no workers.
+    pub fn new(worker_threads: usize) -> Self {
+        let _ = worker_threads;
         Self {
             #[cfg(not(target_arch = "wasm32"))]
-            native: native::Pool::new(num_threads.max(1)),
+            native: Arc::new(native::Pool::new(worker_threads.max(1))),
+            #[cfg(target_arch = "wasm32")]
+            identity: Arc::new(()),
         }
     }
 
-    /// Maximum number of participants in a call, including the caller.
-    pub fn parallelism(&self) -> usize {
+    pub fn worker_threads(&self) -> usize {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.native.parallelism
+            self.native.capacity
         }
         #[cfg(target_arch = "wasm32")]
         {
-            1
+            0
         }
     }
 
-    /// Stop workers and run their TLS destructors before unloading game code.
-    /// Exclusive access guarantees no borrowed query jobs are still running.
-    pub(crate) fn shutdown(&mut self) {
+    /// Query participant limit, including an external caller. A query running
+    /// on one of these workers can use only the other idle workers as helpers.
+    pub fn parallelism(&self) -> usize {
+        self.worker_threads().saturating_add(1)
+    }
+
+    pub fn shares_workers_with(&self, other: &Self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        self.native.shutdown();
+        {
+            Arc::ptr_eq(&self.native, &other.native)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Arc::ptr_eq(&self.identity, &other.identity)
+        }
+    }
+
+    /// Join all workers, including their TLS destructors. Fails without stopping
+    /// anything if a borrowed scope is active. Admissions are rejected during
+    /// shutdown; later calls may lazily restart workers. The caller must keep
+    /// guest producers stopped until unloading completes.
+    pub fn shutdown_workers(&self) -> Result<(), ExecutorBusy> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.native.shutdown()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn shutdown_if_unique(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if Arc::strong_count(&self.native) == 1 {
+            self.shutdown_workers()
+                .expect("unique executor cannot have an external active scope");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn prepare_systems(&self) -> Result<native::Lease<'_>, String> {
+        self.native.prepare_run(true)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn prepare_queries(&self) -> Result<native::Lease<'_>, String> {
+        self.native.prepare_run(false)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn scope<'env, R>(
+        &'env self,
+        f: impl for<'scope> FnOnce(&'scope native::TaskScope<'scope, 'env>) -> R,
+    ) -> R {
+        self.native.scope(f)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -53,48 +116,59 @@ impl ParallelExecutor {
         self.native.run(participants, &work);
     }
 }
-
 impl Default for ParallelExecutor {
     fn default() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let parallelism = std::thread::available_parallelism().map_or(1, |n| n.get());
-        #[cfg(target_arch = "wasm32")]
-        let parallelism = 1;
-        Self::new(parallelism)
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        Self::new(cpus.saturating_sub(1).max(1))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
+    use super::ExecutorBusy;
     use std::any::Any;
+    use std::marker::PhantomData;
     use std::sync::{Arc, Condvar, Mutex, MutexGuard};
     use std::thread::JoinHandle;
 
-    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-        mutex.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(|e| e.into_inner())
     }
-
+    type Panic = Box<dyn Any + Send>;
+    #[derive(Default)]
     struct Completion {
         remaining: usize,
-        panics: Vec<Box<dyn Any + Send>>,
+        panics: Vec<Panic>,
     }
-    struct Scope<'a, F> {
-        work: &'a F,
-        completion: Mutex<Completion>,
-        done: Condvar,
+    #[derive(Default)]
+    struct Done {
+        state: Mutex<Completion>,
+        wake: Condvar,
     }
-    impl<F> Scope<'_, F> {
+    impl Done {
         fn wait(&self) {
-            let mut state = lock(&self.completion);
+            let mut state = lock(&self.state);
             while state.remaining != 0 {
-                state = self.done.wait(state).unwrap_or_else(|e| e.into_inner());
+                state = self.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        fn complete(&self, panic: Option<Panic>) {
+            let mut state = lock(&self.state);
+            if let Some(panic) = panic {
+                state.panics.push(panic);
+            }
+            state.remaining -= 1;
+            self.wake.notify_all();
+        }
+        fn propagate(&self) {
+            self.wait();
+            if let Some(panic) = lock(&self.state).panics.pop() {
+                std::panic::resume_unwind(panic);
             }
         }
     }
-    // Keep cleanup separate: Drop must not create an exclusive reference to
-    // Scope while workers may still be borrowing it during dispatch unwind.
-    struct Drain<'scope, 'work, F>(&'scope Scope<'work, F>);
-    impl<F> Drop for Drain<'_, '_, F> {
+    struct Drain<'a>(&'a Done);
+    impl Drop for Drain<'_> {
         fn drop(&mut self) {
             self.0.wait();
         }
@@ -102,27 +176,13 @@ mod native {
 
     #[derive(Clone, Copy)]
     struct Job {
-        data: *const (),
-        invoke: unsafe fn(*const ()),
+        data: *mut (),
+        run: unsafe fn(*mut ()),
+        finish: unsafe fn(*mut ()),
     }
-    // SAFETY: only shared references to F: Sync cross threads; Drain
-    // waits for all invocations before either the scope or F can be destroyed.
+    // SAFETY: job constructors constrain captures to Send/shared Sync and a
+    // scope waits before their borrowed environment is released, even on unwind.
     unsafe impl Send for Job {}
-
-    unsafe fn invoke<F: Fn() + Sync>(data: *const ()) {
-        // SAFETY: dispatch increments remaining before publishing this pointer;
-        // the scope owner waits for completion even if it unwinds.
-        let scope = unsafe { &*data.cast::<Scope<'_, F>>() };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(scope.work));
-        let mut state = lock(&scope.completion);
-        if let Err(panic) = result {
-            state.panics.push(panic);
-        }
-        state.remaining -= 1;
-        scope.done.notify_all();
-        // No access to scope after releasing this mutex: the caller may return.
-    }
-
     #[derive(Default)]
     struct SlotState {
         job: Option<Job>,
@@ -138,14 +198,13 @@ mod native {
         slot: Arc<Slot>,
         thread: JoinHandle<()>,
     }
-
-    // Keep the spawn entry point in the constructor's image even if a game
-    // dylib triggers lazy startup. The worker loop must not live in that dylib.
     type Spawn = fn(Arc<Slot>, usize) -> std::io::Result<JoinHandle<()>>;
+    // Store this entry point at construction: lazy startup from a guest must
+    // keep the persistent loop in the constructor's image.
     #[inline(never)]
     fn spawn_worker(slot: Arc<Slot>, index: usize) -> std::io::Result<JoinHandle<()>> {
         std::thread::Builder::new()
-            .name(format!("ecs-query-{index}"))
+            .name(format!("ecs-worker-{index}"))
             .spawn(move || {
                 loop {
                     let job = {
@@ -158,103 +217,251 @@ mod native {
                         }
                         state.job.take().expect("notified with a job")
                     };
-                    // SAFETY: the submitting scope retains all captured borrows.
-                    unsafe { (job.invoke)(job.data) };
+                    // SAFETY: the submitting scope retains the data until finish.
+                    unsafe {
+                        (job.run)(job.data);
+                    }
                     lock(&slot.state).busy = false;
+                    // Publish completion after releasing the slot, so a coordinator
+                    // can immediately dispatch its next ready system to this worker.
+                    unsafe {
+                        (job.finish)(job.data);
+                    }
                 }
             })
     }
-
+    #[derive(Default)]
+    struct PoolState {
+        workers: Vec<Worker>,
+        scopes: usize,
+        stopping: bool,
+        coordinators: Vec<std::thread::ThreadId>,
+    }
     pub(super) struct Pool {
-        pub(super) parallelism: usize,
-        workers: Mutex<Vec<Worker>>,
+        pub(super) capacity: usize,
+        state: Mutex<PoolState>,
         spawn: Spawn,
     }
+    pub(crate) struct Lease<'a> {
+        pool: &'a Pool,
+        coordinator: Option<std::thread::ThreadId>,
+    }
+    impl Drop for Lease<'_> {
+        fn drop(&mut self) {
+            let mut state = lock(&self.pool.state);
+            state.scopes -= 1;
+            if let Some(id) = self.coordinator {
+                state.coordinators.retain(|other| *other != id);
+            }
+        }
+    }
+
     impl Pool {
-        pub(super) fn new(parallelism: usize) -> Self {
+        pub(super) fn new(capacity: usize) -> Self {
             Self {
-                parallelism,
-                workers: Mutex::new(Vec::new()),
+                capacity,
+                state: Mutex::new(PoolState::default()),
                 spawn: spawn_worker,
             }
         }
-
+        fn enter(&self) -> Lease<'_> {
+            let mut state = lock(&self.state);
+            assert!(!state.stopping, "executor is stopping workers");
+            state.scopes += 1;
+            Lease {
+                pool: self,
+                coordinator: None,
+            }
+        }
+        fn start(&self, state: &mut PoolState) -> std::io::Result<()> {
+            let slot = Arc::new(Slot::default());
+            let thread = (self.spawn)(slot.clone(), state.workers.len())?;
+            state.workers.push(Worker { slot, thread });
+            Ok(())
+        }
+        pub(super) fn prepare_run(&self, needs_worker: bool) -> Result<Lease<'_>, String> {
+            let mut state = lock(&self.state);
+            if state.stopping {
+                return Err(ExecutorBusy.to_string());
+            }
+            let id = std::thread::current().id();
+            if state.coordinators.contains(&id)
+                || state.workers.iter().any(|w| w.thread.thread().id() == id)
+            {
+                return Err(
+                    "a runner cannot re-enter its executor from a coordinator or worker".into(),
+                );
+            }
+            if needs_worker && state.workers.is_empty() {
+                self.start(&mut state).map_err(|e| e.to_string())?;
+            }
+            state.scopes += 1;
+            state.coordinators.push(id);
+            Ok(Lease {
+                pool: self,
+                coordinator: Some(id),
+            })
+        }
+        // Only idle slots accept jobs. A waiting query cannot enqueue work
+        // behind its own blocked system and cannot steal unrelated systems.
+        fn submit(&self, make: impl FnOnce() -> Job) -> bool {
+            let mut pool = lock(&self.state);
+            let idle = pool.workers.iter().position(|w| !lock(&w.slot.state).busy);
+            let index = if let Some(index) = idle {
+                index
+            } else {
+                if pool.workers.len() == self.capacity {
+                    return false;
+                }
+                if let Err(error) = self.start(&mut pool) {
+                    drop(pool);
+                    log::warn!("worker startup failed: {error}");
+                    return false;
+                }
+                pool.workers.len() - 1
+            };
+            let slot = &pool.workers[index].slot;
+            let mut state = lock(&slot.state);
+            state.job = Some(make());
+            state.busy = true;
+            slot.wake.notify_one();
+            true
+        }
+        pub(super) fn shutdown(&self) -> Result<(), ExecutorBusy> {
+            let workers = {
+                let mut state = lock(&self.state);
+                if state.scopes != 0 || state.stopping {
+                    return Err(ExecutorBusy);
+                }
+                state.stopping = true;
+                std::mem::take(&mut state.workers)
+            };
+            for worker in &workers {
+                lock(&worker.slot.state).stop = true;
+                worker.slot.wake.notify_one();
+            }
+            for worker in workers {
+                let _ = worker.thread.join();
+            }
+            lock(&self.state).stopping = false;
+            Ok(())
+        }
+        pub(super) fn scope<'env, R>(
+            &'env self,
+            f: impl for<'scope> FnOnce(&'scope TaskScope<'scope, 'env>) -> R,
+        ) -> R {
+            let _lease = self.enter();
+            let scope = TaskScope {
+                pool: self,
+                done: Arc::new(Done::default()),
+                marker: PhantomData,
+            };
+            let _drain = Drain(&scope.done);
+            let result = f(&scope);
+            scope.done.propagate();
+            result
+        }
         pub(super) fn run<F: Fn() + Sync>(&self, participants: usize, work: &F) {
-            let helpers = participants.max(1).min(self.parallelism) - 1;
+            let _lease = self.enter();
+            let helpers = participants.max(1).saturating_sub(1).min(self.capacity);
             if helpers == 0 {
                 work();
                 return;
             }
-            let scope = Scope {
+            let scope = QueryScope {
                 work,
-                completion: Mutex::new(Completion {
-                    remaining: 0,
-                    panics: Vec::new(),
-                }),
-                done: Condvar::new(),
+                done: Done::default(),
             };
-            let _drain = Drain(&scope);
-            let job = Job {
-                data: (&scope as *const Scope<'_, F>).cast(),
-                invoke: invoke::<F>,
-            };
-            {
-                let mut workers = lock(&self.workers);
-                // Grow lazily, never beyond the executor's capacity. Startup
-                // failure leaves a smaller working pool; the caller still runs.
-                while workers.len() < helpers {
-                    let slot = Arc::new(Slot::default());
-                    match (self.spawn)(slot.clone(), workers.len()) {
-                        Ok(thread) => workers.push(Worker { slot, thread }),
-                        Err(error) => {
-                            log::warn!("query worker startup failed: {error}");
-                            break;
-                        }
+            let _drain = Drain(&scope.done);
+            for _ in 0..helpers {
+                if !self.submit(|| {
+                    lock(&scope.done.state).remaining += 1;
+                    Job {
+                        data: (&scope as *const QueryScope<'_, F>).cast_mut().cast(),
+                        run: query_run::<F>,
+                        finish: query_finish::<F>,
                     }
-                }
-                let mut submitted = 0;
-                for worker in workers.iter() {
-                    if submitted == helpers {
-                        break;
-                    }
-                    let mut state = lock(&worker.slot.state);
-                    if state.busy {
-                        continue;
-                    }
-                    lock(&scope.completion).remaining += 1;
-                    state.busy = true;
-                    state.job = Some(job);
-                    worker.slot.wake.notify_one();
-                    submitted += 1;
+                }) {
+                    break;
                 }
             }
-            // Caller participates; panic never skips draining the borrowed jobs.
             let caller = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
-            scope.wait();
-            let mut panics = std::mem::take(&mut lock(&scope.completion).panics);
+            scope.done.wait();
             if let Err(panic) = caller {
                 std::panic::resume_unwind(panic);
             }
-            if let Some(panic) = panics.pop() {
-                std::panic::resume_unwind(panic);
-            }
-        }
-
-        pub(super) fn shutdown(&mut self) {
-            let workers = self.workers.get_mut().unwrap_or_else(|e| e.into_inner());
-            for worker in workers.iter() {
-                lock(&worker.slot.state).stop = true;
-                worker.slot.wake.notify_one();
-            }
-            for worker in workers.drain(..) {
-                let _ = worker.thread.join();
-            }
+            scope.done.propagate();
         }
     }
     impl Drop for Pool {
         fn drop(&mut self) {
-            self.shutdown();
+            self.shutdown().expect("last pool owner has no scopes");
         }
+    }
+
+    struct QueryScope<'a, F> {
+        work: &'a F,
+        done: Done,
+    }
+    unsafe fn query_run<F: Fn() + Sync>(data: *mut ()) {
+        let scope = unsafe { &*data.cast::<QueryScope<'_, F>>() };
+        if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(scope.work)) {
+            lock(&scope.done.state).panics.push(panic);
+        }
+    }
+    unsafe fn query_finish<F>(data: *mut ()) {
+        let scope = unsafe { &*data.cast::<QueryScope<'_, F>>() };
+        scope.done.complete(None);
+    }
+
+    /// Invariant scope lifetime prevents jobs from outliving local captures.
+    pub(crate) struct TaskScope<'scope, 'env: 'scope> {
+        pool: &'env Pool,
+        done: Arc<Done>,
+        marker: PhantomData<(&'scope mut &'scope (), &'env mut &'env ())>,
+    }
+    struct Task<F, C> {
+        work: Option<F>,
+        complete: Option<C>,
+        panic: Option<Panic>,
+        done: Arc<Done>,
+    }
+    impl<'scope, 'env> TaskScope<'scope, 'env> {
+        pub(crate) fn try_spawn<F, C>(&'scope self, work: F, complete: C) -> bool
+        where
+            F: FnOnce() + Send + 'scope,
+            C: FnOnce() + Send + 'scope,
+        {
+            self.pool.submit(|| {
+                let task = Box::new(Task {
+                    work: Some(work),
+                    complete: Some(complete),
+                    panic: None,
+                    done: self.done.clone(),
+                });
+                lock(&self.done.state).remaining += 1;
+                Job {
+                    data: Box::into_raw(task).cast(),
+                    run: task_run::<F, C>,
+                    finish: task_finish::<F, C>,
+                }
+            })
+        }
+    }
+    unsafe fn task_run<F: FnOnce(), C>(data: *mut ()) {
+        let task = unsafe { &mut *data.cast::<Task<F, C>>() };
+        task.panic =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(task.work.take().unwrap())).err();
+    }
+    unsafe fn task_finish<F, C: FnOnce()>(data: *mut ()) {
+        let mut task = unsafe { Box::from_raw(data.cast::<Task<F, C>>()) };
+        let complete =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(task.complete.take().unwrap()));
+        let panic = task.panic.take().or_else(|| complete.err());
+        // Drop all borrowed captures before publishing scope completion.
+        let done = task.done.clone();
+        drop(task);
+        done.complete(panic);
     }
 
     #[cfg(test)]
@@ -263,19 +470,40 @@ mod native {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[test]
-        fn startup_failure_still_runs_the_caller() {
-            let mut pool = Pool::new(4);
-            pool.spawn = |_, _| Err(std::io::Error::other("worker unavailable"));
+        fn startup_failure_is_reported_and_queries_fall_back_inline() {
+            let mut pool = Pool::new(2);
+            pool.spawn = |_, _| Err(std::io::Error::other("unavailable"));
+            assert!(pool.prepare_run(true).is_err());
             let calls = AtomicUsize::new(0);
-            pool.run(4, &|| {
+            pool.run(3, &|| {
                 calls.fetch_add(1, Ordering::Relaxed);
             });
             assert_eq!(calls.load(Ordering::Relaxed), 1);
-            assert!(lock(&pool.workers).is_empty());
+            assert!(pool.shutdown().is_ok());
+        }
+
+        #[test]
+        fn coordinator_unwind_drains_borrowed_jobs_and_releases_admission() {
+            let pool = Pool::new(1);
+            let finished = AtomicUsize::new(0);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pool.scope(|scope| {
+                    assert!(scope.try_spawn(
+                        || {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            finished.fetch_add(1, Ordering::Relaxed);
+                        },
+                        || {}
+                    ));
+                    panic!("coordinator failure");
+                });
+            }));
+            assert!(result.is_err());
+            assert_eq!(finished.load(Ordering::Relaxed), 1);
+            assert!(pool.shutdown().is_ok());
         }
     }
 }
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -303,7 +531,7 @@ mod tests {
     #[test]
     fn reuses_workers_and_includes_caller() {
         with_timeout(|| {
-            let executor = ParallelExecutor::new(4);
+            let executor = ParallelExecutor::new(3);
             let caller = thread::current().id();
             let ids = Mutex::new(HashSet::new());
             let all_started = Barrier::new(4);
@@ -341,7 +569,7 @@ mod tests {
     #[test]
     fn nested_calls_finish_when_all_workers_are_busy() {
         with_timeout(|| {
-            let executor = ParallelExecutor::new(4);
+            let executor = ParallelExecutor::new(3);
             let all_started = Barrier::new(4);
             let calls = AtomicUsize::new(0);
             executor.run(4, || {
@@ -359,7 +587,7 @@ mod tests {
     #[test]
     fn concurrent_call_uses_caller_when_worker_is_occupied() {
         with_timeout(|| {
-            let executor = Arc::new(ParallelExecutor::new(2));
+            let executor = Arc::new(ParallelExecutor::new(1));
             let occupied = Arc::new(Barrier::new(3));
             let release = Arc::new(Barrier::new(3));
             let first = {
@@ -389,7 +617,7 @@ mod tests {
     fn panic_drains_borrowed_jobs_and_executor_remains_usable() {
         with_timeout(|| {
             for panic_in_caller in [false, true] {
-                let executor = ParallelExecutor::new(2);
+                let executor = ParallelExecutor::new(1);
                 let caller = thread::current().id();
                 let started = Barrier::new(2);
                 let finished = AtomicUsize::new(0);

@@ -1,6 +1,8 @@
+use crate::SourceId;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, Location, catch_unwind};
 
 use crate::entity::Entity;
 use crate::world::World;
@@ -45,8 +47,84 @@ pub struct OnRemove<T: 'static>(PhantomData<T>);
 // Internal types
 // ---------------------------------------------------------------------------
 
-/// A type-erased observer handler.
-type ObserverFn = Box<dyn Fn(&mut World, Entity) + Send + Sync>;
+/// A deferred observer failure. Text metadata is owned and may outlive the
+/// module that registered the handler. Partial world mutations are retained.
+#[derive(Debug, Clone)]
+pub enum ObserverError {
+    /// One invocation panicked. Other handlers and triggers continue.
+    Panicked {
+        source: SourceId,
+        trigger: String,
+        entity: Entity,
+        message: String,
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    /// The cascade still had work after the limit. Pending triggers were
+    /// discarded; registrations remain available for newly generated events.
+    CascadeLimitExceeded {
+        iterations: u32,
+        discarded_triggers: usize,
+    },
+}
+
+impl std::fmt::Display for ObserverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Panicked {
+                source,
+                trigger,
+                entity,
+                message,
+                file,
+                line,
+                column,
+            } => write!(
+                f,
+                "observer for {trigger} on {entity:?} (source {source:?}, registered at {file}:{line}:{column}) panicked: {message}"
+            ),
+            Self::CascadeLimitExceeded {
+                iterations,
+                discarded_triggers,
+            } => write!(
+                f,
+                "observer cascade exceeded {iterations} iterations; discarded {discarded_triggers} pending triggers"
+            ),
+        }
+    }
+}
+impl std::error::Error for ObserverError {}
+
+/// A type-erased observer whose panic boundary lives in its originating image.
+type ObserverFn = Box<dyn Fn(&mut World, Entity) -> Result<(), ObserverError> + Send + Sync>;
+type HandlerMap = HashMap<TypeId, Vec<(SourceId, ObserverFn)>>;
+
+#[track_caller]
+fn shield<Trigger: 'static>(
+    source: SourceId,
+    handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
+) -> ObserverFn {
+    let location = Location::caller();
+    // Monomorphize the catch beside the guest handler, before type erasure.
+    // Only owned reports cross the image boundary, never the panic payload.
+    Box::new(move |world, entity| {
+        catch_unwind(AssertUnwindSafe(|| {
+            // Registrations created by a guest callback belong to that guest,
+            // including when the callback subsequently panics.
+            world.with_registration_source(source, |world| handler(world, entity));
+        }))
+        .map_err(|payload| ObserverError::Panicked {
+            source,
+            trigger: std::any::type_name::<Trigger>().to_owned(),
+            entity,
+            message: crate::system::panic_payload_to_string(&*payload),
+            file: location.file().to_owned(),
+            line: location.line(),
+            column: location.column(),
+        })
+    })
+}
 
 /// A queued trigger waiting to fire its observers.
 pub(crate) struct PendingTrigger {
@@ -69,7 +147,8 @@ pub(crate) struct PendingTrigger {
 pub(crate) struct Observers {
     /// Observer handlers keyed by trigger marker TypeId, each stamped with
     /// its registration source.
-    handlers: HashMap<TypeId, Vec<(crate::type_identity::SourceId, ObserverFn)>>,
+    handlers: HandlerMap,
+    flushing: bool,
     /// Queued triggers waiting to be flushed.
     pending: Vec<PendingTrigger>,
     /// Maps component `TypeId` → `OnRemove<T>` trigger `TypeId`.
@@ -88,6 +167,7 @@ impl Observers {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            flushing: false,
             pending: Vec::new(),
             remove_trigger_keys: HashMap::new(),
             registered_keys: HashSet::new(),
@@ -96,6 +176,7 @@ impl Observers {
 
     /// Registers an observer for `OnAdd<T>`, stamped with its registration
     /// source (the world's `current_source` at call time).
+    #[track_caller]
     pub fn add_on_add<T: 'static>(
         &mut self,
         source: crate::type_identity::SourceId,
@@ -106,11 +187,12 @@ impl Observers {
         self.handlers
             .entry(key)
             .or_default()
-            .push((source, Box::new(handler)));
+            .push((source, shield::<OnAdd<T>>(source, handler)));
     }
 
     /// Registers an observer for `OnInsert<T>`, stamped with its registration
     /// source.
+    #[track_caller]
     pub fn add_on_insert<T: 'static>(
         &mut self,
         source: crate::type_identity::SourceId,
@@ -121,11 +203,12 @@ impl Observers {
         self.handlers
             .entry(key)
             .or_default()
-            .push((source, Box::new(handler)));
+            .push((source, shield::<OnInsert<T>>(source, handler)));
     }
 
     /// Registers an observer for `OnRemove<T>`, also recording the
     /// component→trigger mapping needed for untyped despawn iteration.
+    #[track_caller]
     pub fn add_on_remove<T: 'static>(
         &mut self,
         source: crate::type_identity::SourceId,
@@ -137,7 +220,7 @@ impl Observers {
         self.handlers
             .entry(key)
             .or_default()
-            .push((source, Box::new(handler)));
+            .push((source, shield::<OnRemove<T>>(source, handler)));
     }
 
     /// Drops every handler registered under `source` (a game-module unload:
@@ -156,6 +239,10 @@ impl Observers {
             self.registered_keys.remove(&key);
             self.remove_trigger_keys.retain(|_, v| *v != key);
         }
+        // A future registration must not receive triggers queued for a source
+        // that was completely removed. Keep events for surviving handlers.
+        self.pending
+            .retain(|trigger| self.registered_keys.contains(&trigger.observer_key));
     }
 
     /// Pushes a trigger for a known marker TypeId.
@@ -184,80 +271,75 @@ impl Observers {
         self.remove_trigger_keys.get(component_type_id).copied()
     }
 
+    pub(crate) fn is_flushing(&self) -> bool {
+        self.flushing
+    }
+
     /// Returns `true` if there are pending triggers.
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
 }
 
-/// Drains and fires all pending triggers, supporting cascading.
-///
-/// Observers that perform mutations (insert/remove/despawn) will queue
-/// new triggers. This function loops until no more triggers remain.
-///
-/// A free function rather than a method on [`Observers`]: a `&mut self`
-/// receiver would stay alive across handler calls while the handler mutates
-/// the same `Observers` through the `&mut World` it receives (pushing new
-/// triggers) — an aliasing violation. Here every registry access re-borrows
-/// through `world_ptr`, so the handler's `&mut World` is the only live
-/// reference during the call.
-///
-/// # Safety
-///
-/// `world_ptr` must point to a valid `World` with no live borrows of it or
-/// anything it owns; the caller must not use any reference the pointer was
-/// derived from until this function returns.
-///
-/// # Panics
-///
-/// Panics if cascading exceeds 100 iterations (likely infinite loop).
-pub(crate) unsafe fn flush(world_ptr: *mut World) {
-    const MAX_ITERATIONS: u32 = 100;
-
-    for iteration in 0..MAX_ITERATIONS {
-        let triggers = unsafe { std::mem::take(&mut (*world_ptr).observers.pending) };
-        if triggers.is_empty() {
-            return;
+/// Owns the temporarily detached handlers and restores them on every exit.
+/// The separate fields allow safe disjoint borrows of callbacks and the world.
+struct FlushGuard<'a> {
+    world: &'a mut World,
+    handlers: HandlerMap,
+}
+impl FlushGuard<'_> {
+    fn merge_registrations(&mut self) {
+        let newly_added = std::mem::take(&mut self.world.observers.handlers);
+        for (key, new_fns) in newly_added {
+            self.handlers.entry(key).or_default().extend(new_fns);
         }
+    }
+}
+impl Drop for FlushGuard<'_> {
+    fn drop(&mut self) {
+        self.merge_registrations();
+        self.world.observers.handlers = std::mem::take(&mut self.handlers);
+        self.world.observers.flushing = false;
+    }
+}
 
-        // Take handlers out of the world so calling them with `&mut World`
-        // cannot alias the map they live in.
-        let handlers = unsafe { std::mem::take(&mut (*world_ptr).observers.handlers) };
-
-        for trigger in &triggers {
-            if let Some(fns) = handlers.get(&trigger.observer_key) {
-                for (_, f) in fns {
-                    // SAFETY: `handlers` was moved out of the world, and no
-                    // other borrow through `world_ptr` is live here, so this
-                    // `&mut World` is unique. Handlers may push new triggers
-                    // into `observers.pending`; the current batch was already
-                    // taken.
-                    unsafe {
-                        f(&mut *world_ptr, trigger.entity);
+/// Processes at most 100 waves. Nested flushes leave queued triggers for the
+/// active outer flush. New registrations participate starting with the next
+/// wave. At the limit, pending triggers are discarded and reported.
+pub(crate) fn flush(world: &mut World) -> Vec<ObserverError> {
+    const MAX_ITERATIONS: u32 = 100;
+    if world.observers.flushing || !world.observers.has_pending() {
+        return Vec::new();
+    }
+    world.observers.flushing = true;
+    let handlers = std::mem::take(&mut world.observers.handlers);
+    let mut guard = FlushGuard { world, handlers };
+    let mut errors = Vec::new();
+    for _ in 0..MAX_ITERATIONS {
+        let triggers = std::mem::take(&mut guard.world.observers.pending);
+        if triggers.is_empty() {
+            return errors;
+        }
+        for trigger in triggers {
+            if let Some(fns) = guard.handlers.get(&trigger.observer_key) {
+                for (_, handler) in fns {
+                    if let Err(error) = handler(guard.world, trigger.entity) {
+                        errors.push(error);
                     }
                 }
             }
         }
-
-        // Put handlers back, merging any newly registered observers
-        // that were added during handler execution.
-        let observers = unsafe { &mut (*world_ptr).observers };
-        let newly_added = std::mem::replace(&mut observers.handlers, handlers);
-        for (key, new_fns) in newly_added {
-            observers.handlers.entry(key).or_default().extend(new_fns);
-        }
-
-        // Only treat the limit as exceeded if work genuinely remains after
-        // the final pass — a cascade exactly MAX_ITERATIONS deep that
-        // resolves cleanly must not panic.
-        if iteration == MAX_ITERATIONS - 1 && !observers.pending.is_empty() {
-            panic!(
-                "Observer cascade exceeded {MAX_ITERATIONS} iterations. \
-                 This likely indicates an infinite loop where observers \
-                 continuously trigger each other."
-            );
-        }
+        guard.merge_registrations();
     }
+    let pending = &mut guard.world.observers.pending;
+    if !pending.is_empty() {
+        errors.push(ObserverError::CascadeLimitExceeded {
+            iterations: MAX_ITERATIONS,
+            discarded_triggers: pending.len(),
+        });
+        pending.clear();
+    }
+    errors
 }
 
 #[cfg(test)]
@@ -290,7 +372,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 0);
 
         // Flush fires the observer
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -309,7 +391,7 @@ mod tests {
         world.insert(entity, Health(100)).unwrap();
         world.insert(entity, Health(200)).unwrap(); // replace
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         // Only one OnAdd, not two
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -329,7 +411,7 @@ mod tests {
         world.insert(entity, Health(100)).unwrap(); // add
         world.insert(entity, Health(200)).unwrap(); // replace
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
@@ -348,7 +430,7 @@ mod tests {
         world.insert(entity, Health(100)).unwrap();
         let _ = world.remove::<Health>(entity);
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -367,7 +449,7 @@ mod tests {
         world.insert(entity, Health(100)).unwrap();
         world.despawn(entity);
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -389,7 +471,7 @@ mod tests {
         let entity = world.spawn();
         world.insert(entity, Health(100)).unwrap();
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 11);
     }
 
@@ -402,7 +484,7 @@ mod tests {
         world.insert(entity, Health(100)).unwrap();
 
         // Should not panic, no pending triggers
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
     }
 
     #[test]
@@ -419,7 +501,7 @@ mod tests {
 
         let entity = world.spawn();
         world.insert(entity, Health(42)).unwrap();
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
 
         assert_eq!(value.load(Ordering::SeqCst), 42);
     }
@@ -445,7 +527,7 @@ mod tests {
 
         let entity = world.spawn();
         world.insert(entity, Health(100)).unwrap();
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
 
         // Health observer added Armor, which triggered Armor observer
         assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -453,8 +535,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Observer cascade exceeded")]
-    fn cascade_limit_panics() {
+    fn infinite_cascade_returns_an_error() {
         let mut world = World::new();
         world.register_component::<Health>();
 
@@ -465,7 +546,14 @@ mod tests {
 
         let entity = world.spawn();
         world.insert(entity, Health(1)).unwrap();
-        world.flush_observers();
+        assert!(matches!(
+            world.flush_observers().as_slice(),
+            [ObserverError::CascadeLimitExceeded {
+                iterations: 100,
+                discarded_triggers: 1
+            }]
+        ));
+        assert!(world.flush_observers().is_empty());
     }
 
     #[test]
@@ -485,7 +573,7 @@ mod tests {
             .insert_batch(entities.iter().copied().zip(components))
             .unwrap();
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 5);
     }
 
@@ -504,10 +592,10 @@ mod tests {
         for &e in &entities {
             world.insert(e, Health(100)).unwrap();
         }
-        world.flush_observers(); // flush any pending (none for remove)
+        assert!(world.flush_observers().is_empty()); // flush any pending (none for remove)
 
         world.remove_batch::<Health>(&entities);
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 3);
     }
 
@@ -532,7 +620,7 @@ mod tests {
         }
 
         world.despawn_batch(&entities);
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 3);
     }
 
@@ -542,8 +630,8 @@ mod tests {
         world.register_component::<Health>();
 
         // Flush with nothing pending — should not panic
-        world.flush_observers();
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
+        assert!(world.flush_observers().is_empty());
     }
 
     #[test]
@@ -560,7 +648,7 @@ mod tests {
         let entity = world.spawn();
         world.insert(entity, Health(100)).unwrap();
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -585,8 +673,185 @@ mod tests {
         let entity = world.spawn();
         world.insert(entity, Health(100)).unwrap();
 
-        world.flush_observers();
+        assert!(world.flush_observers().is_empty());
         assert_eq!(health_count.load(Ordering::SeqCst), 1);
         assert_eq!(armor_count.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn panic_keeps_handlers_and_new_registrations_start_next_wave() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        world.insert_resource(Vec::<&'static str>::new());
+        let first = world.spawn();
+        let second = world.spawn();
+        let line = line!() + 1;
+        world.observe_insert::<Health>(move |world, entity| {
+            world.resource_mut::<Vec<&str>>().push("old");
+            if world.resource::<Vec<&str>>().len() == 1 {
+                world.observe_insert::<Health>(|world, _| {
+                    world.resource_mut::<Vec<&str>>().push("new");
+                });
+                world.insert(entity, Health(2)).unwrap();
+                panic!("observer failure");
+            }
+        });
+        world.insert(first, Health(1)).unwrap();
+        world.insert(second, Health(1)).unwrap();
+        let errors = world.flush_observers();
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            ObserverError::Panicked {
+                entity,
+                message,
+                file,
+                line: actual_line,
+                source,
+                trigger,
+                ..
+            } => {
+                assert_eq!(*entity, first);
+                assert_eq!(message, "observer failure");
+                assert_eq!(file, file!());
+                assert_eq!(*actual_line, line);
+                assert_eq!(*source, SourceId::HOST);
+                assert!(trigger.contains("OnInsert<"));
+            }
+            error => panic!("wrong error: {error}"),
+        }
+        assert_eq!(
+            &*world.resource::<Vec<&str>>(),
+            &["old", "old", "old", "new"]
+        );
+        world.insert(first, Health(3)).unwrap();
+        assert!(world.flush_observers().is_empty());
+        assert_eq!(&world.resource::<Vec<&str>>()[4..], &["old", "new"]);
+    }
+
+    #[test]
+    fn nested_flush_leaves_work_to_the_outer_cascade() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        world.insert_resource(0u32);
+        world.observe_insert::<Health>(|world, entity| {
+            *world.resource_mut::<u32>() += 1;
+            let value = world.get::<Health>(entity).unwrap().0;
+            if value < 3 {
+                world.insert(entity, Health(value + 1)).unwrap();
+                assert!(world.flush_observers().is_empty());
+            }
+        });
+        let entity = world.spawn();
+        world.insert(entity, Health(1)).unwrap();
+        assert!(world.flush_observers().is_empty());
+        assert_eq!(*world.resource::<u32>(), 3);
+        assert_eq!(world.get::<Health>(entity).unwrap().0, 3);
+    }
+
+    #[test]
+    fn cascade_limit_discards_pending_work_without_losing_registrations() {
+        for limit in [100, 101] {
+            let mut world = World::new();
+            world.register_component::<Health>();
+            world.insert_resource(0u32);
+            world.observe_insert::<Health>(move |world, entity| {
+                *world.resource_mut::<u32>() += 1;
+                let value = world.get::<Health>(entity).unwrap().0;
+                if value < limit {
+                    world.insert(entity, Health(value + 1)).unwrap();
+                }
+            });
+            let entity = world.spawn();
+            world.insert(entity, Health(1)).unwrap();
+            let errors = world.flush_observers();
+            if limit == 100 {
+                assert!(errors.is_empty());
+            } else {
+                assert!(matches!(
+                    errors.as_slice(),
+                    [ObserverError::CascadeLimitExceeded {
+                        iterations: 100,
+                        discarded_triggers: 1
+                    }]
+                ));
+            }
+            assert_eq!(*world.resource::<u32>(), 100);
+            assert!(world.flush_observers().is_empty());
+            assert_eq!(*world.resource::<u32>(), 100); // No replay next frame.
+            world.insert(entity, Health(limit)).unwrap();
+            assert!(world.flush_observers().is_empty());
+            assert_eq!(*world.resource::<u32>(), 101);
+        }
+    }
+
+    #[test]
+    fn nested_registrations_inherit_source_and_are_purged_after_panic() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        world.register_component::<Armor>();
+        let source = SourceId(7);
+        let calls = Arc::new(AtomicU32::new(0));
+        let tracked = calls.clone();
+        world.with_registration_source(source, |world| {
+            world.observe_insert::<Health>(move |world, entity| {
+                let tracked = tracked.clone();
+                world.observe_insert::<Armor>(move |_, _| {
+                    tracked.fetch_add(1, Ordering::SeqCst);
+                });
+                world.insert(entity, Armor(2)).unwrap();
+                panic!("after registration");
+            });
+        });
+        let entity = world.spawn();
+        world.insert(entity, Health(1)).unwrap();
+        assert_eq!(world.flush_observers().len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(world.current_source(), SourceId::HOST);
+        world.purge_source(source);
+        world.insert(entity, Health(2)).unwrap();
+        world.insert(entity, Armor(3)).unwrap();
+        assert!(world.flush_observers().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn purge_inside_callback_is_rejected_before_mutation() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        let source = SourceId(7);
+        world.with_registration_source(source, |world| {
+            world.observe_insert::<Health>(move |world, _| world.purge_source(source));
+        });
+        let entity = world.spawn();
+        for value in [1, 2] {
+            world.insert(entity, Health(value)).unwrap();
+            let errors = world.flush_observers();
+            assert!(
+                matches!(&errors[..], [ObserverError::Panicked { message, .. }] if message.contains("purge_source during observer flush"))
+            );
+        }
+        world.purge_source(source);
+        world.insert(entity, Health(3)).unwrap();
+        assert!(world.flush_observers().is_empty());
+    }
+    #[test]
+    fn purge_discards_orphaned_triggers_before_new_registration() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        world.with_registration_source(SourceId(9), |world| {
+            world.observe_insert::<Health>(|_, _| panic!("purged"));
+        });
+        let entity = world.spawn();
+        world.insert(entity, Health(1)).unwrap();
+        world.purge_source(SourceId(9));
+        let calls = Arc::new(AtomicU32::new(0));
+        let tracked = calls.clone();
+        world.observe_insert::<Health>(move |_, _| {
+            tracked.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(world.flush_observers().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        world.insert(entity, Health(2)).unwrap();
+        assert!(world.flush_observers().is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

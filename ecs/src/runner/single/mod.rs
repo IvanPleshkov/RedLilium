@@ -28,6 +28,7 @@ type PrevResults = Vec<Option<Box<dyn Any + Send + Sync>>>;
 ///
 /// Suitable for WASM targets and simple applications.
 pub struct EcsRunnerSingleThread {
+    executor: crate::ParallelExecutor,
     compute: ComputePool,
     io: IoRuntime,
     /// Previous-tick system results for `reuse_result`, keyed by the
@@ -38,12 +39,27 @@ pub struct EcsRunnerSingleThread {
 impl EcsRunnerSingleThread {
     /// Creates a new single-threaded runner.
     pub fn new() -> Self {
+        Self::with_executor(crate::ParallelExecutor::default())
+    }
+
+    /// Systems run on the caller; their parallel queries share this executor.
+    pub fn with_executor(executor: crate::ParallelExecutor) -> Self {
         let io = IoRuntime::new();
         Self {
+            executor,
             compute: ComputePool::new(io.clone()),
             io,
             prev_results: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn executor(&self) -> &crate::ParallelExecutor {
+        &self.executor
+    }
+
+    pub(crate) fn clear_cached_results(&self) {
+        let results = std::mem::take(&mut *self.prev_results.lock());
+        drop(results);
     }
 
     /// Returns a reference to the compute pool.
@@ -62,7 +78,7 @@ impl EcsRunnerSingleThread {
     /// The compute pool is driven between polls so spawned tasks
     /// make progress.
     /// Command panics are collected per flush in
-    /// [`SystemError::DeferredCommandsFailed`](crate::SystemError::DeferredCommandsFailed).
+    /// [`SystemError::DeferredEffectsFailed`](crate::SystemError::DeferredEffectsFailed).
     /// Later commands and systems continue; partial mutations are retained.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
         self.run_with(world, systems, &RunDiagnostics::default())
@@ -92,6 +108,24 @@ impl EcsRunnerSingleThread {
 
         let n = systems.node_count();
         let mut errors = Vec::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let _run = match self.executor.prepare_queries() {
+            Ok(lease) => lease,
+            Err(message) => {
+                return RunResult {
+                    errors: vec![SystemError::ExecutorUnavailable { message }],
+                    report: RunReport::default(),
+                };
+            }
+        };
+        if let Err(error) = world.set_parallel_executor(self.executor.clone()) {
+            return RunResult {
+                errors: vec![SystemError::ExecutorUnavailable {
+                    message: error.to_string(),
+                }],
+                report: RunReport::default(),
+            };
+        }
         let commands = CommandCollector::new();
         let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
 
@@ -148,10 +182,10 @@ impl EcsRunnerSingleThread {
                     {
                         redlilium_core::profile_scope!("ecs: apply commands (pre-exclusive)");
                         let command_errors = commands.apply(world);
-                        if !command_errors.is_empty() {
-                            errors.push(SystemError::DeferredCommandsFailed {
-                                errors: command_errors,
-                            });
+                        if let Err(error) =
+                            SystemError::deferred_effects(command_errors, Vec::new())
+                        {
+                            errors.push(error);
                         }
                     }
 
@@ -273,20 +307,18 @@ impl EcsRunnerSingleThread {
         // Apply deferred commands (ctx dropped, world is free). Advance the
         // tick so command writes land after every system's `last_run`.
         world.advance_tick();
-        {
+        let command_errors = {
             redlilium_core::profile_scope!("ecs: apply commands");
-            let command_errors = commands.apply(world);
-            if !command_errors.is_empty() {
-                errors.push(SystemError::DeferredCommandsFailed {
-                    errors: command_errors,
-                });
-            }
-        }
+            commands.apply(world)
+        };
 
-        // Flush deferred observers (may cascade)
-        {
+        // Flush deferred observers (may cascade), retaining both error lists.
+        let observer_errors = {
             redlilium_core::profile_scope!("ecs: flush observers");
-            world.flush_observers();
+            world.flush_observers()
+        };
+        if let Err(error) = SystemError::deferred_effects(command_errors, observer_errors) {
+            errors.push(error);
         }
 
         // Drain remaining compute tasks (one poll per task)

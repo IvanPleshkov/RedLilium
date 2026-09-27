@@ -231,8 +231,26 @@ impl World {
         &self.parallel_executor
     }
 
-    /// Creates a new empty world.
+    /// Attach an executor. The previous pool's workers are joined before
+    /// detaching; returns an error if that pool has active borrowed scopes.
+    pub fn set_parallel_executor(
+        &mut self,
+        executor: crate::ParallelExecutor,
+    ) -> Result<(), crate::ExecutorBusy> {
+        if !self.parallel_executor.shares_workers_with(&executor) {
+            self.parallel_executor.shutdown_workers()?;
+            self.parallel_executor = executor;
+        }
+        Ok(())
+    }
+
+    /// Creates a standalone world with a lazily started executor.
     pub fn new() -> Self {
+        Self::with_parallel_executor(crate::ParallelExecutor::default())
+    }
+
+    /// Creates a world sharing CPU workers with runners and other worlds.
+    pub fn with_parallel_executor(parallel_executor: crate::ParallelExecutor) -> Self {
         let mut resources = Resources::new();
         resources.insert(
             crate::commands::CommandBuffer::new(),
@@ -248,7 +266,7 @@ impl World {
             crate::type_identity::SourceId::HOST,
         );
         Self {
-            parallel_executor: crate::ParallelExecutor::default(),
+            parallel_executor,
             entities: Entities::new(),
             components: HashMap::new(),
             next_registration_seq: 0,
@@ -441,7 +459,9 @@ impl World {
     /// # Panics
     ///
     /// Panics if `source` is [`SourceId::HOST`](crate::SourceId::HOST) — the
-    /// host's registrations are the world's own substrate.
+    /// host's registrations are the world's own substrate. Also panics during
+    /// an observer flush or while the shared executor is active: source
+    /// unloading must wait for active callbacks and runner executions.
     pub fn purge_source(&mut self, source: crate::type_identity::SourceId) {
         assert_ne!(
             source,
@@ -449,8 +469,15 @@ impl World {
             "purge_source(HOST) would strip the world's own registrations"
         );
 
+        assert!(
+            !self.observers.is_flushing(),
+            "purge_source during observer flush is forbidden"
+        );
+
         // Run worker TLS destructors while the source image is still mapped.
-        self.parallel_executor.shutdown();
+        self.parallel_executor
+            .shutdown_workers()
+            .expect("cannot purge a source while its shared executor is active");
 
         // Component storages: dropping the lock runs the storage's drop glue
         // (per-component destructors monomorphized in the source's image), so
@@ -703,7 +730,7 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        self.parallel_executor.shutdown();
+        self.parallel_executor.shutdown_if_unique();
         // Decrement registration counts in the shared registry for each type
         // this world registered, per generation — the unit must match
         // `record_type_source`, which increments once per type. (Decrementing

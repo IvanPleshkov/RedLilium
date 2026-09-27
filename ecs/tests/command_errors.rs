@@ -44,9 +44,14 @@ impl ExclusiveSystem for CheckAfterFlush {
 }
 
 fn check_errors(error: &SystemError) {
-    let SystemError::DeferredCommandsFailed { errors } = error else {
+    let SystemError::DeferredEffectsFailed {
+        commands: errors,
+        observers,
+    } = error
+    else {
         panic!("wrong error: {error}");
     };
+    assert!(observers.is_empty());
     assert_eq!(errors.len(), 2);
     assert_eq!(errors[0].message, "first command failed");
     assert_eq!(errors[1].message, "unknown panic");
