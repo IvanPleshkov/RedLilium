@@ -249,6 +249,8 @@ pub fn register_std_components(world: &mut World) {
     // Physics descriptor + handle components (feature-gated)
     #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
     {
+        world.register_inspector::<physics::control3d::KinematicTarget3D>();
+        world.register_inspector_default::<physics::control3d::KinematicVelocity3D>();
         world.register_inspector_default::<physics::components3d::RigidBody3D>();
         world.register_inspector_default::<physics::components3d::Collider3D>();
         world.register_inspector::<physics::components3d::ImpulseJoint3D>();
@@ -258,6 +260,8 @@ pub fn register_std_components(world: &mut World) {
     }
     #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
     {
+        world.register_inspector::<physics::control2d::KinematicTarget2D>();
+        world.register_inspector_default::<physics::control2d::KinematicVelocity2D>();
         world.register_inspector_default::<physics::components2d::RigidBody2D>();
         world.register_inspector_default::<physics::components2d::Collider2D>();
         world.register_inspector::<physics::components2d::ImpulseJoint2D>();

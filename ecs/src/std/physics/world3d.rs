@@ -27,8 +27,8 @@ pub struct ImpulseJoint3DHandle(pub ImpulseJointHandle);
 /// `cur → prev` and records the new pose each fixed step;
 /// [`InterpolatePhysics`](super::systems3d::InterpolatePhysics) blends the two
 /// by [`Time::fixed_alpha`](crate::Time::fixed_alpha) into `Transform` for
-/// rendering. Rapier stays the source of truth (it never reads `Transform`
-/// back), so the interpolated `Transform` never perturbs the simulation.
+/// rendering. Dynamic and kinematic bodies never read `Transform` back, so
+/// interpolation cannot perturb the simulation. Fixed bodies are not interpolated.
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicsInterpolation {
     /// Translation after the previous fixed step.
@@ -60,6 +60,24 @@ pub struct PhysicsInterpolation {
 /// });
 /// ```
 pub struct PhysicsWorld3D {
+    pub(super) teleports: HashMap<
+        crate::Entity,
+        (
+            RigidBodyHandle,
+            super::control3d::PhysicsPose3D,
+            super::TeleportVelocity,
+        ),
+    >,
+    pub(super) pose_resets: std::collections::HashSet<RigidBodyHandle>,
+    pub(super) applied_bodies: HashMap<
+        RigidBodyHandle,
+        (
+            super::components3d::RigidBody3D,
+            super::components3d::Collider3D,
+            ColliderHandle,
+        ),
+    >,
+    pub(super) applied_joints: HashMap<ImpulseJointHandle, super::components3d::ImpulseJoint3D>,
     pub gravity: Vector,
     pub integration_parameters: IntegrationParameters,
     pub pipeline: PhysicsPipeline,
@@ -83,6 +101,10 @@ pub struct PhysicsWorld3D {
 impl Default for PhysicsWorld3D {
     fn default() -> Self {
         Self {
+            teleports: HashMap::new(),
+            pose_resets: Default::default(),
+            applied_bodies: HashMap::new(),
+            applied_joints: HashMap::new(),
             gravity: Vector::new(0.0, -9.81, 0.0),
             integration_parameters: IntegrationParameters::default(),
             pipeline: PhysicsPipeline::new(),
@@ -157,6 +179,9 @@ impl PhysicsWorld3D {
 
     /// Removes a rigid body and all its attached colliders and joints.
     pub fn remove_body(&mut self, handle: RigidBodyHandle) {
+        self.applied_bodies.remove(&handle);
+        self.pose_resets.remove(&handle);
+        self.teleports.retain(|_, (body, _, _)| *body != handle);
         self.bodies.remove(
             handle,
             &mut self.island_manager,
@@ -169,6 +194,7 @@ impl PhysicsWorld3D {
 
     /// Removes an impulse joint.
     pub fn remove_impulse_joint(&mut self, handle: ImpulseJointHandle, wake_up: bool) {
+        self.applied_joints.remove(&handle);
         self.impulse_joints.remove(handle, wake_up);
     }
 

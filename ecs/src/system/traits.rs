@@ -12,6 +12,8 @@ use crate::world::World;
 /// runner via [`std::panic::catch_unwind`].
 #[derive(Debug, Clone)]
 pub enum SystemError {
+    /// Invalid system input or configuration; see the owned diagnostic.
+    InvalidConfiguration { message: String },
     /// This container is bound to another world. No systems were executed.
     /// Recreate the container for the new world; clearing runner caches does
     /// not reset the binding or the systems' internal state.
@@ -46,6 +48,7 @@ pub enum SystemError {
 impl fmt::Display for SystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidConfiguration { message } => write!(f, "invalid configuration: {message}"),
             SystemError::ScheduleWorldMismatch { container_id } => write!(
                 f,
                 "schedule container {container_id} is bound to another world; \

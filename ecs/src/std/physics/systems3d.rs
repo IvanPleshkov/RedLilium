@@ -23,16 +23,8 @@ pub struct StepPhysics3D;
 
 impl crate::System for StepPhysics3D {
     type Result = ();
-    fn run<'a>(
-        &'a self,
-        ctx: &'a crate::SystemContext<'a>,
-    ) -> Result<(), crate::system::SystemError> {
-        // Integrator dt: physics is scheduled in `FixedUpdate`, so advance
-        // Rapier by the fixed timestep (`Time::fixed_delta`) instead of its
-        // hardcoded default `dt` — otherwise changing the fixed rate would
-        // silently desync simulated time from real time. Worlds ticked without
-        // `run_frame` (e.g. the physics demo) carry no `Time`; leave their
-        // integrator dt untouched there.
+    fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) -> Result<(), crate::SystemError> {
+        use super::control3d::{KinematicTarget3D, KinematicVelocity3D, PhysicsPose3D};
         let fixed_dt = {
             let world = ctx.raw_world();
             world
@@ -43,34 +35,119 @@ impl crate::System for StepPhysics3D {
             crate::ResMut<PhysicsWorld3D>,
             crate::Read<RigidBody3DHandle>,
             crate::Write<crate::Transform>,
+            crate::Read<crate::Parent>,
+            crate::Write<KinematicTarget3D>,
+            crate::Write<KinematicVelocity3D>,
         )>()
-        .execute(|(mut physics, handles, mut transforms)| {
-            redlilium_core::profile_scope!("ecs: step_physics_3d");
-
-            // Step simulation at the fixed timestep (see above).
-            if let Some(dt) = fixed_dt {
-                physics.integration_parameters.dt = dt as Real;
-            }
-            physics.step();
-
-            // Sync positions back to transforms
-            for (idx, handle) in handles.iter() {
-                if let Some(body) = physics.bodies.get(handle.0)
-                    && (body.is_dynamic() || body.is_kinematic())
-                    && let Some(mut transform) = transforms.get_mut(idx)
-                {
-                    let pos = body.position();
-                    let t = pos.translation;
-                    transform.translation =
-                        redlilium_core::math::Vec3::new(t.x as f32, t.y as f32, t.z as f32);
-                    let r = pos.rotation;
-                    transform.rotation = redlilium_core::math::quat_from_xyzw(
-                        r.x as f32, r.y as f32, r.z as f32, r.w as f32,
-                    );
+        .execute(
+            |(mut physics, handles, mut transforms, parents, mut targets, mut velocities)| {
+                // Validate the whole batch before changing motion or advancing time.
+                for (idx, handle) in handles.iter() {
+                    let Some(entity) = ctx.raw_world().entity_at_index(idx) else {
+                        continue;
+                    };
+                    let Some(t) = transforms.get(idx) else {
+                        continue;
+                    };
+                    super::validation::transform(entity, t, parents.get(idx).is_some())?;
+                    if let Some(body) = physics.bodies.get(handle.0) {
+                        if (body.body_type() == RigidBodyType::KinematicPositionBased)
+                            && let Some(target) = targets.get(idx)
+                        {
+                            PhysicsPose3D::from(*target).validate(entity)?;
+                        }
+                        if (body.body_type() == RigidBodyType::KinematicVelocityBased)
+                            && let Some(v) = velocities.get(idx)
+                            && (!v.linear.iter().all(|x| x.is_finite())
+                                || !(v.angular.iter().all(|x| x.is_finite())))
+                        {
+                            return Err(super::validation::invalid(
+                                entity,
+                                "kinematic velocity must be finite",
+                            ));
+                        }
+                    }
                 }
-            }
-        });
-        Ok(())
+                for (idx, handle) in handles.iter() {
+                    let Some(t) = transforms.get(idx) else {
+                        continue;
+                    };
+                    let Some(body) = physics.bodies.get_mut(handle.0) else {
+                        continue;
+                    };
+                    if body.is_fixed() {
+                        let pose = PhysicsPose3D::from_transform(t).to_rapier();
+                        if *body.position() != pose {
+                            body.set_position(pose, true);
+                        }
+                    } else if body.body_type() == RigidBodyType::KinematicPositionBased {
+                        let pose = targets
+                            .get(idx)
+                            .map(|t| PhysicsPose3D::from(*t).to_rapier())
+                            .unwrap_or(*body.position());
+                        body.set_next_kinematic_position(pose);
+                    } else if body.body_type() == RigidBodyType::KinematicVelocityBased {
+                        let v = velocities.get(idx).copied().unwrap_or_default();
+                        body.set_linvel(
+                            Vector::new(v.linear.x as Real, v.linear.y as Real, v.linear.z as Real),
+                            true,
+                        );
+                        body.set_angvel(
+                            Vector::new(
+                                v.angular.x as Real,
+                                v.angular.y as Real,
+                                v.angular.z as Real,
+                            ),
+                            true,
+                        );
+                    }
+                }
+                let teleports = std::mem::take(&mut physics.teleports);
+                for (entity, (handle, pose, velocity)) in teleports {
+                    if !ctx.is_alive(entity)
+                        || ctx.is_excluded_from_game(entity)
+                        || physics.entity_to_body.get(&entity) != Some(&handle)
+                    {
+                        continue;
+                    }
+                    let Some(body) = physics.bodies.get_mut(handle) else {
+                        continue;
+                    };
+                    body.set_position(pose.to_rapier(), true);
+                    body.set_next_kinematic_position(pose.to_rapier());
+                    if velocity == super::TeleportVelocity::Reset {
+                        body.set_linvel(Vector::ZERO, true);
+                        body.set_angvel(Vector::ZERO, true);
+                        if let Some(mut input) = velocities.get_mut(entity.index()) {
+                            *input = Default::default();
+                        }
+                    }
+                    if let Some(mut target) = targets.get_mut(entity.index()) {
+                        *target = pose.into();
+                    }
+                    if let Some(mut transform) = transforms.get_mut(entity.index()) {
+                        transform.translation = pose.translation;
+                        transform.rotation = pose.rotation;
+                    }
+                    physics.pose_resets.insert(handle);
+                }
+                if let Some(dt) = fixed_dt {
+                    physics.integration_parameters.dt = dt as Real;
+                }
+                physics.step();
+                for (idx, handle) in handles.iter() {
+                    if let Some(body) = physics.bodies.get(handle.0)
+                        && (body.is_dynamic() || body.is_kinematic())
+                        && let Some(mut transform) = transforms.get_mut(idx)
+                    {
+                        let pose = PhysicsPose3D::from_rapier(body.position());
+                        transform.translation = pose.translation;
+                        transform.rotation = pose.rotation;
+                    }
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -78,8 +155,8 @@ impl crate::System for StepPhysics3D {
 
 /// Records each body's authoritative fixed-step pose into its
 /// [`PhysicsInterpolation`] history. Runs in `FixedUpdate` **after**
-/// [`StepPhysics3D`] (which has just written the post-step pose to
-/// `Transform`), so it executes exactly once per fixed step — including the
+/// [`StepPhysics3D`]. Poses are read directly from Rapier, so presentation
+/// changes cannot enter the history. It executes once per fixed step, including the
 /// extra iterations of a catch-up frame, leaving the two most recent steps in
 /// `prev`/`cur`.
 ///
@@ -97,23 +174,36 @@ impl crate::System for RecordPhysicsPose {
         let to_seed = ctx
             .lock::<(
                 crate::Read<RigidBody3DHandle>,
-                crate::Read<crate::Transform>,
+                crate::ResMut<PhysicsWorld3D>,
                 crate::WriteAll<PhysicsInterpolation>,
             )>()
-            .execute(|(handles, transforms, mut interps)| {
+            .execute(|(handles, mut physics, mut interps)| {
                 redlilium_core::profile_scope!("ecs: record_physics_pose_3d");
                 let mut seed = Vec::new();
                 for (idx, handle) in handles.iter() {
-                    let Some(transform) = transforms.get(idx) else {
+                    let Some(body) = physics.bodies.get(handle.0) else {
                         continue;
                     };
+                    if body.is_fixed() {
+                        continue;
+                    }
+                    let pose = super::control3d::PhysicsPose3D::from_rapier(body.position());
+                    let reset = physics.pose_resets.remove(&handle.0);
                     if let Some(mut interp) = interps.get_mut(idx) {
-                        interp.prev_translation = interp.cur_translation;
-                        interp.prev_rotation = interp.cur_rotation;
-                        interp.cur_translation = transform.translation;
-                        interp.cur_rotation = transform.rotation;
+                        interp.prev_translation = if reset {
+                            pose.translation
+                        } else {
+                            interp.cur_translation
+                        };
+                        interp.prev_rotation = if reset {
+                            pose.rotation
+                        } else {
+                            interp.cur_rotation
+                        };
+                        interp.cur_translation = pose.translation;
+                        interp.cur_rotation = pose.rotation;
                     } else if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
-                        seed.push((entity, handle.0, transform.translation, transform.rotation));
+                        seed.push((entity, handle.0, pose.translation, pose.rotation));
                     }
                 }
                 seed
@@ -148,11 +238,9 @@ impl crate::System for RecordPhysicsPose {
 /// rendering, by the frame's [`Time::fixed_alpha`](crate::Time::fixed_alpha).
 ///
 /// Runs in `PostUpdate` **before** transform propagation, so the interpolated
-/// pose is what `GlobalTransform` — and therefore the rasterizer and the
-/// motion-vector history — sees. Overwriting `Transform` is safe: Rapier owns
-/// the authoritative poses and never reads `Transform` back for an existing
-/// body, and [`RecordPhysicsPose`] snapshots the pose inside `FixedUpdate`
-/// before this system ever runs.
+/// pose is what `GlobalTransform` and rendering see. Only dynamic and kinematic
+/// bodies are interpolated; their Transform is output only. Fixed bodies read
+/// Transform as input before each step and are never interpolated.
 pub struct InterpolatePhysics;
 
 impl crate::System for InterpolatePhysics {
@@ -176,12 +264,17 @@ impl crate::System for InterpolatePhysics {
         ctx.lock::<(
             crate::Read<PhysicsInterpolation>,
             crate::Read<RigidBody3DHandle>,
+            crate::Res<PhysicsWorld3D>,
             crate::WriteAll<crate::Transform>,
         )>()
-        .execute(|(interps, handles, mut transforms)| {
+        .execute(|(interps, handles, physics, mut transforms)| {
             redlilium_core::profile_scope!("ecs: interpolate_physics_3d");
             for (idx, interp) in interps.iter() {
-                if handles.get(idx).is_none() {
+                if !handles
+                    .get(idx)
+                    .and_then(|h| physics.bodies.get(h.0))
+                    .is_some_and(|body| !body.is_fixed())
+                {
                     continue;
                 }
                 let Some(mut transform) = transforms.get_mut(idx) else {
@@ -222,6 +315,11 @@ fn remove_bodies(physics: &mut PhysicsWorld3D, stale: &[crate::Entity]) -> Vec<c
             }
             live
         });
+    }
+    if !stale.is_empty() {
+        physics
+            .applied_joints
+            .retain(|handle, _| physics.impulse_joints.contains(*handle));
     }
     stale_joints
 }
@@ -270,6 +368,26 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
     fn run(&mut self, world: &mut crate::World) -> Result<(), crate::system::SystemError> {
         redlilium_core::profile_scope!("ecs: sync_physics_bodies_3d");
 
+        for entity in world
+            .iter_entities()
+            .filter(|e| !world.is_excluded_from_game(*e))
+        {
+            if world
+                .get::<super::components3d::RigidBody3D>(entity)
+                .is_some()
+                && world
+                    .get::<super::components3d::Collider3D>(entity)
+                    .is_some()
+                && let Some(t) = world.get::<crate::Transform>(entity)
+            {
+                super::validation::transform(
+                    entity,
+                    t,
+                    world.get::<crate::Parent>(entity).is_some(),
+                )?;
+            }
+        }
+
         // Ensure resource exists
         if !world.has_resource::<PhysicsWorld3D>() {
             world.insert_resource(PhysicsWorld3D::default());
@@ -297,7 +415,7 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
             remove_body_components(world, &stale, &stale_joints);
         }
 
-        // Phase 2: Find new bodies (have descriptors, not in mapping, not disabled)
+        // Phase 2: Find new bodies (have descriptors, new or changed descriptors, not excluded)
         let new_entities: Vec<(
             crate::Entity,
             super::components3d::RigidBody3D,
@@ -307,18 +425,22 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
             let physics = world.resource::<PhysicsWorld3D>();
             world
                 .iter_entities()
-                .filter(|e| {
-                    !physics.entity_to_body.contains_key(e) && !world.is_excluded_from_game(*e)
-                })
+                .filter(|e| !world.is_excluded_from_game(*e))
                 .filter_map(|entity| {
-                    let body = world
-                        .get::<super::components3d::RigidBody3D>(entity)?
-                        .clone();
-                    let collider = world
-                        .get::<super::components3d::Collider3D>(entity)?
-                        .clone();
+                    let body = world.get::<super::components3d::RigidBody3D>(entity)?;
+                    let collider = world.get::<super::components3d::Collider3D>(entity)?;
+                    if physics
+                        .entity_to_body
+                        .get(&entity)
+                        .and_then(|h| physics.applied_bodies.get(h))
+                        .is_some_and(|(old_body, old_collider, _)| {
+                            old_body == body && old_collider == collider
+                        })
+                    {
+                        return None;
+                    }
                     let transform = *world.get::<crate::Transform>(entity)?;
-                    Some((entity, body, collider, transform))
+                    Some((entity, body.clone(), collider.clone(), transform))
                 })
                 .collect()
         };
@@ -328,10 +450,18 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
             {
                 let mut physics = world.resource_mut::<PhysicsWorld3D>();
                 for (entity, body_desc, collider_desc, transform) in &new_entities {
+                    if let Some(handle) = physics.entity_to_body.get(entity).copied() {
+                        physics.apply_body_settings(handle, body_desc, collider_desc);
+                        continue;
+                    }
                     let rapier_body = body_desc.to_rigid_body(transform);
                     let body_handle = physics.add_body(rapier_body);
                     let rapier_collider = collider_desc.to_collider();
-                    physics.add_collider(rapier_collider, body_handle);
+                    let collider_handle = physics.add_collider(rapier_collider, body_handle);
+                    physics.applied_bodies.insert(
+                        body_handle,
+                        (body_desc.clone(), collider_desc.clone(), collider_handle),
+                    );
                     physics.entity_to_body.insert(*entity, body_handle);
                     physics.body_to_entity.insert(body_handle, *entity);
                     handles.push((*entity, body_handle));
@@ -400,19 +530,23 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
             }
         }
 
-        // Phase 2: Find new joints (not in mapping, not excluded from game)
+        // Phase 2: Find new joints (new or changed descriptors, not excluded from game)
         let new_joints: Vec<(crate::Entity, super::components3d::ImpulseJoint3D)> = {
             let physics = world.resource::<PhysicsWorld3D>();
             world
                 .iter_entities()
-                .filter(|e| {
-                    !physics.entity_to_joint.contains_key(e) && !world.is_excluded_from_game(*e)
-                })
+                .filter(|e| !world.is_excluded_from_game(*e))
                 .filter_map(|entity| {
-                    let joint = world
-                        .get::<super::components3d::ImpulseJoint3D>(entity)?
-                        .clone();
-                    Some((entity, joint))
+                    let joint = world.get::<super::components3d::ImpulseJoint3D>(entity)?;
+                    if physics
+                        .entity_to_joint
+                        .get(&entity)
+                        .and_then(|h| physics.applied_joints.get(h))
+                        == Some(joint)
+                    {
+                        return None;
+                    }
+                    Some((entity, joint.clone()))
                 })
                 .collect()
         };
@@ -422,6 +556,14 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
             {
                 let mut physics = world.resource_mut::<PhysicsWorld3D>();
                 for (entity, joint_desc) in &new_joints {
+                    if let Some(handle) = physics.entity_to_joint.get(entity).copied() {
+                        if physics.applied_joints.get(&handle) == Some(joint_desc) {
+                            continue;
+                        }
+                        physics.entity_to_joint.remove(entity);
+                        physics.remove_impulse_joint(handle, true);
+                        handles.push((*entity, None));
+                    }
                     let body1_handle = match physics.entity_to_body.get(&joint_desc.body1) {
                         Some(h) => *h,
                         None => continue,
@@ -433,11 +575,16 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
                     let rapier_joint = joint_desc.to_rapier_joint();
                     let jh = physics.add_impulse_joint(body1_handle, body2_handle, rapier_joint);
                     physics.entity_to_joint.insert(*entity, jh);
-                    handles.push((*entity, jh));
+                    physics.applied_joints.insert(jh, joint_desc.clone());
+                    handles.push((*entity, Some(jh)));
                 }
             }
             for (entity, handle) in handles {
-                let _ = world.insert(entity, ImpulseJoint3DHandle(handle));
+                if let Some(handle) = handle {
+                    let _ = world.insert(entity, ImpulseJoint3DHandle(handle));
+                } else {
+                    let _ = world.remove::<ImpulseJoint3DHandle>(entity);
+                }
             }
         }
 
@@ -468,8 +615,17 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                 crate::Read<super::components3d::RigidBody3D>,
                 crate::Read<super::components3d::Collider3D>,
                 crate::Read<crate::Transform>,
+                crate::Read<crate::Parent>,
             )>()
-            .execute(|(mut physics, bodies, colliders, transforms)| {
+            .execute(|(mut physics, bodies, colliders, transforms, parents)| {
+                for (idx, _) in bodies.iter() {
+                    if colliders.get(idx).is_some()
+                        && let Some(t) = transforms.get(idx)
+                        && let Some(entity) = ctx.raw_world().entity_at_index(idx)
+                    {
+                        super::validation::transform(entity, t, parents.get(idx).is_some())?;
+                    }
+                }
                 // Remove stale: entity dead (full-identity check, so a recycled
                 // slot does not keep the old body), excluded, or missing prerequisites.
                 let stale: Vec<crate::Entity> = physics
@@ -490,20 +646,27 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                 let mut new_pairs: Vec<(crate::Entity, RigidBodyHandle)> = Vec::new();
                 for (idx, body_desc) in bodies.iter() {
                     if let Some(entity) = ctx.raw_world().entity_at_index(idx)
-                        && !physics.entity_to_body.contains_key(&entity)
                         && let (Some(collider_desc), Some(transform)) =
                             (colliders.get(idx), transforms.get(idx))
                     {
+                        if let Some(handle) = physics.entity_to_body.get(&entity).copied() {
+                            physics.apply_body_settings(handle, body_desc, collider_desc);
+                            continue;
+                        }
                         let rapier_body = body_desc.to_rigid_body(transform);
                         let body_handle = physics.add_body(rapier_body);
                         let rapier_collider = collider_desc.to_collider();
-                        physics.add_collider(rapier_collider, body_handle);
+                        let collider_handle = physics.add_collider(rapier_collider, body_handle);
+                        physics.applied_bodies.insert(
+                            body_handle,
+                            (body_desc.clone(), collider_desc.clone(), collider_handle),
+                        );
                         new_pairs.push((entity, body_handle));
                     }
                 }
 
-                (new_pairs, stale, stale_joints)
-            });
+                Ok::<_, crate::SystemError>((new_pairs, stale, stale_joints))
+            })?;
 
         if !new_entities.is_empty() || !stale_entities.is_empty() || !stale_joints.is_empty() {
             ctx.commands(move |world| {
@@ -519,7 +682,14 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                         && world
                             .get::<super::components3d::Collider3D>(entity)
                             .is_some()
-                        && world.get::<crate::Transform>(entity).is_some();
+                        && world.get::<crate::Transform>(entity).is_some_and(|t| {
+                            super::validation::transform(
+                                entity,
+                                t,
+                                world.get::<crate::Parent>(entity).is_some(),
+                            )
+                            .is_ok()
+                        });
                     if valid {
                         let _ = world.insert(entity, RigidBody3DHandle(handle));
                         let mut physics = world.resource_mut::<PhysicsWorld3D>();
@@ -559,7 +729,7 @@ impl crate::System for SyncPhysicsJointsSystem3D {
             .execute(|(mut physics, joints)| {
                 // Remove stale: entity dead (full-identity check), disabled, or
                 // lost the ImpulseJoint3D component.
-                let stale: Vec<crate::Entity> = physics
+                let mut stale: Vec<crate::Entity> = physics
                     .entity_to_joint
                     .iter()
                     .filter(|(e, handle)| {
@@ -579,9 +749,15 @@ impl crate::System for SyncPhysicsJointsSystem3D {
                 // Create new
                 let mut new_pairs: Vec<(crate::Entity, ImpulseJointHandle)> = Vec::new();
                 for (idx, joint_desc) in joints.iter() {
-                    if let Some(entity) = ctx.raw_world().entity_at_index(idx)
-                        && !physics.entity_to_joint.contains_key(&entity)
-                    {
+                    if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
+                        if let Some(handle) = physics.entity_to_joint.get(&entity).copied() {
+                            if physics.applied_joints.get(&handle) == Some(joint_desc) {
+                                continue;
+                            }
+                            physics.entity_to_joint.remove(&entity);
+                            physics.remove_impulse_joint(handle, true);
+                            stale.push(entity);
+                        }
                         let body1_handle = match physics.entity_to_body.get(&joint_desc.body1) {
                             Some(h) => *h,
                             None => continue,
@@ -593,6 +769,7 @@ impl crate::System for SyncPhysicsJointsSystem3D {
                         let rapier_joint = joint_desc.to_rapier_joint();
                         let jh =
                             physics.add_impulse_joint(body1_handle, body2_handle, rapier_joint);
+                        physics.applied_joints.insert(jh, joint_desc.clone());
                         new_pairs.push((entity, jh));
                     }
                 }
@@ -765,10 +942,11 @@ mod tests {
         }
 
         // A later step shifts cur -> prev and records the new pose.
-        let _ = world.insert(
-            e,
-            crate::Transform::from_translation(Vec3::new(0.0, 2.0, 0.0)),
-        );
+        {
+            let mut physics = world.resource_mut::<PhysicsWorld3D>();
+            let handle = physics.entity_to_body[&e];
+            physics.bodies[handle].set_translation(Vector::new(0.0, 2.0, 0.0), true);
+        }
         run_system_once(&RecordPhysicsPose, &mut world, &compute, &io).unwrap();
         let interp = world.get::<PhysicsInterpolation>(e).expect("recorded");
         assert_eq!(interp.prev_translation.y, 1.0, "previous step retained");

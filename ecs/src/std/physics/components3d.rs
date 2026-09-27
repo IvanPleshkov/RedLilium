@@ -398,26 +398,8 @@ impl ImpulseJoint3D {
 impl RigidBody3D {
     /// Convert this descriptor + transform into a rapier `RigidBody`.
     pub(crate) fn to_rigid_body(&self, transform: &crate::Transform) -> RigidBody {
-        use redlilium_core::math::{Real, quat_to_array};
-
-        let t = &transform.translation;
-        let translation = Vector::new(t.x as Real, t.y as Real, t.z as Real);
-
-        // Convert quaternion to axis-angle (scaled axis) for rapier
-        let arr = quat_to_array(transform.rotation); // [x, y, z, w]
-        let qw = (arr[3] as Real).clamp(-1.0, 1.0);
-        let half_angle = qw.acos();
-        let sin_half = half_angle.sin();
-        let angle = half_angle * 2.0;
-        let rotation = if sin_half.abs() > 1e-10 {
-            Vector::new(
-                arr[0] as Real / sin_half * angle,
-                arr[1] as Real / sin_half * angle,
-                arr[2] as Real / sin_half * angle,
-            )
-        } else {
-            Vector::new(0.0, 0.0, 0.0)
-        };
+        use super::rapier3d::prelude::Real;
+        let pose = super::control3d::PhysicsPose3D::from_transform(transform).to_rapier();
 
         let builder = match self.body_type {
             RigidBodyType::Fixed => RigidBodyBuilder::fixed(),
@@ -427,8 +409,7 @@ impl RigidBody3D {
         };
 
         builder
-            .translation(translation)
-            .rotation(rotation)
+            .pose(pose)
             .linear_damping(self.linear_damping as Real)
             .angular_damping(self.angular_damping as Real)
             .gravity_scale(self.gravity_scale as Real)
@@ -515,7 +496,11 @@ pub fn build_physics_world_3d(world: &mut crate::World) {
         let body_handle = physics.add_body(rapier_body);
 
         let rapier_collider = collider_desc.to_collider();
-        physics.add_collider(rapier_collider, body_handle);
+        let collider_handle = physics.add_collider(rapier_collider, body_handle);
+        physics.applied_bodies.insert(
+            body_handle,
+            (body_desc.clone(), collider_desc.clone(), collider_handle),
+        );
 
         handle_pairs.push((*entity, body_handle));
     }

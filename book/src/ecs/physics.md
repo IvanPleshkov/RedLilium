@@ -41,6 +41,72 @@ they preserve the manually configured `integration_parameters.dt`. The 2D
 builder initializes rotation from the transform's Z angle; stepping preserves
 the transform's Z translation for draw ordering.
 
+## Pose ownership and motion
+
+Physics bodies must be root entities (no `Parent`) with unit `Transform.scale`.
+Put scaled visuals on child entities and specify collision dimensions in the
+collider. Body sync and step return `SystemError::InvalidConfiguration` for an
+unsupported hierarchy/scale or invalid pose, before their simulation step.
+
+`Transform` supplies the initial pose. After creation:
+
+| Body kind | Motion input |
+|---|---|
+| Dynamic | Simulation, forces, impulses and velocity changes through the physics world |
+| KinematicPosition | `KinematicTarget3D` / `KinematicTarget2D` |
+| KinematicVelocity | `KinematicVelocity3D` / `KinematicVelocity2D` |
+| Fixed | `Transform`, read before every step |
+
+Dynamic and kinematic transforms are presentation output. Writing one does not
+teleport a body. `PhysicsWorld3D::pose(entity)` (or its 2D equivalent) reads the
+current simulation pose. In 3D, `RecordPhysicsPose` reads Rapier directly after
+each step; `InterpolatePhysics` writes presentation transforms before global
+transform propagation. Fixed bodies are never interpolated.
+
+Call `register_std_components` when preparing the world, including the control
+components. A position target is persistent: absent input holds the current
+pose. Velocity input is also persistent; absent input means zero velocity. The
+2D rotation/angular velocity fields are scalar Z angles in radians and radians
+per second; 3D uses a quaternion and angular-velocity vector.
+
+```rust,ignore
+use redlilium_ecs::physics::control3d::{KinematicTarget3D, PhysicsPose3D};
+use redlilium_ecs::physics::TeleportVelocity;
+
+world.insert(platform, KinematicTarget3D {
+    translation: Vec3::new(0.0, 2.0, 0.0),
+    rotation: Quat::identity(),
+}).unwrap();
+
+// The body must already have been synchronized. Queue before StepPhysics3D.
+world.resource_mut::<PhysicsWorld3D>().teleport(
+    player,
+    PhysicsPose3D { translation: spawn_position, rotation: Quat::identity() },
+    TeleportVelocity::Reset, // Or Preserve; choose explicitly.
+)?;
+```
+
+A teleport is consumed by the next step; the last queued request for a body
+wins. It resets interpolation and cannot follow a removed/recreated body.
+A present kinematic target is moved to the teleport pose. `Reset` also zeros a
+present kinematic velocity input. With `Preserve`, subsequent motion still obeys
+the body's control mode (position-based kinematics derives velocity from its target).
+
+## Editable settings
+
+`RigidBody*`, `Collider*` and `ImpulseJoint*` remain editable settings. Run the
+corresponding sync after game systems edit settings and before the physics step.
+Body and collider changes update the existing body/collider handles, preserving
+the body and its connections. Changing shape/density updates mass properties
+through Rapier on its next step. Changed settings wake the body; unchanged
+settings do not wake it or overwrite its runtime velocity. Body-type changes
+also reset interpolation history.
+
+Changing a joint descriptor rebuilds that joint, including when endpoints
+change. Other bodies and joints remain intact. If an endpoint is unavailable,
+the old joint is removed and creation waits for valid endpoints. Physics-world
+caches retain the last applied descriptors to avoid rebuilding unchanged objects.
+
 ## 3D Physics
 
 ### Setup
@@ -106,27 +172,23 @@ ColliderShape3D::CapsuleY { half_height: 0.5, radius: 0.25 }
 ColliderShape3D::Cylinder { half_height: 1.0, radius: 0.5 }
 ```
 
-### Building the Physics World
+### Synchronizing and stepping
 
-After attaching descriptors, build the Rapier objects:
+Use sync systems for ongoing creation, removal and settings updates. The
+`build_physics_world_*` helpers are deprecated. Register explicit dependencies:
 
-```rust
-build_physics_world_3d(&mut world);
+```rust,ignore
+let fixed = schedules.get_mut::<FixedUpdate>();
+fixed.add_exclusive(SyncPhysicsBodies3D);
+fixed.add_exclusive(SyncPhysicsJoints3D);
+fixed.add(StepPhysics3D);
+fixed.add_edge::<SyncPhysicsBodies3D, SyncPhysicsJoints3D>().unwrap();
+fixed.add_edge::<SyncPhysicsJoints3D, StepPhysics3D>().unwrap();
 ```
 
-This reads all `RigidBody3D` and `Collider3D` components and creates the corresponding Rapier objects in `PhysicsWorld3D`. Handle components (`RigidBody3DHandle`, `Collider3DHandle`) are inserted on the entities.
-
-### Stepping the Simulation
-
-Use the built-in `StepPhysics3D` system:
-
-```rust
-schedules.get_mut::<FixedUpdate>().add(StepPhysics3D);
-```
-
-This system:
-1. Steps the Rapier simulation
-2. Syncs resulting positions back to `Transform` and `GlobalTransform`
+The step writes dynamic/kinematic `Transform` values. Run
+`UpdateGlobalTransforms` separately afterward (after `InterpolatePhysics` when
+using render interpolation).
 
 ### Full Example
 
@@ -150,11 +212,10 @@ fn setup_physics(world: &mut World, schedules: &mut Schedules) {
         Collider3D::ball(0.5),
     ));
 
-    // Build rapier objects from descriptors
-    build_physics_world_3d(world);
-
-    // Step physics in FixedUpdate
-    schedules.get_mut::<FixedUpdate>().add(StepPhysics3D);
+    let fixed = schedules.get_mut::<FixedUpdate>();
+    fixed.add_exclusive(SyncPhysicsBodies3D);
+    fixed.add(StepPhysics3D);
+    fixed.add_edge::<SyncPhysicsBodies3D, StepPhysics3D>().unwrap();
     schedules.get_mut::<PostUpdate>().add(UpdateGlobalTransforms);
 }
 ```
@@ -173,8 +234,10 @@ world.spawn_with((
     Collider2D::ball(0.5),
 ));
 
-build_physics_world_2d(&mut world);
-schedules.get_mut::<FixedUpdate>().add(StepPhysics2D);
+let fixed = schedules.get_mut::<FixedUpdate>();
+fixed.add_exclusive(SyncPhysicsBodies2D);
+fixed.add(StepPhysics2D);
+fixed.add_edge::<SyncPhysicsBodies2D, StepPhysics2D>().unwrap();
 ```
 
 ## Accessing Rapier Directly

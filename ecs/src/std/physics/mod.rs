@@ -51,3 +51,17 @@ pub use rapier2d_f64 as rapier2d;
 
 #[cfg(feature = "physics-2d-f32")]
 pub use ::rapier2d;
+
+mod validation;
+
+/// How a teleport affects the body's linear and angular velocity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeleportVelocity {
+    Preserve,
+    Reset,
+}
+
+#[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
+pub mod control2d;
+#[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
+pub mod control3d;

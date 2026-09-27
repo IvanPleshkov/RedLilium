@@ -26,6 +26,24 @@ pub struct ImpulseJoint2DHandle(pub ImpulseJointHandle);
 /// allows any system to look up the correspondence between ECS entities and
 /// rapier handles — useful for raycasting, contact queries, etc.
 pub struct PhysicsWorld2D {
+    pub(super) teleports: HashMap<
+        crate::Entity,
+        (
+            RigidBodyHandle,
+            super::control2d::PhysicsPose2D,
+            super::TeleportVelocity,
+        ),
+    >,
+    pub(super) pose_resets: std::collections::HashSet<RigidBodyHandle>,
+    pub(super) applied_bodies: HashMap<
+        RigidBodyHandle,
+        (
+            super::components2d::RigidBody2D,
+            super::components2d::Collider2D,
+            ColliderHandle,
+        ),
+    >,
+    pub(super) applied_joints: HashMap<ImpulseJointHandle, super::components2d::ImpulseJoint2D>,
     pub gravity: Vector,
     pub integration_parameters: IntegrationParameters,
     pub pipeline: PhysicsPipeline,
@@ -49,6 +67,10 @@ pub struct PhysicsWorld2D {
 impl Default for PhysicsWorld2D {
     fn default() -> Self {
         Self {
+            teleports: HashMap::new(),
+            pose_resets: Default::default(),
+            applied_bodies: HashMap::new(),
+            applied_joints: HashMap::new(),
             gravity: Vector::new(0.0, -9.81),
             integration_parameters: IntegrationParameters::default(),
             pipeline: PhysicsPipeline::new(),
@@ -123,6 +145,9 @@ impl PhysicsWorld2D {
 
     /// Removes a rigid body and all its attached colliders and joints.
     pub fn remove_body(&mut self, handle: RigidBodyHandle) {
+        self.applied_bodies.remove(&handle);
+        self.pose_resets.remove(&handle);
+        self.teleports.retain(|_, (body, _, _)| *body != handle);
         self.bodies.remove(
             handle,
             &mut self.island_manager,
@@ -135,6 +160,7 @@ impl PhysicsWorld2D {
 
     /// Removes an impulse joint.
     pub fn remove_impulse_joint(&mut self, handle: ImpulseJointHandle, wake_up: bool) {
+        self.applied_joints.remove(&handle);
         self.impulse_joints.remove(handle, wake_up);
     }
 

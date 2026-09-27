@@ -61,6 +61,15 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "Children",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", List([
+                            Entity(index: 11, spawn_tick: 0),
+                        ])),
+                    ]),
+                ),
+                (
                     type_name: "RigidBody3D",
                     schema_version: 1,
                     data: Map([
@@ -68,27 +77,6 @@
                         ("linear_damping", F32(0.0)),
                         ("angular_damping", F32(0.0)),
                         ("gravity_scale", F32(1.0)),
-                    ]),
-                ),
-                (
-                    type_name: "MeshRenderer",
-                    schema_version: 1,
-                    data: Map([
-                        ("primitives", List([
-                            Map([
-                                ("mesh", Map([
-                                    ("Generated", Map([
-                                        ("Cube", Map([
-                                            ("half_bits", U64(1056964608)),
-                                        ])),
-                                    ])),
-                                ])),
-                                ("material", Map([
-                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
-                                ])),
-                            ]),
-                        ])),
-                        ("casts_shadows", Bool(true)),
                     ]),
                 ),
                 (
@@ -114,9 +102,9 @@
                             F32(1.0),
                         ])),
                         ("scale", List([
-                            F32(40.0),
-                            F32(0.2),
-                            F32(40.0),
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
                         ])),
                     ]),
                 ),
@@ -859,6 +847,70 @@
                             F32(1.0),
                             F32(1.0),
                         ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 11,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("4f5c8955-9353-5ae7-9253-9892e2ceae37")),
+                                ])),
+                            ]),
+                        ])),
+                        ("casts_shadows", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(40.0),
+                            F32(0.2),
+                            F32(40.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Parent",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Entity(index: 1, spawn_tick: 0)),
                     ]),
                 ),
             ],

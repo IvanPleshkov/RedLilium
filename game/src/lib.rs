@@ -617,7 +617,7 @@ pub fn spawn_car(world: &mut World, position: Vec3) -> redlilium_ecs::Entity {
         guid: Guid::stable("materials/car.matinst"),
     };
     let car_transform = Transform::new(position, Quat::identity(), Vec3::new(1.0, 0.6, 2.0));
-    let car = spawn_box(world, material, car_transform);
+    let car = spawn_physics_box(world, material, car_transform);
     world
         .insert(
             car,
@@ -685,12 +685,18 @@ impl redlilium_ecs::ExclusiveSystem for SpawnCarAtMarkers {
             return Ok(());
         };
         let car = spawn_car(world, position);
-        let _ = world.insert(
-            car,
-            redlilium_ecs::SceneMember {
-                scene: owning_scene,
-            },
-        );
+        let visuals = world
+            .get::<redlilium_ecs::Children>(car)
+            .map(|c| c.0.clone())
+            .unwrap_or_default();
+        for entity in std::iter::once(car).chain(visuals) {
+            let _ = world.insert(
+                entity,
+                redlilium_ecs::SceneMember {
+                    scene: owning_scene.clone(),
+                },
+            );
+        }
         log::info!("car spawned at marker ({position:?})");
         Ok(())
     }
@@ -713,7 +719,7 @@ pub fn spawn_level_geometry(world: &mut World) {
         Quat::identity(),
         Vec3::new(40.0, 0.2, 40.0),
     );
-    let ground = spawn_box(world, material.clone(), ground_transform);
+    let ground = spawn_physics_box(world, material.clone(), ground_transform);
     world.insert(ground, RigidBody3D::fixed()).unwrap();
     world
         .insert(
@@ -1290,6 +1296,29 @@ pub fn spawn_levels_playground(world: &mut World) {
     redlilium_levels::settle_edge_anchors(world);
 }
 
+// Keep physics roots unscaled; only the render child carries visual dimensions.
+fn spawn_physics_box(
+    world: &mut World,
+    material: MaterialInstanceSource,
+    transform: Transform,
+) -> redlilium_ecs::Entity {
+    let root_transform =
+        Transform::new(transform.translation, transform.rotation, Vec3::repeat(1.0));
+    let root = world
+        .spawn_with((root_transform, Visibility::VISIBLE))
+        .unwrap();
+    let visual = spawn_box(
+        world,
+        material,
+        Transform::new(Vec3::zeros(), Quat::identity(), transform.scale),
+    );
+    redlilium_ecs::set_parent(world, visual, root);
+    world
+        .insert(visual, GlobalTransform(transform.to_matrix()))
+        .unwrap();
+    root
+}
+
 fn spawn_box(
     world: &mut World,
     material: MaterialInstanceSource,
@@ -1467,6 +1496,10 @@ mod tests {
             "ground + 8 obstacles + car carry rigid bodies"
         );
 
+        redlilium_ecs::system::run_exclusive_system_once(&mut SyncPhysicsBodies3D, &mut world)
+            .unwrap();
+        assert_eq!(world.resource::<PhysicsWorld3D>().bodies.len(), 10);
+
         // Transform propagation must pick up scene-instantiated entities:
         // after one propagation pass the ground's world matrix reflects its
         // authored scale, not the identity the required-component default
@@ -1496,6 +1529,11 @@ mod tests {
 
         switch_and_settle(&mut world, MENU_SCENE);
         assert_eq!(cars(&world), 0, "car despawns with its scene");
+        assert_eq!(
+            world.read_all::<MeshRenderer>().unwrap().iter().count(),
+            12,
+            "car and level visual children must unload with the scene"
+        );
     }
 
     /// Headless world with ground + chassis, wired exactly like the plugin's

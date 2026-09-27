@@ -386,7 +386,11 @@ pub fn build_physics_world_2d(world: &mut crate::World) {
         let body_handle = physics.add_body(rapier_body);
 
         let rapier_collider = collider_desc.to_collider();
-        physics.add_collider(rapier_collider, body_handle);
+        let collider_handle = physics.add_collider(rapier_collider, body_handle);
+        physics.applied_bodies.insert(
+            body_handle,
+            (body_desc.clone(), collider_desc.clone(), collider_handle),
+        );
 
         handle_pairs.push((*entity, body_handle));
     }
