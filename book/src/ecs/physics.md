@@ -19,6 +19,28 @@ redlilium-ecs = { path = "../ecs", features = ["physics-3d"] }
 | `physics-2d-f32` | 2D physics with f32 precision |
 | `physics` | Enables all physics features |
 
+## Synchronization lifecycle
+
+For ongoing synchronization, run `SyncPhysicsBodies3D`, then
+`SyncPhysicsJoints3D`, then `StepPhysics3D` in `FixedUpdate`, with explicit
+ordering edges. The `2D` systems follow the same order. The exclusive sync
+systems publish handles immediately. Regular `SyncPhysicsBodiesSystem*` and
+`SyncPhysicsJointsSystem*` publish through deferred commands, so joints can
+appear on the next schedule invocation after their bodies.
+
+A managed body requires `RigidBody*`, `Collider*` and `Transform`. On the next
+body sync, removing any of these components, despawning the entity or excluding
+it from game queries removes the Rapier body, its colliders and attached joints.
+Their mappings and handle components are cleaned up too. In 3D, body removal
+also clears `PhysicsInterpolation`; recreating a body starts a fresh history.
+Deferred creation validates the full entity identity and prerequisites again
+when publishing handles and removes cancelled Rapier objects.
+
+Both step systems use `Time::fixed_delta()` when `Time` is present. Without it,
+they preserve the manually configured `integration_parameters.dt`. The 2D
+builder initializes rotation from the transform's Z angle; stepping preserves
+the transform's Z translation for draw ordering.
+
 ## 3D Physics
 
 ### Setup

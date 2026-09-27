@@ -286,8 +286,13 @@ impl RigidBody2D {
             RigidBodyType2D::Dynamic => RigidBodyBuilder::dynamic(),
         };
 
+        // Project the normalized quaternion onto the XY plane's Z rotation.
+        let rotation = super::conversions::quat_to_na(transform.rotation)
+            .euler_angles()
+            .2;
         builder
             .translation(translation)
+            .rotation(rotation)
             .linear_damping(self.linear_damping as Real)
             .angular_damping(self.angular_damping as Real)
             .gravity_scale(self.gravity_scale as Real)

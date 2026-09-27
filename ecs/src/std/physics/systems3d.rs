@@ -49,7 +49,7 @@ impl crate::System for StepPhysics3D {
 
             // Step simulation at the fixed timestep (see above).
             if let Some(dt) = fixed_dt {
-                physics.integration_parameters.dt = dt;
+                physics.integration_parameters.dt = dt as Real;
             }
             physics.step();
 
@@ -103,7 +103,7 @@ impl crate::System for RecordPhysicsPose {
             .execute(|(handles, transforms, mut interps)| {
                 redlilium_core::profile_scope!("ecs: record_physics_pose_3d");
                 let mut seed = Vec::new();
-                for (idx, _handle) in handles.iter() {
+                for (idx, handle) in handles.iter() {
                     let Some(transform) = transforms.get(idx) else {
                         continue;
                     };
@@ -112,8 +112,8 @@ impl crate::System for RecordPhysicsPose {
                         interp.prev_rotation = interp.cur_rotation;
                         interp.cur_translation = transform.translation;
                         interp.cur_rotation = transform.rotation;
-                    } else {
-                        seed.push((idx, transform.translation, transform.rotation));
+                    } else if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
+                        seed.push((entity, handle.0, transform.translation, transform.rotation));
                     }
                 }
                 seed
@@ -121,8 +121,12 @@ impl crate::System for RecordPhysicsPose {
 
         if !to_seed.is_empty() {
             ctx.commands(move |world| {
-                for (idx, translation, rotation) in to_seed {
-                    if let Some(entity) = world.entity_at_index(idx) {
+                for (entity, handle, translation, rotation) in to_seed {
+                    if world.is_alive(entity)
+                        && world
+                            .get::<RigidBody3DHandle>(entity)
+                            .is_some_and(|h| h.0 == handle)
+                    {
                         let _ = world.insert(
                             entity,
                             PhysicsInterpolation {
@@ -171,11 +175,15 @@ impl crate::System for InterpolatePhysics {
 
         ctx.lock::<(
             crate::Read<PhysicsInterpolation>,
+            crate::Read<RigidBody3DHandle>,
             crate::WriteAll<crate::Transform>,
         )>()
-        .execute(|(interps, mut transforms)| {
+        .execute(|(interps, handles, mut transforms)| {
             redlilium_core::profile_scope!("ecs: interpolate_physics_3d");
             for (idx, interp) in interps.iter() {
+                if handles.get(idx).is_none() {
+                    continue;
+                }
                 let Some(mut transform) = transforms.get_mut(idx) else {
                     continue;
                 };
@@ -195,6 +203,47 @@ impl crate::System for InterpolatePhysics {
     }
 }
 
+// Remove through Rapier first, then reconcile joints against the actual set.
+// Descriptor endpoints may already have changed, so they are not a reliable
+// source for discovering which live joints the removed bodies owned.
+fn remove_bodies(physics: &mut PhysicsWorld3D, stale: &[crate::Entity]) -> Vec<crate::Entity> {
+    for entity in stale {
+        if let Some(handle) = physics.entity_to_body.remove(entity) {
+            physics.body_to_entity.remove(&handle);
+            physics.remove_body(handle);
+        }
+    }
+    let mut stale_joints = Vec::new();
+    if !stale.is_empty() {
+        physics.entity_to_joint.retain(|entity, handle| {
+            let live = physics.impulse_joints.contains(*handle);
+            if !live {
+                stale_joints.push(*entity);
+            }
+            live
+        });
+    }
+    stale_joints
+}
+
+fn remove_body_components(
+    world: &mut crate::World,
+    bodies: &[crate::Entity],
+    joints: &[crate::Entity],
+) {
+    for &entity in joints {
+        if world.is_alive(entity) {
+            let _ = world.remove::<ImpulseJoint3DHandle>(entity);
+        }
+    }
+    for &entity in bodies {
+        if world.is_alive(entity) {
+            let _ = world.remove::<RigidBody3DHandle>(entity);
+            let _ = world.remove::<PhysicsInterpolation>(entity);
+        }
+    }
+}
+
 // ---- SyncPhysicsBodies3D exclusive system ----
 
 /// Exclusive system that creates/removes rapier bodies from ECS descriptor components.
@@ -202,7 +251,8 @@ impl crate::System for InterpolatePhysics {
 /// Detects entities with [`RigidBody3D`](super::components3d::RigidBody3D) +
 /// [`Collider3D`](super::components3d::Collider3D) +
 /// [`Transform`](crate::Transform) and creates corresponding rapier objects.
-/// Also detects removed/despawned entities and cleans up.
+/// Removing any required component, despawning or excluding an entity from game
+/// queries removes its body, attached colliders and joints on the next sync.
 ///
 /// # Example
 ///
@@ -225,7 +275,7 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
             world.insert_resource(PhysicsWorld3D::default());
         }
 
-        // Phase 1: Find stale bodies (entity dead, excluded from game, or lost RigidBody3D component)
+        // Phase 1: Find bodies whose entity is excluded, dead or missing prerequisites.
         let stale: Vec<crate::Entity> = {
             let physics = world.resource::<PhysicsWorld3D>();
             physics
@@ -235,57 +285,16 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
                     !world.is_alive(**e)
                         || world.is_excluded_from_game(**e)
                         || world.get::<super::components3d::RigidBody3D>(**e).is_none()
+                        || world.get::<super::components3d::Collider3D>(**e).is_none()
+                        || world.get::<crate::Transform>(**e).is_none()
                 })
                 .copied()
                 .collect()
         };
 
-        // Remove stale bodies from rapier and clean mappings
         if !stale.is_empty() {
-            // Also find joints that reference stale bodies
-            let stale_joints: Vec<crate::Entity> = {
-                let physics = world.resource::<PhysicsWorld3D>();
-                physics
-                    .entity_to_joint
-                    .keys()
-                    .filter(|je| {
-                        if let Some(joint_desc) =
-                            world.get::<super::components3d::ImpulseJoint3D>(**je)
-                        {
-                            stale.contains(&joint_desc.body1) || stale.contains(&joint_desc.body2)
-                        } else {
-                            false
-                        }
-                    })
-                    .copied()
-                    .collect()
-            };
-
-            {
-                let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                for entity in &stale_joints {
-                    if let Some(jh) = physics.entity_to_joint.remove(entity) {
-                        physics.remove_impulse_joint(jh, true);
-                    }
-                }
-                for entity in &stale {
-                    if let Some(bh) = physics.entity_to_body.remove(entity) {
-                        physics.body_to_entity.remove(&bh);
-                        physics.remove_body(bh);
-                    }
-                }
-            }
-
-            for entity in &stale_joints {
-                if world.is_alive(*entity) {
-                    let _ = world.remove::<ImpulseJoint3DHandle>(*entity);
-                }
-            }
-            for entity in &stale {
-                if world.is_alive(*entity) {
-                    let _ = world.remove::<RigidBody3DHandle>(*entity);
-                }
-            }
+            let stale_joints = remove_bodies(&mut world.resource_mut::<PhysicsWorld3D>(), &stale);
+            remove_body_components(world, &stale, &stale_joints);
         }
 
         // Phase 2: Find new bodies (have descriptors, not in mapping, not disabled)
@@ -362,15 +371,16 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
             let physics = world.resource::<PhysicsWorld3D>();
             physics
                 .entity_to_joint
-                .keys()
-                .filter(|e| {
-                    !world.is_alive(**e)
+                .iter()
+                .filter(|(e, handle)| {
+                    !physics.impulse_joints.contains(**handle)
+                        || !world.is_alive(**e)
                         || world.is_excluded_from_game(**e)
                         || world
                             .get::<super::components3d::ImpulseJoint3D>(**e)
                             .is_none()
                 })
-                .copied()
+                .map(|(entity, _)| *entity)
                 .collect()
         };
 
@@ -452,7 +462,7 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
     ) -> Result<(), crate::system::SystemError> {
         redlilium_core::profile_scope!("ecs: sync_physics_bodies_system_3d");
 
-        let (new_indices, stale_entities) = ctx
+        let (new_entities, stale_entities, stale_joints) = ctx
             .lock::<(
                 crate::ResMut<PhysicsWorld3D>,
                 crate::Read<super::components3d::RigidBody3D>,
@@ -461,7 +471,7 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
             )>()
             .execute(|(mut physics, bodies, colliders, transforms)| {
                 // Remove stale: entity dead (full-identity check, so a recycled
-                // slot does not keep the old body), excluded from game, or lost RigidBody3D.
+                // slot does not keep the old body), excluded, or missing prerequisites.
                 let stale: Vec<crate::Entity> = physics
                     .entity_to_body
                     .keys()
@@ -469,24 +479,18 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                         !ctx.is_alive(**e)
                             || ctx.is_excluded_from_game(**e)
                             || bodies.get(e.index()).is_none()
+                            || colliders.get(e.index()).is_none()
+                            || transforms.get(e.index()).is_none()
                     })
                     .copied()
                     .collect();
-                for entity in &stale {
-                    if let Some(bh) = physics.entity_to_body.remove(entity) {
-                        physics.body_to_entity.remove(&bh);
-                        physics.remove_body(bh);
-                    }
-                }
-
-                // Find tracked indices
-                let tracked: std::collections::HashSet<u32> =
-                    physics.entity_to_body.keys().map(|e| e.index()).collect();
+                let stale_joints = remove_bodies(&mut physics, &stale);
 
                 // Create new
-                let mut new_pairs: Vec<(u32, RigidBodyHandle)> = Vec::new();
+                let mut new_pairs: Vec<(crate::Entity, RigidBodyHandle)> = Vec::new();
                 for (idx, body_desc) in bodies.iter() {
-                    if !tracked.contains(&idx)
+                    if let Some(entity) = ctx.raw_world().entity_at_index(idx)
+                        && !physics.entity_to_body.contains_key(&entity)
                         && let (Some(collider_desc), Some(transform)) =
                             (colliders.get(idx), transforms.get(idx))
                     {
@@ -494,28 +498,35 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                         let body_handle = physics.add_body(rapier_body);
                         let rapier_collider = collider_desc.to_collider();
                         physics.add_collider(rapier_collider, body_handle);
-                        new_pairs.push((idx, body_handle));
+                        new_pairs.push((entity, body_handle));
                     }
                 }
 
-                (new_pairs, stale)
+                (new_pairs, stale, stale_joints)
             });
 
-        if !new_indices.is_empty() || !stale_entities.is_empty() {
+        if !new_entities.is_empty() || !stale_entities.is_empty() || !stale_joints.is_empty() {
             ctx.commands(move |world| {
-                // Remove handle components for stale entities
-                for entity in stale_entities {
-                    if world.is_alive(entity) {
-                        let _ = world.remove::<RigidBody3DHandle>(entity);
-                    }
-                }
-                // Insert handles and update mapping for new bodies
-                for (idx, handle) in new_indices {
-                    if let Some(entity) = world.entity_at_index(idx) {
+                remove_body_components(world, &stale_entities, &stale_joints);
+                for (entity, handle) in new_entities {
+                    // Earlier commands can despawn/recycle the slot or remove prerequisites.
+                    // Never publish a pending body against a different entity generation.
+                    let valid = world.is_alive(entity)
+                        && !world.is_excluded_from_game(entity)
+                        && world
+                            .get::<super::components3d::RigidBody3D>(entity)
+                            .is_some()
+                        && world
+                            .get::<super::components3d::Collider3D>(entity)
+                            .is_some()
+                        && world.get::<crate::Transform>(entity).is_some();
+                    if valid {
                         let _ = world.insert(entity, RigidBody3DHandle(handle));
                         let mut physics = world.resource_mut::<PhysicsWorld3D>();
                         physics.entity_to_body.insert(entity, handle);
                         physics.body_to_entity.insert(handle, entity);
+                    } else {
+                        world.resource_mut::<PhysicsWorld3D>().remove_body(handle);
                     }
                 }
             });
@@ -540,7 +551,7 @@ impl crate::System for SyncPhysicsJointsSystem3D {
     ) -> Result<(), crate::system::SystemError> {
         redlilium_core::profile_scope!("ecs: sync_physics_joints_system_3d");
 
-        let (new_indices, stale_entities) = ctx
+        let (new_entities, stale_entities) = ctx
             .lock::<(
                 crate::ResMut<PhysicsWorld3D>,
                 crate::Read<super::components3d::ImpulseJoint3D>,
@@ -550,13 +561,14 @@ impl crate::System for SyncPhysicsJointsSystem3D {
                 // lost the ImpulseJoint3D component.
                 let stale: Vec<crate::Entity> = physics
                     .entity_to_joint
-                    .keys()
-                    .filter(|e| {
-                        !ctx.is_alive(**e)
+                    .iter()
+                    .filter(|(e, handle)| {
+                        !physics.impulse_joints.contains(**handle)
+                            || !ctx.is_alive(**e)
                             || ctx.is_excluded_from_game(**e)
                             || joints.get(e.index()).is_none()
                     })
-                    .copied()
+                    .map(|(entity, _)| *entity)
                     .collect();
                 for entity in &stale {
                     if let Some(jh) = physics.entity_to_joint.remove(entity) {
@@ -564,14 +576,12 @@ impl crate::System for SyncPhysicsJointsSystem3D {
                     }
                 }
 
-                // Find tracked
-                let tracked: std::collections::HashSet<u32> =
-                    physics.entity_to_joint.keys().map(|e| e.index()).collect();
-
                 // Create new
-                let mut new_pairs: Vec<(u32, ImpulseJointHandle)> = Vec::new();
+                let mut new_pairs: Vec<(crate::Entity, ImpulseJointHandle)> = Vec::new();
                 for (idx, joint_desc) in joints.iter() {
-                    if !tracked.contains(&idx) {
+                    if let Some(entity) = ctx.raw_world().entity_at_index(idx)
+                        && !physics.entity_to_joint.contains_key(&entity)
+                    {
                         let body1_handle = match physics.entity_to_body.get(&joint_desc.body1) {
                             Some(h) => *h,
                             None => continue,
@@ -583,25 +593,38 @@ impl crate::System for SyncPhysicsJointsSystem3D {
                         let rapier_joint = joint_desc.to_rapier_joint();
                         let jh =
                             physics.add_impulse_joint(body1_handle, body2_handle, rapier_joint);
-                        new_pairs.push((idx, jh));
+                        new_pairs.push((entity, jh));
                     }
                 }
 
                 (new_pairs, stale)
             });
 
-        if !new_indices.is_empty() || !stale_entities.is_empty() {
+        if !new_entities.is_empty() || !stale_entities.is_empty() {
             ctx.commands(move |world| {
                 for entity in stale_entities {
                     if world.is_alive(entity) {
                         let _ = world.remove::<ImpulseJoint3DHandle>(entity);
                     }
                 }
-                for (idx, handle) in new_indices {
-                    if let Some(entity) = world.entity_at_index(idx) {
+                for (entity, handle) in new_entities {
+                    let valid = world.is_alive(entity)
+                        && !world.is_excluded_from_game(entity)
+                        && world
+                            .get::<super::components3d::ImpulseJoint3D>(entity)
+                            .is_some()
+                        && world
+                            .resource::<PhysicsWorld3D>()
+                            .impulse_joints
+                            .contains(handle);
+                    if valid {
                         let _ = world.insert(entity, ImpulseJoint3DHandle(handle));
                         let mut physics = world.resource_mut::<PhysicsWorld3D>();
                         physics.entity_to_joint.insert(entity, handle);
+                    } else {
+                        world
+                            .resource_mut::<PhysicsWorld3D>()
+                            .remove_impulse_joint(handle, true);
                     }
                 }
             });
@@ -765,6 +788,13 @@ mod tests {
 
         let e = world.spawn();
         world.insert(e, Transform::default()).unwrap();
+        world
+            .insert(e, super::super::components3d::RigidBody3D::dynamic())
+            .unwrap();
+        world
+            .insert(e, super::super::components3d::Collider3D::ball(0.5))
+            .unwrap();
+        crate::system::run_exclusive_system_once(&mut SyncPhysicsBodies3D, &mut world).unwrap();
         world
             .insert(
                 e,
