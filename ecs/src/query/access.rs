@@ -1,3 +1,5 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use std::any::TypeId;
 use std::marker::PhantomData;
 
@@ -264,7 +266,16 @@ impl FetchTicks {
 ///
 /// Each element knows its TypeId, whether it's a write, and how to
 /// fetch its data from a World.
-pub trait AccessElement {
+///
+/// # Safety
+///
+/// Implementations must report every storage touched by either fetch method in
+/// `collect_access_infos`, with the correct storage class and write flag. The
+/// returned items must refer only to that world's declared storages, respect
+/// the supplied access guarantees, and not outlive the world. Main-thread-only
+/// access must report `needs_main_thread() == true`. Combined filters must
+/// report all of their underlying accesses, not just their marker type.
+pub unsafe trait AccessElement {
     /// The type received by the execute closure for this element.
     type Item<'w>;
 
@@ -285,14 +296,25 @@ pub trait AccessElement {
         out.push(Self::access_info());
     }
 
-    /// Fetches this element's data from the world, acquiring per-storage locks.
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_>;
+    /// Fetches this element's data, acquiring locks for components/resources.
+    /// Filters and main-thread resources do not acquire their own locks.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude conflicting unlocked world references for the
+    /// lifetime of the result, protect filter metadata from concurrent writes,
+    /// and run main-thread access on the owner thread without aliasing it.
+    /// Acquiring a lock alone does not protect references from `World::get`.
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_>;
 
     /// Fetches this element's data without acquiring locks.
     ///
-    /// The caller must ensure that the appropriate locks are already held
-    /// externally (e.g. via `World::acquire_sorted`).
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_>;
+    /// # Safety
+    ///
+    /// The caller must hold the appropriate storage locks for the entire
+    /// lifetime of the result, exclude conflicting unlocked world references,
+    /// and satisfy the main-thread and aliasing requirements of `fetch`.
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_>;
 
     /// Whether this element requires main-thread access.
     ///
@@ -307,21 +329,68 @@ pub trait AccessElement {
 /// Trait for a set of access elements (tuples of Read/Write/Res/etc.).
 ///
 /// Implemented for tuples up to 8 elements via macro.
-/// Provides sorted access metadata and batch fetching.
-pub trait AccessSet {
+/// Provides access metadata and low-level batch fetching. Prefer
+/// [`SystemContext::query`](crate::SystemContext::query),
+/// [`SystemContext::lock`](crate::SystemContext::lock), or
+/// [`World::query`] for safe access.
+///
+/// # Safety
+///
+/// Implementations must report every storage accessed by their fetch methods,
+/// including filter metadata, with the correct storage class and write flag.
+/// Items must borrow only the declared storages from the supplied world and
+/// respect the access guarantees below. Main-thread requirements must include
+/// every element. Implementations must not hide accesses or extend lifetimes.
+///
+/// Direct unlocked fetching requires an explicit unsafe contract:
+///
+/// ```compile_fail,E0133
+/// use redlilium_ecs::{AccessSet, FetchTicks, World, Write};
+/// let world = World::new();
+/// let _ = <(Write<u32>,) as AccessSet>::fetch_unlocked(&world, FetchTicks::frame(&world));
+/// ```
+///
+/// Even the locking fetch cannot be called safely through a shared world:
+/// it cannot exclude existing unlocked references such as `World::get`.
+///
+/// ```compile_fail,E0133
+/// use redlilium_ecs::{AccessSet, FetchTicks, World, Write};
+/// let mut world = World::new();
+/// world.register_component::<u32>();
+/// let entity = world.spawn();
+/// world.insert(entity, 1_u32).unwrap();
+/// let value = world.get::<u32>(entity).unwrap();
+/// let (mut storage,) = <(Write<u32>,) as AccessSet>::fetch(&world, FetchTicks::frame(&world));
+/// *storage.get_mut(entity.index()).unwrap() += *value;
+/// ```
+pub unsafe trait AccessSet {
     /// The tuple of items received by the execute closure.
     type Item<'w>;
 
     /// Returns access metadata for all elements.
     fn access_infos() -> SmallVec<[AccessInfo; 8]>;
 
-    /// Fetches all elements from the world, acquiring per-storage locks.
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_>;
+    /// Fetches elements, acquiring their component/resource locks.
+    /// Filters and main-thread resources do not acquire their own locks.
+    ///
+    /// # Safety
+    ///
+    /// The complete access set must have no aliasing conflicts. The caller must
+    /// exclude conflicting unlocked world references for the result's lifetime,
+    /// protect filter metadata, and run main-thread accesses on the owner thread.
+    /// The requirements of [`AccessElement::fetch`] apply to every element.
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_>;
 
     /// Fetches all elements without acquiring locks.
     ///
-    /// The caller must ensure locks are already held externally.
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_>;
+    /// # Safety
+    ///
+    /// The complete access set must have no aliasing conflicts, and every
+    /// declared storage lock must stay held for the entire result lifetime.
+    /// The caller must also exclude conflicting unlocked world references and
+    /// run main-thread accesses on the owner thread. The requirements of
+    /// [`AccessElement::fetch_unlocked`] apply to every element.
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_>;
 
     /// Returns `true` if any element in the set requires main-thread access.
     fn needs_main_thread() -> bool {
@@ -529,130 +598,144 @@ pub struct Any<T>(PhantomData<T>);
 
 // ---- AccessElement implementations ----
 
-impl<T: 'static> AccessElement for Read<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for Read<T> {
     type Item<'w> = Ref<'w, T>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component::<T>(false)
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world
             .read::<T>()
             .expect("Component not registered for Read<T> access")
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world
             .read_unlocked::<T>()
             .expect("Component not registered for Read<T> access")
     }
 }
 
-impl<T: 'static> AccessElement for Write<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for Write<T> {
     type Item<'w> = RefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component::<T>(true)
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         world
             .write_storage_at::<T>(ticks.this_run)
             .expect("Component not registered for Write<T> access")
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         world
             .write_unlocked::<T>(ticks.this_run)
             .expect("Component not registered for Write<T> access")
     }
 }
 
-impl<T: 'static> AccessElement for ReadAll<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for ReadAll<T> {
     type Item<'w> = Ref<'w, T>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component::<T>(false)
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world
             .read_all::<T>()
             .expect("Component not registered for ReadAll<T> access")
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world
             .read_all_unlocked::<T>()
             .expect("Component not registered for ReadAll<T> access")
     }
 }
 
-impl<T: 'static> AccessElement for WriteAll<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for WriteAll<T> {
     type Item<'w> = RefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component::<T>(true)
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         world
             .write_all_storage_at::<T>(ticks.this_run)
             .expect("Component not registered for WriteAll<T> access")
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         world
             .write_all_unlocked::<T>(ticks.this_run)
             .expect("Component not registered for WriteAll<T> access")
     }
 }
 
-impl<T: 'static> AccessElement for OptionalRead<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for OptionalRead<T> {
     type Item<'w> = Option<Ref<'w, T>>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component::<T>(false)
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world.try_read::<T>()
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world.try_read_unlocked::<T>()
     }
 }
 
-impl<T: 'static> AccessElement for OptionalWrite<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for OptionalWrite<T> {
     type Item<'w> = Option<RefMut<'w, T>>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component::<T>(true)
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         world.try_write_storage_at::<T>(ticks.this_run)
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         world.try_write_unlocked::<T>(ticks.this_run)
     }
 }
 
-impl<T: 'static> AccessElement for Res<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for Res<T> {
     type Item<'w> = ResourceRef<'w, T>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::resource::<T>(false)
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world.resource::<T>()
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         // The read lock was already acquired (in TypeId-sorted order) by
         // `acquire_sorted`; build a guardless view to avoid re-locking.
         // SAFETY: the lock is held for the duration of this access set.
@@ -660,37 +743,41 @@ impl<T: 'static> AccessElement for Res<T> {
     }
 }
 
-impl<T: 'static> AccessElement for ResMut<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for ResMut<T> {
     type Item<'w> = ResourceRefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::resource::<T>(true)
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world.resource_mut::<T>()
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         // The write lock was already acquired by `acquire_sorted`.
         // SAFETY: the lock is held for the duration of this access set.
         unsafe { world.resource_mut_unlocked::<T>() }
     }
 }
 
-impl<T: 'static> AccessElement for MainThreadRes<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for MainThreadRes<T> {
     type Item<'w> = &'w T;
 
     fn access_info() -> AccessInfo {
         AccessInfo::main_thread::<T>(false)
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         // SAFETY: only called from main thread via dispatcher
         unsafe { world.main_thread_resource::<T>() }
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         // Same as fetch — main-thread resources have no locks
         unsafe { world.main_thread_resource::<T>() }
     }
@@ -700,19 +787,21 @@ impl<T: 'static> AccessElement for MainThreadRes<T> {
     }
 }
 
-impl<T: 'static> AccessElement for MainThreadResMut<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for MainThreadResMut<T> {
     type Item<'w> = &'w mut T;
 
     fn access_info() -> AccessInfo {
         AccessInfo::main_thread::<T>(true)
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         // SAFETY: only called from main thread via dispatcher
         unsafe { world.main_thread_resource_mut::<T>() }
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         // Same as fetch — main-thread resources have no locks
         unsafe { world.main_thread_resource_mut::<T>() }
     }
@@ -722,7 +811,9 @@ impl<T: 'static> AccessElement for MainThreadResMut<T> {
     }
 }
 
-impl<T: 'static> AccessElement for Added<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for Added<T> {
     type Item<'w> = AddedFilter<'w>;
 
     fn access_info() -> AccessInfo {
@@ -731,7 +822,7 @@ impl<T: 'static> AccessElement for Added<T> {
         AccessInfo::component_filter::<T>()
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         assert!(
             world.is_component_registered::<T>(),
             "Component `{}` not registered for Added<T> filter",
@@ -741,20 +832,23 @@ impl<T: 'static> AccessElement for Added<T> {
         world.added::<T>(since_tick)
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         // Filters don't hold locks — same as fetch
-        Self::fetch(world, ticks)
+        // SAFETY: the caller supplies the same access guarantees as fetch.
+        unsafe { Self::fetch(world, ticks) }
     }
 }
 
-impl<T: 'static> AccessElement for Removed<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for Removed<T> {
     type Item<'w> = RemovedFilter<'w>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component_filter::<T>()
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         assert!(
             world.is_component_registered::<T>(),
             "Component `{}` not registered for Removed<T> filter",
@@ -764,36 +858,42 @@ impl<T: 'static> AccessElement for Removed<T> {
         world.removed::<T>(since_tick)
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-        Self::fetch(world, ticks)
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+        // SAFETY: the caller supplies the same access guarantees as fetch.
+        unsafe { Self::fetch(world, ticks) }
     }
 }
 
-impl<T: 'static> AccessElement for MaybeAdded<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for MaybeAdded<T> {
     type Item<'w> = AddedFilter<'w>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component_filter::<T>()
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         let since_tick = ticks.last_run;
         world.added::<T>(since_tick)
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-        Self::fetch(world, ticks)
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+        // SAFETY: the caller supplies the same access guarantees as fetch.
+        unsafe { Self::fetch(world, ticks) }
     }
 }
 
-impl<T: 'static> AccessElement for Changed<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for Changed<T> {
     type Item<'w> = ChangedFilter<'w>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component_filter::<T>()
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         assert!(
             world.is_component_registered::<T>(),
             "Component `{}` not registered for Changed<T> filter",
@@ -803,74 +903,85 @@ impl<T: 'static> AccessElement for Changed<T> {
         world.changed::<T>(since_tick)
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-        Self::fetch(world, ticks)
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+        // SAFETY: the caller supplies the same access guarantees as fetch.
+        unsafe { Self::fetch(world, ticks) }
     }
 }
 
-impl<T: 'static> AccessElement for MaybeChanged<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for MaybeChanged<T> {
     type Item<'w> = ChangedFilter<'w>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component_filter::<T>()
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         let since_tick = ticks.last_run;
         world.changed::<T>(since_tick)
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-        Self::fetch(world, ticks)
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+        // SAFETY: the caller supplies the same access guarantees as fetch.
+        unsafe { Self::fetch(world, ticks) }
     }
 }
 
-impl<T: 'static> AccessElement for MaybeRemoved<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for MaybeRemoved<T> {
     type Item<'w> = RemovedFilter<'w>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component_filter::<T>()
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
         let since_tick = ticks.last_run;
         world.removed::<T>(since_tick)
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-        Self::fetch(world, ticks)
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+        // SAFETY: the caller supplies the same access guarantees as fetch.
+        unsafe { Self::fetch(world, ticks) }
     }
 }
 
-impl<T: 'static> AccessElement for With<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for With<T> {
     type Item<'w> = ContainsChecker<'w>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component_filter::<T>()
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world.with::<T>()
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         // Filters don't hold locks — same as fetch
         world.with::<T>()
     }
 }
 
-impl<T: 'static> AccessElement for Without<T> {
+// SAFETY: metadata names the fetched storage and access mode; returned items
+// borrow that world, with thread requirements declared by the marker.
+unsafe impl<T: 'static> AccessElement for Without<T> {
     type Item<'w> = ContainsChecker<'w>;
 
     fn access_info() -> AccessInfo {
         AccessInfo::component_filter::<T>()
     }
 
-    fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         world.without::<T>()
     }
 
-    fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
+    unsafe fn fetch_unlocked(world: &World, _ticks: FetchTicks) -> Self::Item<'_> {
         // Filters don't hold locks — same as fetch
         world.without::<T>()
     }
@@ -878,7 +989,9 @@ impl<T: 'static> AccessElement for Without<T> {
 
 // ---- Or<A, B> AccessElement ----
 
-impl<A, B> AccessElement for Or<A, B>
+// SAFETY: combined metadata and thread requirements include both elements;
+// fetching delegates under the caller's validated combined access contract.
+unsafe impl<A, B> AccessElement for Or<A, B>
 where
     A: AccessElement + 'static,
     B: AccessElement + 'static,
@@ -898,15 +1011,23 @@ where
         B::collect_access_infos(out);
     }
 
-    fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-        OrFilter::new(A::fetch(world, ticks), B::fetch(world, ticks))
+    fn needs_main_thread() -> bool {
+        A::needs_main_thread() || B::needs_main_thread()
     }
 
-    fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-        OrFilter::new(
-            A::fetch_unlocked(world, ticks),
-            B::fetch_unlocked(world, ticks),
-        )
+    unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+        // SAFETY: the caller validated the combined access set and protects both filters.
+        unsafe { OrFilter::new(A::fetch(world, ticks), B::fetch(world, ticks)) }
+    }
+
+    unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+        // SAFETY: both filters are covered by the caller's combined lock plan.
+        unsafe {
+            OrFilter::new(
+                A::fetch_unlocked(world, ticks),
+                B::fetch_unlocked(world, ticks),
+            )
+        }
     }
 }
 
@@ -914,7 +1035,8 @@ where
 
 macro_rules! impl_any_access_element {
     ($($idx:tt $T:ident),+) => {
-        impl<$($T),+> AccessElement for Any<($($T,)+)>
+        // SAFETY: metadata and thread requirements recurse through every filter.
+        unsafe impl<$($T),+> AccessElement for Any<($($T,)+)>
         where
             $($T: AccessElement + 'static,)+
             $(for<'w> $T::Item<'w>: Filter,)+
@@ -930,12 +1052,18 @@ macro_rules! impl_any_access_element {
                 $($T::collect_access_infos(out);)+
             }
 
-            fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-                AnyFilter::new(($($T::fetch(world, ticks),)+))
+            fn needs_main_thread() -> bool {
+                $($T::needs_main_thread())||+
             }
 
-            fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-                AnyFilter::new(($($T::fetch_unlocked(world, ticks),)+))
+            unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+                // SAFETY: all filter accesses are covered by the caller's guarantees.
+                unsafe { AnyFilter::new(($($T::fetch(world, ticks),)+)) }
+            }
+
+            unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+                // SAFETY: all filters are covered by the caller's combined lock plan.
+                unsafe { AnyFilter::new(($($T::fetch_unlocked(world, ticks),)+)) }
             }
         }
     };
@@ -952,16 +1080,17 @@ impl_any_access_element!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 // ---- Tuple AccessSet implementations ----
 
 // Empty tuple (no access)
-impl AccessSet for () {
+// SAFETY: the empty set accesses no storage.
+unsafe impl AccessSet for () {
     type Item<'w> = ();
 
     fn access_infos() -> SmallVec<[AccessInfo; 8]> {
         SmallVec::new()
     }
 
-    fn fetch(_world: &World, _ticks: FetchTicks) -> Self::Item<'_> {}
+    unsafe fn fetch(_world: &World, _ticks: FetchTicks) -> Self::Item<'_> {}
 
-    fn fetch_unlocked(_world: &World, _ticks: FetchTicks) -> Self::Item<'_> {}
+    unsafe fn fetch_unlocked(_world: &World, _ticks: FetchTicks) -> Self::Item<'_> {}
 
     fn needs_main_thread() -> bool {
         false
@@ -970,7 +1099,9 @@ impl AccessSet for () {
 
 macro_rules! impl_access_set {
     ($($idx:tt $T:ident),+) => {
-        impl<$($T: AccessElement),+> AccessSet for ($($T,)+) {
+        // SAFETY: all element metadata and thread requirements are preserved;
+        // the caller validates the combined set before fetching.
+        unsafe impl<$($T: AccessElement),+> AccessSet for ($($T,)+) {
             type Item<'w> = ($($T::Item<'w>,)+);
 
             fn access_infos() -> SmallVec<[AccessInfo; 8]> {
@@ -979,12 +1110,14 @@ macro_rules! impl_access_set {
                 infos
             }
 
-            fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-                ($($T::fetch(world, ticks),)+)
+            unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+                // SAFETY: the caller guarantees a non-aliasing access set and protects raw reads.
+                unsafe { ($($T::fetch(world, ticks),)+) }
             }
 
-            fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
-                ($($T::fetch_unlocked(world, ticks),)+)
+            unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+                // SAFETY: the caller holds every lock in the validated access set.
+                unsafe { ($($T::fetch_unlocked(world, ticks),)+) }
             }
 
             fn needs_main_thread() -> bool {
@@ -1005,6 +1138,11 @@ impl_access_set!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 
 #[cfg(test)]
 mod tests {
+    // SAFETY for direct fetch calls below: each test owns its World, keeps it
+    // structurally unchanged while items live, and holds no conflicting data
+    // references. Filter tests run without concurrent writers. No main-thread
+    // resources or aliasing access sets are fetched here.
+
     use super::*;
 
     struct Position {
@@ -1170,7 +1308,7 @@ mod tests {
         world.insert(e, Velocity { _x: 5.0 }).unwrap();
 
         let (positions, velocities) =
-            <(Read<Position>, Read<Velocity>)>::fetch(&world, FetchTicks::frame(&world));
+            unsafe { <(Read<Position>, Read<Velocity>)>::fetch(&world, FetchTicks::frame(&world)) };
         assert_eq!(positions.len(), 1);
         assert_eq!(velocities.len(), 1);
     }
@@ -1182,7 +1320,8 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 0.0 }).unwrap();
 
-        let (mut positions,) = <(Write<Position>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (mut positions,) =
+            unsafe { <(Write<Position>,)>::fetch(&world, FetchTicks::frame(&world)) };
         for (_, mut pos) in positions.iter_mut() {
             pos.x = 99.0;
         }
@@ -1194,7 +1333,8 @@ mod tests {
     #[test]
     fn optional_read_returns_none_for_unregistered() {
         let world = World::new();
-        let (opt,) = <(OptionalRead<Position>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (opt,) =
+            unsafe { <(OptionalRead<Position>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(opt.is_none());
     }
 
@@ -1205,7 +1345,8 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 1.0 }).unwrap();
 
-        let (opt,) = <(OptionalRead<Position>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (opt,) =
+            unsafe { <(OptionalRead<Position>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(opt.is_some());
         assert_eq!(opt.unwrap().len(), 1);
     }
@@ -1215,7 +1356,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(1.5f64);
 
-        let (dt,) = <(Res<f64>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (dt,) = unsafe { <(Res<f64>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert_eq!(*dt, 1.5);
     }
 
@@ -1251,7 +1392,7 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Health(100)).unwrap();
 
-        let (filter,) = <(Added<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (filter,) = unsafe { <(Added<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(filter.matches(e.index()));
     }
 
@@ -1267,7 +1408,7 @@ mod tests {
         world.advance_tick(); // tick = 2
 
         // since_tick = 2 - 1 = 1, component was added at tick 0, so 0 > 1 is false
-        let (filter,) = <(Added<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (filter,) = unsafe { <(Added<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(!filter.matches(e.index()));
     }
 
@@ -1282,7 +1423,7 @@ mod tests {
         world.advance_tick(); // tick = 1
         let _ = world.remove::<Health>(e); // removed at tick 1
 
-        let (filter,) = <(Removed<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (filter,) = unsafe { <(Removed<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(filter.matches(e.index()));
     }
 
@@ -1302,8 +1443,9 @@ mod tests {
         world.advance_tick(); // tick = 1
         let _ = world.remove::<Health>(e1); // removed at tick 1
 
-        let (positions, removed) =
-            <(Read<Position>, Removed<Health>)>::fetch(&world, FetchTicks::frame(&world));
+        let (positions, removed) = unsafe {
+            <(Read<Position>, Removed<Health>)>::fetch(&world, FetchTicks::frame(&world))
+        };
         let affected: Vec<f32> = positions
             .iter()
             .filter(|(idx, _)| removed.matches(*idx))
@@ -1316,27 +1458,29 @@ mod tests {
     #[should_panic(expected = "not registered for Added")]
     fn added_panics_for_unregistered() {
         let world = World::new();
-        let _ = <(Added<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let _ = unsafe { <(Added<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
     }
 
     #[test]
     #[should_panic(expected = "not registered for Removed")]
     fn removed_panics_for_unregistered() {
         let world = World::new();
-        let _ = <(Removed<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let _ = unsafe { <(Removed<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
     }
 
     #[test]
     fn maybe_added_no_panic_for_unregistered() {
         let world = World::new();
-        let (filter,) = <(MaybeAdded<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (filter,) =
+            unsafe { <(MaybeAdded<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(!filter.matches(0));
     }
 
     #[test]
     fn maybe_removed_no_panic_for_unregistered() {
         let world = World::new();
-        let (filter,) = <(MaybeRemoved<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (filter,) =
+            unsafe { <(MaybeRemoved<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(!filter.matches(0));
     }
 
@@ -1349,7 +1493,8 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Health(50)).unwrap();
 
-        let (filter,) = <(MaybeAdded<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (filter,) =
+            unsafe { <(MaybeAdded<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(filter.matches(e.index()));
     }
 
@@ -1364,7 +1509,8 @@ mod tests {
         world.advance_tick(); // tick = 1
         let _ = world.remove::<Health>(e);
 
-        let (filter,) = <(MaybeRemoved<Health>,)>::fetch(&world, FetchTicks::frame(&world));
+        let (filter,) =
+            unsafe { <(MaybeRemoved<Health>,)>::fetch(&world, FetchTicks::frame(&world)) };
         assert!(filter.matches(e.index()));
     }
 
@@ -1402,7 +1548,7 @@ mod tests {
         world.insert(e2, Position { x: 2.0 }).unwrap();
 
         let (positions, has_frozen) =
-            <(Read<Position>, With<Frozen>)>::fetch(&world, FetchTicks::frame(&world));
+            unsafe { <(Read<Position>, With<Frozen>)>::fetch(&world, FetchTicks::frame(&world)) };
         let matched: Vec<f32> = positions
             .iter()
             .filter(|(idx, _)| has_frozen.matches(*idx))
@@ -1423,8 +1569,9 @@ mod tests {
         world.insert(e1, Frozen).unwrap();
         world.insert(e2, Position { x: 2.0 }).unwrap();
 
-        let (positions, not_frozen) =
-            <(Read<Position>, Without<Frozen>)>::fetch(&world, FetchTicks::frame(&world));
+        let (positions, not_frozen) = unsafe {
+            <(Read<Position>, Without<Frozen>)>::fetch(&world, FetchTicks::frame(&world))
+        };
         let matched: Vec<f32> = positions
             .iter()
             .filter(|(idx, _)| not_frozen.matches(*idx))
@@ -1442,8 +1589,9 @@ mod tests {
         world.insert(e, Position { x: 1.0 }).unwrap();
 
         // Frozen never registered — Without<Frozen> matches all entities
-        let (positions, not_frozen) =
-            <(Read<Position>, Without<Frozen>)>::fetch(&world, FetchTicks::frame(&world));
+        let (positions, not_frozen) = unsafe {
+            <(Read<Position>, Without<Frozen>)>::fetch(&world, FetchTicks::frame(&world))
+        };
         let count = positions
             .iter()
             .filter(|(idx, _)| not_frozen.matches(*idx))
@@ -1461,7 +1609,7 @@ mod tests {
 
         // Frozen never registered — With<Frozen> matches no entities
         let (positions, has_frozen) =
-            <(Read<Position>, With<Frozen>)>::fetch(&world, FetchTicks::frame(&world));
+            unsafe { <(Read<Position>, With<Frozen>)>::fetch(&world, FetchTicks::frame(&world)) };
         let count = positions
             .iter()
             .filter(|(idx, _)| has_frozen.matches(*idx))
@@ -1505,10 +1653,12 @@ mod tests {
         world.insert(e3, Position { x: 3.0 }).unwrap();
         // e3 has neither Flying nor Swimming
 
-        let (positions, can_move) = <(Read<Position>, Or<With<Flying>, With<Swimming>>)>::fetch(
-            &world,
-            FetchTicks::frame(&world),
-        );
+        let (positions, can_move) = unsafe {
+            <(Read<Position>, Or<With<Flying>, With<Swimming>>)>::fetch(
+                &world,
+                FetchTicks::frame(&world),
+            )
+        };
         let mut matched: Vec<f32> = positions
             .iter()
             .filter(|(idx, _)| can_move.matches(*idx))
@@ -1528,10 +1678,12 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 1.0 }).unwrap();
 
-        let (positions, can_move) = <(Read<Position>, Or<With<Flying>, With<Swimming>>)>::fetch(
-            &world,
-            FetchTicks::frame(&world),
-        );
+        let (positions, can_move) = unsafe {
+            <(Read<Position>, Or<With<Flying>, With<Swimming>>)>::fetch(
+                &world,
+                FetchTicks::frame(&world),
+            )
+        };
         let count = positions
             .iter()
             .filter(|(idx, _)| can_move.matches(*idx))
@@ -1557,10 +1709,12 @@ mod tests {
         world.insert(e3, Frozen).unwrap();
         // e3: no Flying, has Frozen → matches neither
 
-        let (positions, filter) = <(Read<Position>, Or<With<Flying>, Without<Frozen>>)>::fetch(
-            &world,
-            FetchTicks::frame(&world),
-        );
+        let (positions, filter) = unsafe {
+            <(Read<Position>, Or<With<Flying>, Without<Frozen>>)>::fetch(
+                &world,
+                FetchTicks::frame(&world),
+            )
+        };
         let mut matched: Vec<f32> = positions
             .iter()
             .filter(|(idx, _)| filter.matches(*idx))
@@ -1591,10 +1745,12 @@ mod tests {
         world.insert(e4, Position { x: 4.0 }).unwrap();
         // e4 has none
 
-        let (positions, filter) = <(
-            Read<Position>,
-            Or<With<Flying>, Or<With<Swimming>, With<Walking>>>,
-        )>::fetch(&world, FetchTicks::frame(&world));
+        let (positions, filter) = unsafe {
+            <(
+                Read<Position>,
+                Or<With<Flying>, Or<With<Swimming>, With<Walking>>>,
+            )>::fetch(&world, FetchTicks::frame(&world))
+        };
         let mut matched: Vec<f32> = positions
             .iter()
             .filter(|(idx, _)| filter.matches(*idx))
@@ -1637,10 +1793,12 @@ mod tests {
         world.insert(e4, Position { x: 4.0 }).unwrap();
         // e4 has none of the movement components
 
-        let (positions, movable) = <(
-            Read<Position>,
-            Any<(With<Flying>, With<Swimming>, With<Walking>)>,
-        )>::fetch(&world, FetchTicks::frame(&world));
+        let (positions, movable) = unsafe {
+            <(
+                Read<Position>,
+                Any<(With<Flying>, With<Swimming>, With<Walking>)>,
+            )>::fetch(&world, FetchTicks::frame(&world))
+        };
         let mut matched: Vec<f32> = positions
             .iter()
             .filter(|(idx, _)| movable.matches(*idx))
@@ -1660,14 +1818,43 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 1.0 }).unwrap();
 
-        let (positions, movable) = <(Read<Position>, Any<(With<Flying>, With<Swimming>)>)>::fetch(
-            &world,
-            FetchTicks::frame(&world),
-        );
+        let (positions, movable) = unsafe {
+            <(Read<Position>, Any<(With<Flying>, With<Swimming>)>)>::fetch(
+                &world,
+                FetchTicks::frame(&world),
+            )
+        };
         let count = positions
             .iter()
             .filter(|(idx, _)| movable.matches(*idx))
             .count();
         assert_eq!(count, 0);
+    }
+    #[test]
+    fn combined_filters_preserve_main_thread_requirements() {
+        struct MainThreadFilter;
+        // SAFETY: forwards the declared With<u32> read; the additional
+        // main-thread restriction is explicitly reported.
+        unsafe impl AccessElement for MainThreadFilter {
+            type Item<'w> = ContainsChecker<'w>;
+            fn access_info() -> AccessInfo {
+                <With<u32> as AccessElement>::access_info()
+            }
+            unsafe fn fetch(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+                // SAFETY: the caller protects the declared filter metadata.
+                unsafe { <With<u32> as AccessElement>::fetch(world, ticks) }
+            }
+            unsafe fn fetch_unlocked(world: &World, ticks: FetchTicks) -> Self::Item<'_> {
+                // SAFETY: the caller holds the declared metadata lock.
+                unsafe { <With<u32> as AccessElement>::fetch_unlocked(world, ticks) }
+            }
+            fn needs_main_thread() -> bool {
+                true
+            }
+        }
+        assert!(<(Or<With<u64>, MainThreadFilter>,)>::needs_main_thread());
+        assert!(<(Any<(With<u64>, MainThreadFilter)>,)>::needs_main_thread());
+        assert!(<(Or<With<u64>, Any<(With<u8>, MainThreadFilter)>>,)>::needs_main_thread());
+        assert!(!<(Or<With<u32>, With<u64>>, Any<(With<u8>, With<u16>)>)>::needs_main_thread());
     }
 }

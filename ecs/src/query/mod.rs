@@ -1,3 +1,5 @@
+mod borrow;
+pub use borrow::QueryBorrow;
 pub(crate) mod access;
 pub(crate) mod filter;
 pub(crate) mod guard;

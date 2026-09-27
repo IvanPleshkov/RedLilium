@@ -177,6 +177,46 @@ let mut transforms = world.write::<Transform>();
 // Panics at runtime if another system already has &mut Transform
 ```
 
+### Low-level access safety
+
+`AccessSet` and `AccessElement` are unsafe implementation contracts. Their
+metadata must include every accessed storage, the correct read/write mode and
+any main-thread requirement. `Or` and `Any` propagate these requirements from
+their nested filters.
+
+Direct `fetch` and `fetch_unlocked` calls are unsafe. Even the locking `fetch`
+cannot protect an existing unlocked `World::get` reference obtained through
+`&World`; filters and main-thread resources also do not acquire their own locks.
+The caller must uphold the documented aliasing, lifetime and thread guarantees.
+Use `ctx.query`, `ctx.lock().execute`, or `World::query` in application code.
+
+The unsafe contracts add no locks, allocations or per-entity checks.
+Custom access-trait implementations require `unsafe impl`.
+
+### QueryGuard storage views
+
+`QueryGuard::items()` returns a tuple of read-only views by value;
+`items_mut()` returns views borrowed exclusively from the guard. Component
+views preserve the existing `Ref`/`RefMut` methods, exclusion masks and write
+ticks. Bind writable component views with `mut`:
+
+```rust,ignore
+let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
+let (mut positions, velocities) = q.items_mut();
+```
+
+Resource views are ordinary `&T` / `&mut T`, and filters are borrowed read-only.
+Options keep their shape: taking an `OptionalWrite` view does not remove the
+stored item from the query. The view's lifetime keeps the guard borrowed, so
+neither `take`, `replace`, nor `swap` can leave access alive after its locks are
+released. Creating these views adds no locks, allocations or Arc operations.
+Custom fetched item types use `unsafe impl QueryBorrow` to expose their own
+views; its contract forbids exposing the original, longer storage lifetime.
+
+`ForEachAccess::run_*` helpers require mutable access to the fetched tuple and
+callbacks whose references cannot escape. To collect component references
+within a guard borrow, use `QueryGuard::iter_mut`.
+
 ## System Scheduling
 
 Systems implement the `System` trait: a synchronous `run` method that receives a `SystemContext`. The scheduler resolves dependencies and runs non-conflicting systems in parallel:

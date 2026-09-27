@@ -253,7 +253,7 @@ impl World {
     ///
     /// ```ignore
     /// let mut q = world.query::<(Write<Position>, Read<Velocity>)>();
-    /// let (positions, velocities) = q.items_mut();
+    /// let (mut positions, velocities) = q.items_mut();
     /// ```
     ///
     /// Takes `&mut self` so the guard cannot coexist with the unlocked
@@ -270,7 +270,8 @@ impl World {
         let infos = A::access_infos();
         let ticks = crate::query::FetchTicks::frame(self);
         let guards = self.acquire_sorted(&infos);
-        let items = A::fetch_unlocked(self, ticks);
+        // SAFETY: the validated, sorted lock plan is held until these items are dropped.
+        let items = unsafe { A::fetch_unlocked(self, ticks) };
         crate::query::QueryGuard::new(guards, items)
     }
 

@@ -201,7 +201,7 @@ fn world_query_multi_write() {
 
     {
         let mut q = world.query::<(crate::Write<Position>, crate::Write<Health>)>();
-        let (positions, healths) = q.items_mut();
+        let (mut positions, mut healths) = q.items_mut();
         for (_, mut pos) in positions.iter_mut() {
             pos.x += 10.0;
         }

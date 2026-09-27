@@ -136,24 +136,51 @@ pub trait ForEachAccess: AccessSet {
     /// Iterate over matching entities, calling `f` for each one.
     ///
     /// Performs an inner join: iterates the smallest component storage
-    /// and yields only entities present in all queried storages.
-    fn run_for_each<'w>(items: &Self::Item<'w>, f: impl FnMut(Self::EachItem<'w>));
+    /// and yields only entities present in all queried storages. The mutable
+    /// storage borrow excludes overlapping access, and callback references
+    /// cannot escape. Use `QueryGuard::iter_mut` to collect component references.
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, Write, ForEachAccess};
+    /// let mut world = World::new();
+    /// world.register_component::<u32>();
+    /// let mut q = world.query::<(Write<u32>,)>();
+    /// let mut views = q.items_mut();
+    /// let mut escaped = Vec::new();
+    /// <(Write<u32>,)>::run_for_each(&mut views, |(value,)| escaped.push(value));
+    /// ```
+    fn run_for_each<'w>(items: &mut Self::Item<'w>, f: impl for<'q> FnMut(Self::EachItem<'q>));
 
     /// Parallel version of [`run_for_each`](Self::run_for_each).
     ///
     /// Splits matching entities across threads using [`std::thread::scope`].
     /// The closure must be `Fn + Sync` since it is called concurrently.
-    /// Falls back to sequential on WASM.
-    fn run_par_for_each<'w>(items: &Self::Item<'w>, f: impl Fn(Self::EachItem<'w>) + Sync)
-    where
+    /// Falls back to sequential on WASM. As in `run_for_each`, callback
+    /// references cannot escape or overlap another borrow of the storages.
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, Write, ForEachAccess};
+    /// let mut world = World::new();
+    /// world.register_component::<u32>();
+    /// let mut q = world.query::<(Write<u32>,)>();
+    /// let mut views = q.items_mut();
+    /// let escaped = std::sync::Mutex::new(Vec::new());
+    /// <(Write<u32>,)>::run_par_for_each(&mut views, |(value,)| {
+    ///     escaped.lock().unwrap().push(value);
+    /// });
+    /// ```
+    fn run_par_for_each<'w>(
+        items: &mut Self::Item<'w>,
+        f: impl for<'q> Fn(Self::EachItem<'q>) + Sync,
+    ) where
         Self::Item<'w>: Sync;
 
     /// Like [`run_par_for_each`](Self::run_par_for_each), but with explicit
     /// parallelism configuration.
     fn run_par_for_each_with<'w>(
-        items: &Self::Item<'w>,
+        items: &mut Self::Item<'w>,
         config: &crate::system::par_for_each::ParConfig,
-        f: impl Fn(Self::EachItem<'w>) + Sync,
+        f: impl for<'q> Fn(Self::EachItem<'q>) + Sync,
     ) where
         Self::Item<'w>: Sync;
 }
@@ -164,12 +191,11 @@ macro_rules! impl_for_each_access {
         where
             $(for<'w> $T::Item<'w>: QueryItem,)+
         {
-            // Storage and item lifetimes are both 'w here: the items are
-            // consumed inside HRTB-bound closures (`for<'a> Fn(EachItem<'a>)`),
-            // which cannot smuggle them past the storage locks.
+            // Callback lifetimes are universally quantified: items cannot escape
+            // a callback. The mutable storage borrow excludes overlapping access.
             type EachItem<'w> = ($(<$T::Item<'w> as QueryItem>::Item<'w>,)+);
 
-            fn run_for_each<'w>(items: &Self::Item<'w>, mut f: impl FnMut(Self::EachItem<'w>)) {
+            fn run_for_each<'w>(items: &mut Self::Item<'w>, mut f: impl for<'q> FnMut(Self::EachItem<'q>)) {
                 // Try bitset-accelerated path first.
                 if let Some(intersected) = items.query_intersected_entities() {
                     for &entity in &intersected {
@@ -207,8 +233,8 @@ macro_rules! impl_for_each_access {
             }
 
             fn run_par_for_each<'w>(
-                items: &Self::Item<'w>,
-                f: impl Fn(Self::EachItem<'w>) + Sync,
+                items: &mut Self::Item<'w>,
+                f: impl for<'q> Fn(Self::EachItem<'q>) + Sync,
             )
             where
                 Self::Item<'w>: Sync,
@@ -217,9 +243,9 @@ macro_rules! impl_for_each_access {
             }
 
             fn run_par_for_each_with<'w>(
-                items: &Self::Item<'w>,
+                items: &mut Self::Item<'w>,
                 config: &crate::system::par_for_each::ParConfig,
-                f: impl Fn(Self::EachItem<'w>) + Sync,
+                f: impl for<'q> Fn(Self::EachItem<'q>) + Sync,
             )
             where
                 Self::Item<'w>: Sync,
@@ -301,8 +327,8 @@ where
 {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
-        ctx.lock::<A>().execute(|items| {
-            A::run_for_each(&items, |item| {
+        ctx.lock::<A>().execute(|mut items| {
+            A::run_for_each(&mut items, |item| {
                 (self.func)(item);
             });
         });
@@ -391,8 +417,8 @@ where
 {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
-        ctx.lock::<A>().execute(|items| {
-            A::run_par_for_each(&items, |item| {
+        ctx.lock::<A>().execute(|mut items| {
+            A::run_par_for_each(&mut items, |item| {
                 (self.func)(item);
             });
         });

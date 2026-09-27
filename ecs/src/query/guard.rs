@@ -6,7 +6,7 @@ use fixedbitset::FixedBitSet;
 use smallvec::SmallVec;
 
 use crate::entity::Entities;
-use crate::query::AccessSet;
+use crate::query::{AccessSet, QueryBorrow};
 use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{LockGuard, Mut, Ref, RefMut, SparseSetInner};
 use crate::system::context::LockTracking;
@@ -31,7 +31,7 @@ use crate::system::context::LockTracking;
 ///
 /// // With writes:
 /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
-/// let (positions, velocities) = q.items_mut();
+/// let (mut positions, velocities) = q.items_mut();
 /// for (idx, pos) in positions.iter_mut() {
 ///     if let Some(vel) = velocities.get(idx) {
 ///         pos.x += vel.x;
@@ -46,13 +46,14 @@ use crate::system::context::LockTracking;
 /// [`MainThreadResMut`](crate::MainThreadResMut)) are not supported.
 /// Use `lock().execute()` for those.
 pub struct QueryGuard<'a, A: AccessSet> {
-    _guards: SmallVec<[LockGuard<'a>; 8]>,
     /// The fetched component/resource data. Private: the unlocked `Ref`s /
     /// `RefMut`s in here are only kept alive by `_guards`, so moving them out
     /// of the guard (possible through a public field) would dangle once the
     /// guard drops. Access goes through [`items`](Self::items) /
     /// [`items_mut`](Self::items_mut), which tie the borrow to the guard.
     items: A::Item<'a>,
+    // Drop fetched data before releasing its backing locks.
+    _guards: SmallVec<[LockGuard<'a>; 8]>,
     /// Deadlock tracking — unregisters held locks when this guard is dropped.
     /// `None` when created outside of a SystemContext (e.g. in tests).
     _tracking: Option<LockTracking<'a>>,
@@ -83,16 +84,119 @@ impl<'a, A: AccessSet> QueryGuard<'a, A> {
         }
     }
 
-    /// Returns the fetched data, borrowed for the guard's lifetime.
+    /// Returns read-only views whose lifetime is tied to this borrow of the guard.
     ///
-    /// Destructure the tuple to access individual storages.
-    pub fn items(&self) -> &A::Item<'a> {
-        &self.items
+    /// Components retain storage access methods; resources become `&T`.
+    /// Even a `Write<T>` element yields a read-only view here.
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, Write};
+    /// let mut world = World::new();
+    /// world.register_component::<u32>();
+    /// let q = world.query::<(Write<u32>,)>();
+    /// let (mut values,) = q.items();
+    /// values.get_mut(0); // read-only views cannot write
+    /// ```
+    ///
+    /// Resource views also retain the guard borrow:
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, Res};
+    /// let mut world = World::new();
+    /// world.insert_resource(1_u32);
+    /// let q = world.query::<(Res<u32>,)>();
+    /// let (value,) = q.items();
+    /// drop(q);
+    /// println!("{value}");
+    /// ```
+    pub fn items(&self) -> <A::Item<'a> as QueryBorrow>::Read<'_>
+    where
+        A::Item<'a>: QueryBorrow,
+    {
+        self.items.borrow_read()
     }
 
-    /// Mutable variant of [`items`](Self::items).
-    pub fn items_mut(&mut self) -> &mut A::Item<'a> {
-        &mut self.items
+    /// Returns views tied to an exclusive borrow of this guard.
+    ///
+    /// Bind writable component views with `mut`. Resources become `&mut T`
+    /// for `ResMut` and `&T` for `Res`; filters remain read-only. Options retain
+    /// their shape, so `take()` is allowed without extracting the owning data.
+    /// Reborrowing takes no locks, allocates nothing, and does not clone Arcs.
+    ///
+    /// ```
+    /// use redlilium_ecs::{World, OptionalWrite};
+    /// let mut world = World::new();
+    /// world.register_component::<u32>();
+    /// let entity = world.spawn();
+    /// world.insert(entity, 1_u32).unwrap();
+    /// let mut q = world.query::<(OptionalWrite<u32>,)>();
+    /// {
+    ///     let (mut optional,) = q.items_mut();
+    ///     let mut values = optional.take().unwrap();
+    ///     *values.get_mut(entity.index()).unwrap() += 1;
+    /// }
+    /// // Taking the view did not remove the fetched storage from the guard.
+    /// assert_eq!(q.items().0.unwrap().get(entity.index()), Some(&2));
+    /// ```
+    ///
+    /// An extracted view cannot survive its guard:
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, OptionalWrite};
+    /// let mut world = World::new();
+    /// world.register_component::<u32>();
+    /// let mut q = world.query::<(OptionalWrite<u32>,)>();
+    /// let mut view = q.items_mut().0.take().unwrap();
+    /// drop(q);
+    /// view.get_mut(0);
+    /// ```
+    ///
+    /// Replacing a view also keeps the guard borrowed:
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, OptionalWrite};
+    /// let mut world = World::new();
+    /// world.register_component::<u32>();
+    /// let mut q = world.query::<(OptionalWrite<u32>,)>();
+    /// let mut items = q.items_mut();
+    /// let mut view = std::mem::replace(&mut items.0, None).unwrap();
+    /// drop(q);
+    /// view.get_mut(0);
+    /// ```
+    ///
+    /// A live mutable view excludes a second view or iterator:
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, Write};
+    /// let mut world = World::new();
+    /// world.register_component::<u32>();
+    /// let mut q = world.query::<(Write<u32>,)>();
+    /// let (mut view,) = q.items_mut();
+    /// let _iter = q.iter_mut();
+    /// view.get_mut(0);
+    /// ```
+    ///
+    /// Swapping views between queries cannot detach either lifetime:
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, OptionalWrite};
+    /// let mut a = World::new();
+    /// let mut b = World::new();
+    /// a.register_component::<u32>();
+    /// b.register_component::<u32>();
+    /// let mut qa = a.query::<(OptionalWrite<u32>,)>();
+    /// let mut qb = b.query::<(OptionalWrite<u32>,)>();
+    /// let mut va = qa.items_mut();
+    /// let mut vb = qb.items_mut();
+    /// std::mem::swap(&mut va, &mut vb);
+    /// drop(qa);
+    /// vb.0.as_mut().unwrap().get_mut(0);
+    /// ```
+    pub fn items_mut(&mut self) -> <A::Item<'a> as QueryBorrow>::Write<'_>
+    where
+        A::Item<'a>: QueryBorrow,
+    {
+        self.items.borrow_write()
     }
 }
 
@@ -678,7 +782,8 @@ mod tests {
     fn query<'w, A: AccessSet>(world: &'w World) -> QueryGuard<'w, A> {
         let ticks = crate::query::FetchTicks::frame(world);
         let guards = world.acquire_sorted(&A::access_infos());
-        let items = A::fetch_unlocked(world, ticks);
+        // SAFETY: the validated, sorted lock plan is held until these items are dropped.
+        let items = unsafe { A::fetch_unlocked(world, ticks) };
         QueryGuard::new(guards, items)
     }
 

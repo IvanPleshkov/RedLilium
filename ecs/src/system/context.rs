@@ -374,7 +374,7 @@ impl<'a> SystemContext<'a> {
     ///
     /// ```ignore
     /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
-    /// let (positions, velocities) = q.items_mut();
+    /// let (mut positions, velocities) = q.items_mut();
     /// for (idx, pos) in positions.iter_mut() {
     ///     if let Some(vel) = velocities.get(idx) {
     ///         pos.x += vel.x;
@@ -406,7 +406,8 @@ impl<'a> SystemContext<'a> {
 
         self.register_held_locks(&sorted);
         let tracking = self.make_tracking(&sorted);
-        let items = A::fetch_unlocked(self.world, self.ticks);
+        // SAFETY: the validated, sorted lock plan is held until these items are dropped.
+        let items = unsafe { A::fetch_unlocked(self.world, self.ticks) };
         QueryGuard::new_tracked(guards, items, tracking)
     }
 
@@ -944,7 +945,7 @@ mod tests {
         use crate::query::ResMut;
         let mut q1 = ctx.query::<(Write<Position>,)>(); // component storage
         let mut q2 = ctx.query::<(ResMut<Position>,)>(); // resource storage
-        let (components,) = q1.items_mut();
+        let (mut components,) = q1.items_mut();
         let (resource,) = q2.items_mut();
         resource.x += 1.0;
         assert_eq!(resource.x, 10.0);

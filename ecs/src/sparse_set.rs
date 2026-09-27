@@ -802,6 +802,16 @@ impl<'a, T: 'static> Ref<'a, T> {
         unsafe { &*self.inner }
     }
 
+    /// Borrow a view without taking another lock. The view cannot outlive self.
+    pub(crate) fn reborrow(&self) -> Ref<'_, T> {
+        Ref {
+            inner: self.inner,
+            entities: self.entities,
+            exclude_mask: self.exclude_mask,
+            _guard: None,
+        }
+    }
+
     // ---- Filtered methods (shadow Deref'd SparseSetInner methods) ----
 
     /// Returns whether the entity at the given index is excluded by this
@@ -1031,6 +1041,28 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Returns the tick stored in this guard (for [`QueryItem`](crate::QueryItem)).
     pub(crate) fn query_tick(&self) -> u64 {
         self.tick
+    }
+
+    /// Read-only view of the write-locked storage, tied to this borrow.
+    pub(crate) fn reborrow(&self) -> Ref<'_, T> {
+        Ref {
+            inner: self.inner,
+            entities: self.entities,
+            exclude_mask: self.exclude_mask,
+            _guard: None,
+        }
+    }
+
+    /// Exclusive view tied to this borrow, preserving the write tick and mask.
+    pub(crate) fn reborrow_mut(&mut self) -> RefMut<'_, T> {
+        RefMut {
+            inner: self.inner,
+            entities: self.entities,
+            exclude_mask: self.exclude_mask,
+            tick: self.tick,
+            _guard: None,
+            _marker: PhantomData,
+        }
     }
 
     // ---- Filtered methods (shadow Deref'd SparseSetInner methods) ----

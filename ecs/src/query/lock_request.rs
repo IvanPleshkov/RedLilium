@@ -91,7 +91,9 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
                 .world_for_lock_plumbing()
                 .acquire_sorted(&A::access_infos())
         };
-        let items = A::fetch_unlocked(self.ctx.world_for_lock_plumbing(), self.ctx.ticks());
+        // SAFETY: the validated, sorted lock plan is held until these items are dropped.
+        let items =
+            unsafe { A::fetch_unlocked(self.ctx.world_for_lock_plumbing(), self.ctx.ticks()) };
         f(items)
     }
 
@@ -112,7 +114,8 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
                         redlilium_core::profile_scope!("ecs: lock acquire (main-thread)");
                         world.acquire_sorted(&A::access_infos())
                     };
-                    let items = A::fetch_unlocked(world, ticks);
+                    // SAFETY: the validated, sorted lock plan is held until these items are dropped.
+                    let items = unsafe { A::fetch_unlocked(world, ticks) };
                     let result = f(items);
                     let _ = result_tx.send(result);
                 });
@@ -161,8 +164,8 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         for<'w> A::Item<'w>: Sync,
         F: for<'w> Fn(<A as crate::system::ForEachAccess>::EachItem<'w>) + Send + Sync,
     {
-        self.execute(|items| {
-            A::run_par_for_each(&items, &f);
+        self.execute(|mut items| {
+            A::run_par_for_each(&mut items, &f);
         });
     }
 
@@ -174,8 +177,8 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         for<'w> A::Item<'w>: Sync,
         F: for<'w> Fn(<A as crate::system::ForEachAccess>::EachItem<'w>) + Send + Sync,
     {
-        self.execute(|items| {
-            A::run_par_for_each_with(&items, &config, &f);
+        self.execute(|mut items| {
+            A::run_par_for_each_with(&mut items, &config, &f);
         });
     }
 }

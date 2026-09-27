@@ -11,6 +11,12 @@ pub trait Filter {
     fn matches(&self, entity_index: u32) -> bool;
 }
 
+impl<F: Filter + ?Sized> Filter for &F {
+    fn matches(&self, entity_index: u32) -> bool {
+        F::matches(self, entity_index)
+    }
+}
+
 /// Marker type for filtering entities that have component T,
 /// without borrowing the component data.
 ///
@@ -31,7 +37,7 @@ pub struct Without<T: 'static>(PhantomData<T>);
 ///
 /// ```ignore
 /// let mut q = world.query::<(Write<Position>, Without<Frozen>)>();
-/// let (positions, frozen) = q.items_mut();
+/// let (mut positions, frozen) = q.items_mut();
 ///
 /// for (entity_idx, pos) in positions.iter_mut() {
 ///     if frozen.matches(entity_idx) {
