@@ -81,8 +81,8 @@ mod world;
 pub use commands::CommandBuffer;
 pub use component::Component;
 pub use component_field::{ComponentField, FieldInspectCtx};
-pub use compute::IoRuntime;
 pub use compute::{ComputePool, QuiesceTimeout, TaskHandle};
+pub use compute::{IoRuntime, IoShutdownError};
 pub use ecs_macro::{Bundle, Component};
 pub use egui;
 pub use entity::Entity;
@@ -119,7 +119,7 @@ pub use query::{
     MaybeChanged, MaybeRemoved, OptionalRead, OptionalWrite, Or, Read, ReadAll, Removed, Res,
     ResMut, Write, WriteAll,
 };
-pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
+pub use runner::{EcsRunner, EcsRunnerSingleThread, ReloadError, ShutdownError};
 pub use system::SystemContext;
 pub use system::{
     AccessConflict, AmbiguityInfo, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,

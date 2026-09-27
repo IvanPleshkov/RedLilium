@@ -366,29 +366,10 @@ impl EcsRunnerSingleThread {
         }
     }
 
-    /// Drains compute tasks, including concurrent polls and destructors.
+    /// Drains compute and IO, including polling and future destruction.
     /// Request cancellation separately; stop task producers before shutdown.
-    pub fn graceful_shutdown(&self, _time_budget: Duration) -> Result<(), ShutdownError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.compute
-                .quiesce(_time_budget)
-                .map_err(|error| ShutdownError::Timeout {
-                    remaining_tasks: error.remaining_tasks,
-                })
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            while self.compute.active_count() > 0 {
-                if self.compute.tick_all() == 0 {
-                    // Synchronous shutdown cannot drive the browser event loop.
-                    return Err(ShutdownError::Timeout {
-                        remaining_tasks: self.compute.active_count(),
-                    });
-                }
-            }
-            Ok(())
-        }
+    pub fn graceful_shutdown(&self, time_budget: Duration) -> Result<(), ShutdownError> {
+        super::drain_tasks(&self.compute, &self.io, time_budget)
     }
 }
 

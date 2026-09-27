@@ -399,7 +399,7 @@ pub struct ReloadOptions {
 ///    adopt shell-owned resources from the old world
 /// 3. drop the old world/history — the old image is still mapped, so game
 ///    storage drop glue and system destructors are sound
-/// 4. quiesce compute, join CPU workers, clear cached system results
+/// 4. drain compute/IO, join CPU/Tokio workers, clear cached system results
 ///    (abort on failure: keep the old module)
 /// 5. swap the module image (fresh temp copy, fresh generation)
 /// 6. re-run `Plugin::register_types` into the replacement (the scene comes
@@ -455,34 +455,14 @@ pub fn reload_game(
     // 3. Tear the old world down while the old image is mapped.
     drop(old);
 
-    // 4. Game tasks must finish before the image unmaps (their futures'
-    // code lives inside it).
-    if let Err(error) = runner.compute().quiesce(QUIESCE_TIMEOUT) {
-        // Fail closed: keep the old module mapped (bounded leak, no UB) and
-        // rebuild the world against it so the editor stays usable.
-        host.register_into(&mut fresh);
-        let restore = restore_into(&mut fresh, &snapshot, opts.aspect);
-        let msg = format!(
-            "{error} after {QUIESCE_TIMEOUT:?} — reload aborted, \
-             old module kept mapped{}",
-            restore
-                .as_ref()
-                .err()
-                .map(|e| format!("; restore: {e}"))
-                .unwrap_or_default()
-        );
-        return (fresh, Err(msg));
-    }
-
-    // Persistent system/query workers may retain guest TLS even when idle.
-    // Keep the old image mapped if an execution scope still uses this pool.
-    if let Err(error) = runner.prepare_reload() {
+    // 4. Drain compute/IO and join CPU/Tokio workers and guest TLS before unmapping.
+    if let Err(error) = runner.prepare_reload(QUIESCE_TIMEOUT) {
         host.register_into(&mut fresh);
         let restore = restore_into(&mut fresh, &snapshot, opts.aspect);
         return (
             fresh,
             Err(format!(
-                "worker shutdown failed; old module kept mapped: {error}{}",
+                "{error}; old module kept mapped{}",
                 restore
                     .as_ref()
                     .err()

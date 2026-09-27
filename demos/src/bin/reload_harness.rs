@@ -161,7 +161,7 @@ fn run_panic_child(path: &str, engine: &EngineContext) -> ! {
     drop(world);
     drop(schedules);
     runner
-        .prepare_reload()
+        .prepare_reload(std::time::Duration::from_secs(5))
         .expect("workers quiescent before unload");
     drop(module3);
     let _ = std::fs::remove_file(&path3);

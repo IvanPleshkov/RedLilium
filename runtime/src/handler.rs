@@ -320,8 +320,8 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
     /// Phase 3: Prepare for warm-restart reload. Sequence (Fable-corrected):
     /// 1. Capture scene snapshot (FIRST, captures pre-cleanup running state)
     /// 2. Loop plugins: call on_unload(&mut app) with panic catching (after snapshot)
-    /// 3. Drop app (triggers World drop, clears PlayTasks, cancels task tokens)
-    /// 4. Quiesce ComputePool until all tasks complete (timeout: 5s, AFTER app drop)
+    /// 3. Unload hooks arrange cancellation; the app stays owned on failure
+    /// 4. Drain compute/IO and join CPU/Tokio workers (shared timeout: 5s)
     ///
     /// CRITICAL: If quiesce times out, ABORT RELOAD (fail closed). Leaking the dylib
     /// is safer than unmapping it with tasks still running.
@@ -371,18 +371,11 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
             }
         }
 
-        // Phase 3c: Drop app (World drop triggers PlayTasks cleanup + token cancellation)
-        // When state goes out of scope at the end of this function, App drops, which
-        // triggers World drop and PlayTasks token cancellation.
-
-        // Phase 3d: Task quiescence (block until all tasks complete or timeout)
-        // CRITICAL: Only NOW, after World drop cancels tokens, do tasks finish.
-        // Before World drop, long-lived tasks may legitimately still be running.
-        let quiesce_result = match &state.runner {
-            redlilium_ecs::EcsRunner::SingleThread(r) => r.compute().quiesce(quiesce_timeout),
-            #[cfg(not(target_arch = "wasm32"))]
-            redlilium_ecs::EcsRunner::MultiThread(r) => r.compute().quiesce(quiesce_timeout),
-        };
+        // Keep the app/module owned by state on failure. on_unload must arrange
+        // cancellation of long-lived tasks; this dormant entry does not drop the
+        // world before draining. The editor's live reload path does that separately.
+        // A single barrier includes IO lifetimes and both CPU and Tokio worker TLS.
+        let quiesce_result = state.runner.prepare_reload(quiesce_timeout);
 
         if let Err(error) = quiesce_result {
             log::error!(
@@ -392,7 +385,7 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
                 quiesce_timeout
             );
             return Err(redlilium_ecs::serialize::SerializeError::FormatError(
-                "Task quiescence timeout — reload aborted to prevent UB".to_string(),
+                format!("Reload preparation failed — reload aborted: {error}"),
             ));
         }
 
@@ -603,6 +596,30 @@ mod tests {
             1,
             "module must stay loaded after an aborted reload"
         );
+    }
+
+    #[test]
+    fn reload_aborts_on_detached_io_and_succeeds_after_it_finishes() {
+        use redlilium_ecs::IoRunner;
+        let mut handler = test_handler();
+        let (finish, wait) = redlilium_ecs::IoHandle::<()>::channel();
+        drop(
+            handler
+                .state
+                .as_ref()
+                .unwrap()
+                .runner
+                .io()
+                .run(async move { wait.await }),
+        );
+        let result = handler.prepare_for_reload_with_timeout(Duration::from_millis(10));
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("IO quiescence"), "{error}");
+        assert_eq!(handler.state.as_ref().unwrap().module.plugins().len(), 1);
+        finish.send(()).unwrap();
+        handler
+            .prepare_for_reload_with_timeout(Duration::from_secs(1))
+            .unwrap();
     }
 
     /// The happy path with the same short timeout: no live tasks → quiesce

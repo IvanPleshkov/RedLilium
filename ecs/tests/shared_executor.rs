@@ -238,7 +238,9 @@ fn reload_preparation_drops_cached_results_for_both_runners() {
         drop(world);
         drop(systems);
         assert_eq!(count.load(Ordering::SeqCst), 0);
-        runner.prepare_reload().unwrap();
+        runner
+            .prepare_reload(std::time::Duration::from_secs(2))
+            .unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }
@@ -288,5 +290,7 @@ fn sequential_runner_attaches_shared_query_executor_without_running_systems_on_i
     }
     assert!(seen.ids.lock().unwrap().contains(&thread::current().id()));
     assert!(seen.ids.lock().unwrap().len() <= 2);
-    runner.prepare_reload().unwrap();
+    runner
+        .prepare_reload(std::time::Duration::from_secs(2))
+        .unwrap();
 }

@@ -624,14 +624,10 @@ impl EcsRunnerMultiThread {
         thread_errors.into_inner()
     }
 
-    /// Drains compute tasks, including concurrent polls and destructors.
+    /// Drains compute and IO, including polling and future destruction.
     /// Request cancellation separately; stop task producers before shutdown.
     pub fn graceful_shutdown(&self, time_budget: Duration) -> Result<(), ShutdownError> {
-        self.compute
-            .quiesce(time_budget)
-            .map_err(|error| ShutdownError::Timeout {
-                remaining_tasks: error.remaining_tasks,
-            })
+        super::drain_tasks(&self.compute, &self.io, time_budget)
     }
 }
 

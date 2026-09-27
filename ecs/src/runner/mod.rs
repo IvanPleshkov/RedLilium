@@ -18,7 +18,9 @@ use crate::world::World;
 /// Error returned when graceful shutdown exceeds the time budget.
 #[derive(Debug)]
 pub enum ShutdownError {
-    /// Shutdown timed out with tasks still pending.
+    /// IO tasks or workers did not finish.
+    Io(crate::IoShutdownError),
+    /// Shutdown timed out with compute tasks still pending.
     Timeout {
         /// Number of compute tasks still running.
         remaining_tasks: usize,
@@ -28,10 +30,11 @@ pub enum ShutdownError {
 impl std::fmt::Display for ShutdownError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ShutdownError::Io(error) => write!(f, "{error}"),
             ShutdownError::Timeout { remaining_tasks } => {
                 write!(
                     f,
-                    "Shutdown timed out with {remaining_tasks} tasks remaining"
+                    "compute quiescence timeout with {remaining_tasks} active tasks"
                 )
             }
         }
@@ -39,6 +42,59 @@ impl std::fmt::Display for ShutdownError {
 }
 
 impl std::error::Error for ShutdownError {}
+
+/// Failure to establish the complete module-unload barrier.
+#[derive(Debug)]
+pub enum ReloadError {
+    Shutdown(ShutdownError),
+    Workers(crate::ExecutorBusy),
+}
+impl std::fmt::Display for ReloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Shutdown(error) => write!(f, "{error}"),
+            Self::Workers(error) => write!(f, "{error}"),
+        }
+    }
+}
+impl std::error::Error for ReloadError {}
+
+// IO can spawn compute and compute can spawn IO. Recheck both domains after
+// each drain; external producers must remain stopped throughout this operation.
+fn drain_tasks(
+    compute: &ComputePool,
+    io: &IoRuntime,
+    timeout: Duration,
+) -> Result<(), ShutdownError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let start = std::time::Instant::now();
+        loop {
+            compute
+                .quiesce(timeout.saturating_sub(start.elapsed()))
+                .map_err(|error| ShutdownError::Timeout {
+                    remaining_tasks: error.remaining_tasks,
+                })?;
+            io.quiesce(timeout.saturating_sub(start.elapsed()))
+                .map_err(ShutdownError::Io)?;
+            if compute.active_count() == 0 && io.active_count() == 0 {
+                return Ok(());
+            }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = timeout;
+        while compute.active_count() > 0 {
+            if compute.tick_all() == 0 {
+                return Err(ShutdownError::Timeout {
+                    remaining_tasks: compute.active_count(),
+                });
+            }
+        }
+        io.quiesce(Duration::ZERO).map_err(ShutdownError::Io)
+    }
+}
 
 /// ECS system executor.
 ///
@@ -98,19 +154,47 @@ impl EcsRunner {
         }
     }
 
-    /// Prepare this runner for game-module unload. The caller must stop game
-    /// producers and quiesce compute first, and keep them stopped until reload
-    /// finishes. Joins workers/TLS and drops cached system results while their
-    /// guest vtables and destructors are still mapped. Other runners sharing
-    /// the pool must also release their caches before unloading their guests.
-    pub fn prepare_reload(&self) -> Result<(), crate::ExecutorBusy> {
-        self.shutdown_workers()?;
+    /// Drain compute and IO, join their workers/TLS and release cached results.
+    /// Stop external producers and release other guest-owned results/worlds first;
+    /// keep producers stopped until reload finishes. The IO domain belongs to this
+    /// runner; independent host IO should use its own runtime. A failure forbids
+    /// unloading the old module. Retry after unfinished work completes.
+    /// CPU polls/destructors are cooperative and cannot be forcibly preempted.
+    pub fn prepare_reload(&self, timeout: Duration) -> Result<(), ReloadError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = std::time::Instant::now();
+        let remaining = || {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                timeout.saturating_sub(start.elapsed())
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                timeout
+            }
+        };
         match self {
             Self::SingleThread(runner) => runner.clear_cached_results(),
             #[cfg(not(target_arch = "wasm32"))]
             Self::MultiThread(runner) => runner.clear_cached_results(),
         }
-        Ok(())
+        loop {
+            self.graceful_shutdown(remaining())
+                .map_err(ReloadError::Shutdown)?;
+            self.shutdown_workers().map_err(ReloadError::Workers)?;
+            self.io()
+                .shutdown(remaining())
+                .map_err(|error| ReloadError::Shutdown(ShutdownError::Io(error)))?;
+            // IO thread-local destructors can enqueue compute; CPU TLS can in
+            // turn start IO. Close the cycle before declaring unload safe.
+            if self.compute().active_count() != 0 {
+                continue;
+            }
+            self.shutdown_workers().map_err(ReloadError::Workers)?;
+            if self.io().is_stopped() && self.compute().active_count() == 0 {
+                return Ok(());
+            }
+        }
     }
 
     /// Creates a multi-threaded runner using available parallelism.
@@ -177,9 +261,9 @@ impl EcsRunner {
         }
     }
 
-    /// Gracefully shuts down the runner, completing pending compute tasks.
+    /// Drains pending compute and IO tasks without stopping their workers.
     ///
-    /// Ticks compute until all tasks, including concurrent polls and future
+    /// Waits until all tasks, including concurrent polls and future
     /// destructors, are drained or the time budget is exceeded. Stop producers
     /// first; request cancellation separately when needed.
     pub fn graceful_shutdown(&self, time_budget: Duration) -> Result<(), ShutdownError> {

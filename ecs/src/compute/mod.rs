@@ -4,5 +4,5 @@ pub(crate) mod pool;
 
 // Re-export public items
 pub use context::EcsComputeContext;
-pub use io_runtime::IoRuntime;
+pub use io_runtime::{IoRuntime, IoShutdownError};
 pub use pool::{ComputePool, QuiesceTimeout, TaskHandle};

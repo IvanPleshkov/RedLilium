@@ -50,7 +50,9 @@ fn background_io_and_nested_await_progress_between_frames_on_shared_workers() {
         .spawn(Priority::High, move |_| async move { child.await });
     assert_eq!(parent.recv_timeout(Duration::from_secs(10)), Some(Some(23)));
     runner.compute().quiesce(Duration::from_secs(1)).unwrap();
-    runner.prepare_reload().unwrap();
+    runner
+        .prepare_reload(std::time::Duration::from_secs(2))
+        .unwrap();
 }
 
 #[test]
