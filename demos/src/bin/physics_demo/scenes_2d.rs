@@ -205,19 +205,10 @@ impl PhysicsScene2D for TrimeshScene2D {
             .collect();
         let indices: Vec<_> = (0..vertices.len() as u32 - 1).map(|i| [i, i + 1]).collect();
 
-        let ground_handle = physics.add_body(RigidBodyBuilder::fixed().build());
         let polyline = ColliderBuilder::polyline(vertices, Some(indices)).build();
-        physics.add_collider(polyline, ground_handle);
+        physics.add_free_collider(polyline);
 
         world.insert_resource(physics);
-
-        let ground_entity = world.spawn();
-        let _ = world.insert(
-            ground_entity,
-            redlilium_ecs::physics::physics2d::RigidBody2DHandle(ground_handle),
-        );
-        let _ = world.insert(ground_entity, Transform::IDENTITY);
-        let _ = world.insert(ground_entity, redlilium_ecs::GlobalTransform::IDENTITY);
     }
 }
 

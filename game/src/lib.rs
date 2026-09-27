@@ -147,7 +147,7 @@ impl System for DriveCar {
                 let Some(handle) = handles.get(idx) else {
                     continue;
                 };
-                let Some(body) = physics.bodies.get_mut(handle.0) else {
+                let Some(mut body) = physics.body_motion(handle.0) else {
                     continue;
                 };
                 let forward = body.rotation() * CAR_FORWARD;
@@ -314,7 +314,7 @@ impl ExclusiveSystem for GameFlowUi {
             let speed = if world.has_resource::<PhysicsWorld3D>() {
                 let physics = world.resource::<PhysicsWorld3D>();
                 physics
-                    .bodies
+                    .bodies()
                     .iter()
                     .find(|(_, b)| b.is_dynamic())
                     .map(|(_, b)| b.linvel().length())
@@ -1498,7 +1498,7 @@ mod tests {
 
         redlilium_ecs::system::run_exclusive_system_once(&mut SyncPhysicsBodies3D, &mut world)
             .unwrap();
-        assert_eq!(world.resource::<PhysicsWorld3D>().bodies.len(), 10);
+        assert_eq!(world.resource::<PhysicsWorld3D>().bodies().len(), 10);
 
         // Transform propagation must pick up scene-instantiated entities:
         // after one propagation pass the ground's world matrix reflects its

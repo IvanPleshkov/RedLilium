@@ -93,19 +93,22 @@ macro_rules! lifecycle_tests {
                         sync_bodies(&mut w, regular, multi);
                         let j = joint(&mut w, a, b);
                         sync_joints(&mut w, regular, multi);
-                        assert_eq!(w.resource::<Physics>().impulse_joints.len(), 1);
+                        assert_eq!(w.resource::<Physics>().impulse_joints().len(), 1);
                         remove(&mut w, a);
                         sync_bodies(&mut w, regular, multi);
                         assert!(w.get::<BodyHandle>(a).is_none());
                         assert!(w.get::<JointHandle>(j).is_none());
                         {
                             let p = w.resource::<Physics>();
-                            assert_eq!(p.bodies.len(), 1);
-                            assert_eq!(p.colliders.len(), 1);
-                            assert_eq!(p.impulse_joints.len(), 0);
-                            assert!(!p.entity_to_body.contains_key(&a));
-                            assert_eq!(p.body_to_entity.len(), 1);
-                            assert!(!p.entity_to_joint.contains_key(&j));
+                            assert_eq!(p.bodies().len(), 1);
+                            assert_eq!(p.colliders().len(), 1);
+                            assert_eq!(p.impulse_joints().len(), 0);
+                            assert!(p.body_for_entity(a).is_none());
+                            assert_eq!(
+                                p.entity_for_body(w.get::<BodyHandle>(b).unwrap().0),
+                                Some(b)
+                            );
+                            assert!(p.joint_for_entity(j).is_none());
                         }
                         w.insert(a, Body::dynamic()).unwrap();
                         w.insert(a, Collider::ball(0.5)).unwrap();
@@ -113,9 +116,9 @@ macro_rules! lifecycle_tests {
                         sync_bodies(&mut w, regular, multi);
                         sync_joints(&mut w, regular, multi);
                         let p = w.resource::<Physics>();
-                        assert_eq!(p.bodies.len(), 2);
-                        assert_eq!(p.colliders.len(), 2);
-                        assert!(p.impulse_joints.contains(p.entity_to_joint[&j]));
+                        assert_eq!(p.bodies().len(), 2);
+                        assert_eq!(p.colliders().len(), 2);
+                        assert!(p.impulse_joints().contains(p.joint_for_entity(j).unwrap()));
                     }
                 }
             }
@@ -156,10 +159,9 @@ macro_rules! lifecycle_tests {
                         assert!(w.get::<BodyHandle>(entity).is_none());
                     }
                     let p = w.resource::<Physics>();
-                    assert!(p.bodies.is_empty());
-                    assert!(p.colliders.is_empty());
-                    assert!(p.entity_to_body.is_empty());
-                    assert!(p.body_to_entity.is_empty());
+                    assert!(p.bodies().is_empty());
+                    assert!(p.colliders().is_empty());
+                    assert!(p.body_for_entity(e).is_none());
                 }
             }
         }
@@ -198,9 +200,9 @@ macro_rules! lifecycle_tests {
                         assert!(w.get::<JointHandle>(entity).is_none());
                     }
                     let p = w.resource::<Physics>();
-                    assert_eq!(p.bodies.len(), 2);
-                    assert!(p.impulse_joints.is_empty());
-                    assert!(p.entity_to_joint.is_empty());
+                    assert_eq!(p.bodies().len(), 2);
+                    assert!(p.impulse_joints().is_empty());
+                    assert!(p.joint_for_entity(j).is_none());
                 }
             }
         }
@@ -220,15 +222,36 @@ macro_rules! lifecycle_tests {
                     w.despawn(a);
                     sync_bodies(&mut w, regular, multi);
                     assert!(w.get::<JointHandle>(j).is_none());
-                    assert!(w.resource::<Physics>().entity_to_joint.is_empty());
+                    assert!(w.resource::<Physics>().joint_for_entity(j).is_none());
                     sync_joints(&mut w, regular, multi);
                     let p = w.resource::<Physics>();
-                    assert!(p.impulse_joints.contains(p.entity_to_joint[&j]));
+                    assert!(p.impulse_joints().contains(p.joint_for_entity(j).unwrap()));
                 }
             }
         }
         #[test]
-        fn sync_joints_recovers_from_a_joint_removed_directly_in_rapier() {
+        fn ecs_cleanup_preserves_caller_owned_free_colliders() {
+            for regular in [false, true] {
+                let mut w = world();
+                w.insert_resource(Physics::default());
+                let free = w
+                    .resource_mut::<Physics>()
+                    .add_free_collider(ColliderBuilder::ball(1.0).build());
+                let e = body(&mut w);
+                sync_bodies(&mut w, regular, false);
+                let handle = w.get::<BodyHandle>(e).unwrap().0;
+                w.despawn(e);
+                sync_bodies(&mut w, regular, false);
+                let p = w.resource::<Physics>();
+                assert!(p.bodies().is_empty());
+                assert!(p.body_for_entity(e).is_none());
+                assert!(p.entity_for_body(handle).is_none());
+                assert_eq!(p.colliders().len(), 1);
+                assert!(p.colliders().contains(free));
+            }
+        }
+        #[test]
+        fn joint_can_be_removed_and_recreated_through_its_descriptor() {
             for regular in [false, true] {
                 let mut w = world();
                 let a = body(&mut w);
@@ -237,12 +260,17 @@ macro_rules! lifecycle_tests {
                 let j = joint(&mut w, a, b);
                 sync_joints(&mut w, regular, false);
                 let old = w.get::<JointHandle>(j).unwrap().0;
-                w.resource_mut::<Physics>().remove_impulse_joint(old, true);
+                let descriptor = w.get::<Joint>(j).unwrap().clone();
+                w.remove::<Joint>(j).unwrap();
+                sync_joints(&mut w, regular, false);
+                assert!(w.get::<JointHandle>(j).is_none());
+                assert!(w.resource::<Physics>().joint_for_entity(j).is_none());
+                w.insert(j, descriptor).unwrap();
                 sync_joints(&mut w, regular, false);
                 let p = w.resource::<Physics>();
-                let new = p.entity_to_joint[&j];
+                let new = p.joint_for_entity(j).unwrap();
                 assert_ne!(old, new);
-                assert!(p.impulse_joints.contains(new));
+                assert!(p.impulse_joints().contains(new));
                 assert_eq!(w.get::<JointHandle>(j).unwrap().0, new);
             }
         }
@@ -275,6 +303,7 @@ mod two_d {
     use super::*;
     use redlilium_ecs::physics::{
         components2d::{Collider2D as Collider, ImpulseJoint2D as Joint, RigidBody2D as Body},
+        rapier2d::prelude::ColliderBuilder,
         systems2d::{
             StepPhysics2D as Step, SyncPhysicsBodies2D as SyncBodies,
             SyncPhysicsBodiesSystem2D as SyncBodiesRegular, SyncPhysicsJoints2D as SyncJoints,
@@ -301,7 +330,7 @@ mod two_d {
             sync_bodies(&mut w, regular, false);
             let angle = {
                 let p = w.resource::<Physics>();
-                p.bodies[p.entity_to_body[&e]].rotation().angle()
+                p.bodies()[p.body_for_entity(e).unwrap()].rotation().angle()
             };
             assert!((angle - 0.5).abs() < 1e-6);
             let mut s = SystemsContainer::new();
@@ -319,6 +348,7 @@ mod three_d {
     use super::*;
     use redlilium_ecs::physics::{
         components3d::{Collider3D as Collider, ImpulseJoint3D as Joint, RigidBody3D as Body},
+        rapier3d::prelude::ColliderBuilder,
         systems3d::{
             InterpolatePhysics, RecordPhysicsPose, StepPhysics3D as Step,
             SyncPhysicsBodies3D as SyncBodies, SyncPhysicsBodiesSystem3D as SyncBodiesRegular,

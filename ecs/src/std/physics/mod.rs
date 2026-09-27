@@ -65,3 +65,6 @@ pub enum TeleportVelocity {
 pub mod control2d;
 #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
 pub mod control3d;
+
+#[cfg(test)]
+mod boundary_tests;

@@ -184,16 +184,16 @@ impl PhysicsDemoApp {
                     if world.has_resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>() {
                         let physics =
                             world.resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>();
-                        ui.body_count = physics.bodies.len();
-                        ui.collider_count = physics.colliders.len();
+                        ui.body_count = physics.bodies().len();
+                        ui.collider_count = physics.colliders().len();
                     }
                 }
                 Dimension::TwoD => {
                     if world.has_resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>() {
                         let physics =
                             world.resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>();
-                        ui.body_count = physics.bodies.len();
-                        ui.collider_count = physics.colliders.len();
+                        ui.body_count = physics.bodies().len();
+                        ui.collider_count = physics.colliders().len();
                     }
                 }
             }

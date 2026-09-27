@@ -131,7 +131,8 @@ All numeric settings must be finite. Additional constraints are:
 Constructing, editing or deserializing descriptors does not itself validate
 them. Validation happens at sync, before creation or application of edits.
 The deprecated `build_physics_world_*` helpers also return a validation `Result`
-before replacing the physics resource. Direct Rapier access bypasses these checks.
+before replacing the physics resource. The motion API and caller-owned free colliders use Rapier values directly;
+descriptor validation does not apply to them.
 
 ## Serialization
 
@@ -281,21 +282,61 @@ fixed.add(StepPhysics2D);
 fixed.add_edge::<SyncPhysicsBodies2D, StepPhysics2D>().unwrap();
 ```
 
-## Accessing Rapier Directly
+## Physics world API
 
-For advanced usage, access the Rapier data structures through the resource:
+ECS descriptors and sync systems own body, attached collider and joint lifetimes.
+Remove the descriptor or despawn the entity, then run sync. `PhysicsWorld` does
+not expose public body/joint insertion, deletion or mutable collections.
+`bodies()`, `colliders()`, `impulse_joints()` and `narrow_phase()` provide
+read-only Rapier access for inspection and contact queries. Use
+`body_for_entity`, `entity_for_body` and `joint_for_entity` for handle lookup.
 
-```rust
+`body_motion(handle)` returns a temporary `BodyMotion3D` / `BodyMotion2D`:
+it provides read access to the body and methods for velocities, forces,
+impulses and sleeping. It cannot replace the body or change descriptor-owned
+settings. Teleports go through `PhysicsWorld::teleport`; kinematic motion uses
+the target/velocity components described above. Stepping goes through the ECS
+step system so input handling and transform synchronization happen together.
+
+```rust,ignore
 ctx.lock::<(ResMut<PhysicsWorld3D>,)>()
     .execute(|(mut physics,)| {
-        // Direct Rapier access
-        for (handle, body) in physics.bodies.iter() {
-            let position = body.translation();
-            // ...
-        }
-
-        // Apply impulse via handle
-        // let body = physics.bodies.get_mut(handle).unwrap();
-        // body.apply_impulse(vector![0.0, 100.0, 0.0], true);
+        let Some(handle) = physics.body_for_entity(player) else { return };
+        let Some(mut body) = physics.body_motion(handle) else { return };
+        body.apply_impulse(Vector::new(0.0, 100.0, 0.0), true);
     });
 ```
+
+### Standalone colliders
+
+`add_free_collider(rapier_collider)` supports static scenery with custom geometry,
+such as polyline or trimesh terrain. These colliders have no parent body or ECS
+owner. The caller owns their lifetime and removes them with
+`remove_free_collider(handle)` (or drops the physics world). They are not part of
+scene serialization and survive ECS body cleanup. Removal returns `false` for
+stale handles or any collider attached to a body, so it cannot remove an ECS
+body's collider. The physics demo uses this path for its custom terrain.
+
+### Ray queries
+
+`cast_ray(origin, dir, max_toi)` returns `Option<RayHit3D>` / `Option<RayHit2D>`.
+A hit contains the collider handle, optional body handle, optional ECS entity,
+and `toi`. A collider with no entity still produces a hit. `toi` parameterizes
+`origin + dir * toi`; it is a distance only when `dir` has unit length.
+
+`cast_ray_filtered` accepts Rapier's `QueryFilter` for groups, body/collider
+exclusions, sensor filtering and custom predicates. Filters run before choosing
+the closest hit. For an ECS-only query:
+
+```rust,ignore
+let only_ecs = |_: ColliderHandle, collider: &Collider| {
+    collider.parent().and_then(|body| physics.entity_for_body(body)).is_some()
+};
+let hit = physics.cast_ray_filtered(
+    origin, dir, max_toi, QueryFilter::default().predicate(&only_ecs),
+);
+```
+
+Queries use the broad phase from the last physics step. After syncing new
+objects or requesting teleports, run `StepPhysics*` before querying their new
+positions.

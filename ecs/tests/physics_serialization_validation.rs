@@ -143,9 +143,9 @@ macro_rules! descriptor_tests {
                 }
                 assert!(sync(&mut target, true, false).is_empty());
                 assert!(sync(&mut target, true, true).is_empty());
-                assert_eq!(target.resource::<Physics>().bodies.len(), bodies.len());
+                assert_eq!(target.resource::<Physics>().bodies().len(), bodies.len());
                 assert_eq!(
-                    target.resource::<Physics>().impulse_joints.len(),
+                    target.resource::<Physics>().impulse_joints().len(),
                     joints.len()
                 );
             }
@@ -185,8 +185,8 @@ macro_rules! descriptor_tests {
                     let mut w = world();
                     let e = w.spawn_with((Transform::IDENTITY, body, collider)).unwrap();
                     invalid(sync(&mut w, regular, false), field);
-                    assert!(w.resource::<Physics>().bodies.is_empty());
-                    assert!(w.resource::<Physics>().colliders.is_empty());
+                    assert!(w.resource::<Physics>().bodies().is_empty());
+                    assert!(w.resource::<Physics>().colliders().is_empty());
                     assert!(w.get::<BodyHandle>(e).is_none());
                 }
             }
@@ -272,22 +272,22 @@ macro_rules! descriptor_tests {
                 let a = spawn(&mut w);
                 let b = spawn(&mut w);
                 assert!(sync(&mut w, regular, false).is_empty());
-                let ha = w.resource::<Physics>().entity_to_body[&a];
-                let hb = w.resource::<Physics>().entity_to_body[&b];
-                let cb = w.resource::<Physics>().bodies[hb].colliders()[0];
-                w.resource_mut::<Physics>().bodies[ha].sleep();
+                let ha = w.resource::<Physics>().body_for_entity(a).unwrap();
+                let hb = w.resource::<Physics>().body_for_entity(b).unwrap();
+                let cb = w.resource::<Physics>().bodies()[hb].colliders()[0];
+                w.resource_mut::<Physics>().body_motion(ha).unwrap().sleep();
                 w.get_mut::<Body>(a).unwrap().linear_damping = 0.5;
                 for (body, collider, field) in invalid_settings() {
                     w.insert(b, body).unwrap();
                     w.insert(b, collider).unwrap();
                     invalid(sync(&mut w, regular, false), field);
                     let p = w.resource::<Physics>();
-                    assert_eq!(p.entity_to_body[&a], ha);
-                    assert_eq!(p.entity_to_body[&b], hb);
-                    assert_eq!(p.bodies[ha].linear_damping(), 0.0);
-                    assert!(p.bodies[ha].is_sleeping());
-                    assert_eq!(p.bodies[hb].colliders()[0], cb);
-                    assert_eq!(p.colliders[cb].shape().as_ball().unwrap().radius, 0.5);
+                    assert_eq!(p.body_for_entity(a).unwrap(), ha);
+                    assert_eq!(p.body_for_entity(b).unwrap(), hb);
+                    assert_eq!(p.bodies()[ha].linear_damping(), 0.0);
+                    assert!(p.bodies()[ha].is_sleeping());
+                    assert_eq!(p.bodies()[hb].colliders()[0], cb);
+                    assert_eq!(p.colliders()[cb].shape().as_ball().unwrap().radius, 0.5);
                 }
                 w.insert(b, Body::dynamic().with_gravity_scale(-1.0))
                     .unwrap();
@@ -300,8 +300,8 @@ macro_rules! descriptor_tests {
                 )
                 .unwrap();
                 assert!(sync(&mut w, regular, false).is_empty());
-                assert_eq!(w.resource::<Physics>().bodies[ha].linear_damping(), 0.5);
-                assert_eq!(w.resource::<Physics>().bodies[hb].gravity_scale(), -1.0);
+                assert_eq!(w.resource::<Physics>().bodies()[ha].linear_damping(), 0.5);
+                assert_eq!(w.resource::<Physics>().bodies()[hb].gravity_scale(), -1.0);
             }
         }
 
@@ -315,7 +315,7 @@ macro_rules! descriptor_tests {
                 let valid = Joint::fixed(a, b, Vector::zeros(), Vector::zeros());
                 let j = w.spawn_with((valid.clone(),)).unwrap();
                 assert!(sync(&mut w, regular, true).is_empty());
-                let h = w.resource::<Physics>().entity_to_joint[&j];
+                let h = w.resource::<Physics>().joint_for_entity(j).unwrap();
                 let mut cases = vec![(
                     Joint::fixed(a, a, Vector::zeros(), Vector::zeros()),
                     "endpoints",
@@ -358,23 +358,23 @@ macro_rules! descriptor_tests {
                     w.insert(j, bad.clone()).unwrap();
                     invalid(sync(&mut w, regular, true), field);
                     let p = w.resource::<Physics>();
-                    assert_eq!(p.entity_to_joint[&j], h);
-                    assert_eq!(p.impulse_joints.len(), 1);
-                    assert_eq!(p.impulse_joints.get(h).unwrap().body2, p.entity_to_body[&b]);
+                    assert_eq!(p.joint_for_entity(j).unwrap(), h);
+                    assert_eq!(p.impulse_joints().len(), 1);
+                    assert_eq!(p.impulse_joints().get(h).unwrap().body2, p.body_for_entity(b).unwrap());
                     // Creation must reject the same descriptor too.
                     let mut fresh = world();
                     fresh.spawn_with((bad,)).unwrap();
                     invalid(sync(&mut fresh, regular, true), field);
-                    assert!(fresh.resource::<Physics>().impulse_joints.is_empty());
+                    assert!(fresh.resource::<Physics>().impulse_joints().is_empty());
                 }
                 w.insert(j, valid).unwrap();
                 assert!(sync(&mut w, regular, true).is_empty());
-                assert_eq!(w.resource::<Physics>().entity_to_joint[&j], h);
+                assert_eq!(w.resource::<Physics>().joint_for_entity(j).unwrap(), h);
                 // An unavailable endpoint is a pending joint, not a configuration error.
                 let pending = w.spawn();
                 w.get_mut::<Joint>(j).unwrap().body2 = pending;
                 assert!(sync(&mut w, regular, true).is_empty());
-                assert!(w.resource::<Physics>().impulse_joints.is_empty());
+                assert!(w.resource::<Physics>().impulse_joints().is_empty());
             }
         }
 
@@ -399,7 +399,7 @@ macro_rules! descriptor_tests {
                                 .unwrap();
                             assert!(sync(&mut w, regular, true).is_empty());
                             let p = w.resource::<Physics>();
-                            let data = &p.impulse_joints.get(p.entity_to_joint[&j]).unwrap().data;
+                            let data = &p.impulse_joints().get(p.joint_for_entity(j).unwrap()).unwrap().data;
                             let axis = data.local_frame1.rotation * RapierVector::X;
                             assert!(axis.x.abs() < 1e-5, "{axis:?}");
                             assert!((axis.y + 1.0).abs() < 1e-5, "{axis:?}");
@@ -411,14 +411,28 @@ macro_rules! descriptor_tests {
 
         #[test]
         #[allow(deprecated)]
+        fn legacy_builder_publishes_mappings_and_next_sync_reuses_bodies() {
+            let mut w = world();
+            let e = spawn(&mut w);
+            build(&mut w).unwrap();
+            let handle = w.get::<BodyHandle>(e).unwrap().0;
+            assert_eq!(w.resource::<Physics>().body_for_entity(e), Some(handle));
+            assert_eq!(w.resource::<Physics>().entity_for_body(handle), Some(e));
+            assert!(sync(&mut w, false, false).is_empty());
+            assert_eq!(w.get::<BodyHandle>(e).unwrap().0, handle);
+            assert_eq!(w.resource::<Physics>().bodies().len(), 1);
+        }
+
+        #[test]
+        #[allow(deprecated)]
         fn legacy_builder_validates_before_replacing_resource() {
             let mut w = world();
             let a = spawn(&mut w);
             assert!(sync(&mut w, false, false).is_empty());
-            let h = w.resource::<Physics>().entity_to_body[&a];
+            let h = w.resource::<Physics>().body_for_entity(a).unwrap();
             w.get_mut::<Collider>(a).unwrap().density = -1.0;
             invalid(vec![build(&mut w).unwrap_err()], "density");
-            assert_eq!(w.resource::<Physics>().entity_to_body[&a], h);
+            assert_eq!(w.resource::<Physics>().body_for_entity(a).unwrap(), h);
             assert_eq!(w.get::<BodyHandle>(a).unwrap().0, h);
         }
     };

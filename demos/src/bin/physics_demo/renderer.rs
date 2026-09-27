@@ -468,10 +468,10 @@ impl PhysicsRenderer {
         let mut sphere_instances = Vec::new();
         let mut box_instances = Vec::new();
 
-        for (col_handle, collider) in physics.colliders.iter() {
+        for (col_handle, collider) in physics.colliders().iter() {
             // Determine body type for coloring
             let (color, color_idx) = if let Some(parent) = collider.parent() {
-                if let Some(body) = physics.bodies.get(parent) {
+                if let Some(body) = physics.bodies().get(parent) {
                     if body.is_fixed() {
                         (FIXED_COLOR, 0)
                     } else if body.is_kinematic() {
@@ -574,9 +574,9 @@ impl PhysicsRenderer {
         let mut box_instances = Vec::new();
         let z_depth: f32 = 0.4;
 
-        for (col_handle, collider) in physics.colliders.iter() {
+        for (col_handle, collider) in physics.colliders().iter() {
             let color = if let Some(parent) = collider.parent() {
-                if let Some(body) = physics.bodies.get(parent) {
+                if let Some(body) = physics.bodies().get(parent) {
                     if body.is_fixed() {
                         FIXED_COLOR
                     } else if body.is_kinematic() {

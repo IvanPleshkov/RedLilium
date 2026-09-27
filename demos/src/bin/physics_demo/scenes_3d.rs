@@ -259,23 +259,13 @@ impl PhysicsScene3D for TrimeshScene {
             }
         }
 
-        let ground_handle = physics.add_body(RigidBodyBuilder::fixed().build());
         let trimesh = ColliderBuilder::trimesh(vertices, indices)
             .expect("valid trimesh")
             .restitution(0.3)
             .build();
-        physics.add_collider(trimesh, ground_handle);
+        physics.add_free_collider(trimesh);
 
         world.insert_resource(physics);
-
-        // Spawn ECS entity for the ground trimesh (handle only, no descriptors)
-        let ground_entity = world.spawn();
-        let _ = world.insert(
-            ground_entity,
-            redlilium_ecs::physics::physics3d::RigidBody3DHandle(ground_handle),
-        );
-        let _ = world.insert(ground_entity, Transform::IDENTITY);
-        let _ = world.insert(ground_entity, redlilium_ecs::GlobalTransform::IDENTITY);
     }
 }
 

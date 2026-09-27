@@ -410,6 +410,8 @@ pub fn build_physics_world_2d(world: &mut crate::World) -> Result<(), crate::Sys
             (body_desc.clone(), collider_desc.clone(), collider_handle),
         );
 
+        physics.entity_to_body.insert(*entity, body_handle);
+        physics.body_to_entity.insert(body_handle, *entity);
         handle_pairs.push((*entity, body_handle));
     }
 
