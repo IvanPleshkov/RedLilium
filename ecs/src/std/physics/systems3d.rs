@@ -19,12 +19,19 @@ use redlilium_core::math::nalgebra::UnitQuaternion;
 ///
 /// Requires a [`PhysicsWorld3D`] resource and entities with
 /// [`RigidBody3DHandle`] + [`Transform`](crate::Transform) components.
+/// Publishes collision transitions after the step when the corresponding Events queue
+/// is registered. Enabled tracking without that queue returns InvalidConfiguration
+/// before simulation advances. See [`super::events3d::CollisionEvent3D`].
 pub struct StepPhysics3D;
 
 impl crate::System for StepPhysics3D {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) -> Result<(), crate::SystemError> {
         use super::control3d::{KinematicTarget3D, KinematicVelocity3D, PhysicsPose3D};
+        use super::events3d::CollisionEvent3D;
+        let events_available = ctx
+            .raw_world()
+            .has_resource::<crate::Events<CollisionEvent3D>>();
         let fixed_dt = {
             let world = ctx.raw_world();
             world
@@ -41,6 +48,13 @@ impl crate::System for StepPhysics3D {
         )>()
         .execute(
             |(mut physics, handles, mut transforms, parents, mut targets, mut velocities)| {
+                if physics.collision_events.requires_queue() && !events_available {
+                    return Err(crate::SystemError::InvalidConfiguration {
+                        message:
+                            "collision tracking requires world.add_event::<CollisionEvent3D>()"
+                                .into(),
+                    });
+                }
                 // Validate the whole batch before changing motion or advancing time.
                 for (idx, handle) in handles.iter() {
                     let Some(entity) = ctx.raw_world().entity_at_index(idx) else {
@@ -147,7 +161,19 @@ impl crate::System for StepPhysics3D {
                 }
                 Ok(())
             },
-        )
+        )?;
+        if events_available {
+            ctx.lock::<(
+                crate::ResMut<PhysicsWorld3D>,
+                crate::ResMut<crate::Events<CollisionEvent3D>>,
+            )>()
+            .execute(|(mut physics, mut events)| {
+                for event in physics.collision_events.pending.drain(..) {
+                    events.send(event);
+                }
+            });
+        }
+        Ok(())
     }
 }
 
@@ -676,6 +702,10 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                             body_handle,
                             (body_desc.clone(), collider_desc.clone(), collider_handle),
                         );
+                        physics
+                            .collision_events
+                            .pending_entities
+                            .insert(body_handle, entity);
                         new_pairs.push((entity, body_handle));
                     }
                 }
@@ -710,6 +740,7 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                         let mut physics = world.resource_mut::<PhysicsWorld3D>();
                         physics.entity_to_body.insert(entity, handle);
                         physics.body_to_entity.insert(handle, entity);
+                        physics.collision_events.pending_entities.remove(&handle);
                     } else {
                         world.resource_mut::<PhysicsWorld3D>().remove_body(handle);
                     }

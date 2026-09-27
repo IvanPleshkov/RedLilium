@@ -174,7 +174,18 @@ impl PhysicsWorld3D {
             live.set_density(collider.density as Real);
             live.set_friction(collider.friction as Real);
             live.set_restitution(collider.restitution as Real);
-            live.set_sensor(collider.is_sensor);
+            live.set_sensor(collider.sensor.is_some());
+            live.set_active_events(if collider.collision_events.is_some() {
+                ActiveEvents::COLLISION_EVENTS
+            } else {
+                ActiveEvents::empty()
+            });
+            if old_collider.sensor != collider.sensor
+                || old_collider.collision_events != collider.collision_events
+            {
+                self.collision_events
+                    .collider_changed(*collider_handle, live);
+            }
             body.wake_up(true);
             *old_collider = collider.clone();
         }

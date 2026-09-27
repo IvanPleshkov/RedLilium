@@ -145,6 +145,7 @@ impl BodyMotion3D<'_> {
 /// });
 /// ```
 pub struct PhysicsWorld3D {
+    pub(super) collision_events: super::events3d::EventState,
     pub(super) teleports: HashMap<
         crate::Entity,
         (
@@ -186,6 +187,7 @@ pub struct PhysicsWorld3D {
 impl Default for PhysicsWorld3D {
     fn default() -> Self {
         Self {
+            collision_events: Default::default(),
             teleports: HashMap::new(),
             pose_resets: Default::default(),
             applied_bodies: HashMap::new(),
@@ -263,6 +265,7 @@ impl PhysicsWorld3D {
     /// Steps the physics simulation by one timestep.
     pub(super) fn step(&mut self) {
         redlilium_core::profile_scope!("rapier3d: step");
+        self.collision_events.prepare(&self.colliders);
         self.pipeline.step(
             self.gravity,
             &self.integration_parameters,
@@ -275,15 +278,20 @@ impl PhysicsWorld3D {
             &mut self.multibody_joints,
             &mut self.ccd_solver,
             &(),
-            &(),
+            self.collision_events.handler(),
         );
+        self.collision_events
+            .finish(&self.colliders, &self.narrow_phase, &self.body_to_entity);
     }
 
     /// Inserts a standalone static collider (e.g. terrain) with no ECS owner.
     /// Its lifetime is caller-owned: remove it explicitly or drop this physics world.
     /// The pose is world-space. It is not serialized or removed by ECS body sync.
     pub fn add_free_collider(&mut self, collider: Collider) -> ColliderHandle {
-        self.colliders.insert(collider)
+        let handle = self.colliders.insert(collider);
+        self.collision_events
+            .collider_changed(handle, &self.colliders[handle]);
+        handle
     }
 
     /// Removes only a standalone collider. Returns false for a stale handle or
@@ -296,6 +304,7 @@ impl PhysicsWorld3D {
         {
             return false;
         }
+        self.collision_events.collider_removed(handle);
         self.colliders
             .remove(handle, &mut self.island_manager, &mut self.bodies, true)
             .is_some()
@@ -312,8 +321,12 @@ impl PhysicsWorld3D {
         collider: Collider,
         parent: RigidBodyHandle,
     ) -> ColliderHandle {
-        self.colliders
-            .insert_with_parent(collider, parent, &mut self.bodies)
+        let handle = self
+            .colliders
+            .insert_with_parent(collider, parent, &mut self.bodies);
+        self.collision_events
+            .collider_changed(handle, &self.colliders[handle]);
+        handle
     }
 
     /// Adds an impulse joint between two bodies and returns its handle.
@@ -328,6 +341,12 @@ impl PhysicsWorld3D {
 
     /// Removes a rigid body and all its attached colliders and joints.
     pub(super) fn remove_body(&mut self, handle: RigidBodyHandle) {
+        self.collision_events.pending_entities.remove(&handle);
+        if let Some(body) = self.bodies.get(handle) {
+            for &collider in body.colliders() {
+                self.collision_events.collider_removed(collider);
+            }
+        }
         self.applied_bodies.remove(&handle);
         self.pose_resets.remove(&handle);
         self.teleports.retain(|_, (body, _, _)| *body != handle);

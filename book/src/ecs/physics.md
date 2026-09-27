@@ -149,6 +149,93 @@ checkpoint: runtime velocities, contacts and solver state are not preserved.
 Bodies loaded as children of a prefab root must be detached before physics sync,
 as required by the root-body contract above.
 
+## Collision events and triggers
+
+Opt in per collider with `Option<SensorSettings>` and
+`Option<CollisionEventSettings>`. Both settings types currently have no fields;
+`None` disables the feature and `Some(Default::default())` enables it. The
+options are serialized and editable in the inspector and through body sync.
+Enabling sensor behavior does not automatically enable collision events.
+
+```rust,ignore
+use redlilium_ecs::physics::{SensorSettings, CollisionEventSettings};
+use redlilium_ecs::physics::events3d::CollisionEvent3D;
+
+world.add_event::<CollisionEvent3D>();
+let trigger = Collider3D::ball(2.0)
+    .with_sensor(Some(SensorSettings::default()))
+    .with_collision_events(Some(CollisionEventSettings::default()));
+```
+
+At least one participant must opt in; opting in on both does not duplicate the
+pair event. Free colliders use Rapier's `ActiveEvents::COLLISION_EVENTS` when
+created. Events do not enable otherwise filtered-out collision pairs: Rapier's
+collision rules still apply, including its body-type rules.
+
+`StepPhysics3D` publishes to `Events<CollisionEvent3D>` after stepping and writing
+transforms. The 2D equivalents are `StepPhysics2D` and
+`events2d::CollisionEvent2D`. If tracking is enabled (or tracked pairs await
+closure) without the registered queue, Step returns `InvalidConfiguration`
+before applying motion or advancing simulation. Pose validation errors likewise
+leave pending pair closures for the next successful step.
+
+Each event carries:
+
+- `step`: a per-physics-world counter, starting at 1 for the first simulation step;
+- `a`, `b`: participants in stable canonical order, without an initiator role;
+- `phase`: `CollisionPhase::Started` or `Stopped(CollisionStopReason)`.
+
+Each participant contains its collider handle, optional body handle, optional
+full entity identity and `is_sensor`. These are snapshots captured when tracking
+starts. Removed entities remain `Some(original_entity)`; they may no longer be
+alive. Free colliders have no body or entity. A recycled index/handle never
+retargets an old event. If either participant is a sensor, the event describes a
+trigger intersection; otherwise it describes a physical contact.
+
+`Started` means tracking an active pair began. Enabling events inside an existing
+contact/intersection also starts tracking on the next successful step. Stop
+reasons are:
+
+| Reason | Meaning |
+|---|---|
+| `Separated` | The reported contact/intersection ended |
+| `Removed` | At least one collider was removed, including ECS despawn/exclusion or loss of a required component |
+| `TrackingDisabled` | Neither participant requests collision events anymore |
+| `Reconfigured` | A participant changed its sensor role |
+
+Sensor-role changes close the old pair using its old snapshots, then start a new
+pair if the interaction is still active. Ordinary shape/material changes do not
+force an artificial stop/start; actual separation still produces a stop.
+Settings are observed at physics-step boundaries. Removal closures are published
+by the next successful step, not by sync or `remove_free_collider` itself.
+Dropping/replacing the entire physics world ends its stream without mass stop
+events; already queued events remain historical snapshots.
+
+Game systems use an independent `EventCursor` each. Put fixed-step consumers
+after `StepPhysics*` with an explicit dependency. Update consumers see the events
+from all fixed substeps in that frame. No start/stop transitions are coalesced
+across those steps, and reads advance the cursor without consuming other
+readers' events:
+
+```rust,ignore
+ctx.lock::<(Res<Events<CollisionEvent3D>>,)>().execute(|(events,)| {
+    for event in events.read(&self.collision_cursor) {
+        // Match event.phase and inspect event.a / event.b.
+    }
+});
+```
+
+The standard queue retains events for the current and previous frame;
+`Schedules::run_frame` rotates it once per frame, not per fixed step. When
+running containers manually, call `World::update_events` once per frame.
+Readers that lag beyond retention skip expired events and can inspect
+`EventCursor::missed()`. Ordering of independent pairs is not guaranteed.
+
+Tracking keeps snapshots and adjacency only for observed pairs. Configuration
+changes inspect the changed colliders' neighborhoods rather than scanning every
+contact on every step. Collision force, normal and contact-point events are not
+part of this API.
+
 ## 3D Physics
 
 ### Setup

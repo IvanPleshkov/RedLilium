@@ -68,3 +68,11 @@ pub mod control3d;
 
 #[cfg(test)]
 mod boundary_tests;
+
+mod event_support;
+mod events;
+pub use events::{CollisionEventSettings, CollisionPhase, CollisionStopReason, SensorSettings};
+#[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
+pub mod events2d;
+#[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
+pub mod events3d;

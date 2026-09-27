@@ -5,6 +5,7 @@
 //! [`SyncPhysicsJoints3D`](super::physics3d::SyncPhysicsJoints3D) systems
 //! to automatically materialize these descriptors into rapier physics objects.
 
+use super::{CollisionEventSettings, SensorSettings};
 use redlilium_core::math::Vec3;
 
 /// 3D collider shape.
@@ -124,7 +125,9 @@ pub struct Collider3D {
     /// Mass density.
     pub density: f32,
     /// Whether this is a sensor/trigger (no contact forces).
-    pub is_sensor: bool,
+    pub sensor: Option<SensorSettings>,
+    /// Opt-in collision tracking. Register Events<CollisionEvent3D> before stepping.
+    pub collision_events: Option<CollisionEventSettings>,
 }
 
 impl Collider3D {
@@ -179,8 +182,15 @@ impl Collider3D {
         self
     }
 
-    pub fn with_sensor(mut self, v: bool) -> Self {
-        self.is_sensor = v;
+    /// Some enables sensor behavior; None restores a solid collider.
+    pub fn with_sensor(mut self, v: Option<SensorSettings>) -> Self {
+        self.sensor = v;
+        self
+    }
+
+    /// Opts into pair transitions. Register Events<CollisionEvent3D> before stepping.
+    pub fn with_collision_events(mut self, v: Option<CollisionEventSettings>) -> Self {
+        self.collision_events = v;
         self
     }
 }
@@ -192,7 +202,8 @@ impl Default for Collider3D {
             friction: 0.5,
             restitution: 0.0,
             density: 1.0,
-            is_sensor: false,
+            sensor: None,
+            collision_events: None,
         }
     }
 }
@@ -444,7 +455,12 @@ impl Collider3D {
             .friction(self.friction as Real)
             .restitution(self.restitution as Real)
             .density(self.density as Real)
-            .sensor(self.is_sensor)
+            .sensor(self.sensor.is_some())
+            .active_events(if self.collision_events.is_some() {
+                ActiveEvents::COLLISION_EVENTS
+            } else {
+                ActiveEvents::empty()
+            })
             .build()
     }
 }
@@ -588,11 +604,11 @@ mod tests {
             .with_friction(0.8)
             .with_restitution(0.3)
             .with_density(2.0)
-            .with_sensor(true);
+            .with_sensor(Some(SensorSettings::default()));
         assert_eq!(c.friction, 0.8);
         assert_eq!(c.restitution, 0.3);
         assert_eq!(c.density, 2.0);
-        assert!(c.is_sensor);
+        assert!(c.sensor.is_some());
     }
 
     #[test]

@@ -74,7 +74,8 @@ macro_rules! descriptor_tests {
                     .with_friction(0.8)
                     .with_restitution(0.4)
                     .with_density(2.5)
-                    .with_sensor(true);
+                    .with_sensor(Some(physics::SensorSettings::default()))
+                    .with_collision_events((i % 2 == 0).then(physics::CollisionEventSettings::default));
                 let e = w
                     .spawn_with((
                         Name::new(format!("body{i}")),
