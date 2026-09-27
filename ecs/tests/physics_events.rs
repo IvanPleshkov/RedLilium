@@ -241,6 +241,173 @@ macro_rules! event_tests {
         }
 
         #[test]
+        fn collision_masks_filter_contacts_and_sensors_bilaterally() {
+            use physics::CollisionGroups as Groups;
+            let a_groups = Some(Groups::new(1, 2));
+            for regular in [false, true] {
+                for sensor in [false, true] {
+                    for (ag, bg, allowed) in [
+                        (None, None, true),
+                        (a_groups, None, true),
+                        (a_groups, Some(Groups::new(2, 1)), true),
+                        (a_groups, Some(Groups::new(2, 4)), false),
+                        (Some(Groups::new(1, 4)), Some(Groups::new(2, 1)), false),
+                        (Some(Groups::new(0, u32::MAX)), None, false),
+                        (None, Some(Groups::new(u32::MAX, 0)), false),
+                        (
+                            Some(Groups::new(1 << 31, 3)),
+                            Some(Groups::new(3, 1 << 31)),
+                            true,
+                        ),
+                    ] {
+                        let mut w = World::new();
+                        register_std_components(&mut w);
+                        w.insert_resource(Physics::default());
+                        w.resource_mut::<Physics>().gravity = Default::default();
+                        w.add_event::<Collision>();
+                        let a = w
+                            .spawn_with((
+                                Transform::IDENTITY,
+                                Body::fixed(),
+                                Collider::ball(1.0)
+                                    .with_sensor(sensor.then(SensorSettings::default))
+                                    .with_collision_events(Some(CollisionEventSettings::default()))
+                                    .with_collision_groups(ag),
+                            ))
+                            .unwrap();
+                        let b = w
+                            .spawn_with((
+                                Transform::from_translation(Vec3::new(0.8, 0.0, 0.0)),
+                                Body::dynamic(),
+                                Collider::ball(0.5).with_collision_groups(bg),
+                            ))
+                            .unwrap();
+                        sync(&mut w, regular);
+                        let cursor = EventCursor::new();
+                        advance(&mut w);
+                        let events = read(&w, &cursor);
+                        assert_eq!(
+                            events.len(),
+                            usize::from(allowed),
+                            "{ag:?} {bg:?} sensor={sensor}"
+                        );
+                        if allowed {
+                            assert_eq!(events[0].phase, Phase::Started);
+                        }
+                        let p = w.resource::<Physics>();
+                        let ah = p.bodies()[p.body_for_entity(a).unwrap()].colliders()[0];
+                        let bh = p.bodies()[p.body_for_entity(b).unwrap()].colliders()[0];
+                        let active = if sensor {
+                            p.narrow_phase().intersection_pair(ah, bh).unwrap_or(false)
+                        } else {
+                            p.narrow_phase()
+                                .contact_pair(ah, bh)
+                                .is_some_and(|pair| pair.has_any_active_contact())
+                        };
+                        assert_eq!(active, allowed);
+                        if !allowed || sensor {
+                            assert!((p.pose(b).unwrap().translation.x - 0.8).abs() < 1e-5);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn group_edits_on_a_fixed_sensor_update_pairs_with_sleeping_bodies() {
+            for regular in [false, true] {
+                let (mut w, a, b) = setup(true, true, regular);
+                let cursor = EventCursor::new();
+                let body = w.resource::<Physics>().body_for_entity(b).unwrap();
+                // Let Rapier deactivate the body and its island naturally.
+                for _ in 0..300 {
+                    advance(&mut w);
+                }
+                assert_eq!(phases(&read(&w, &cursor)), [Phase::Started]);
+                assert!(w.resource::<Physics>().bodies()[body].is_sleeping());
+                sync(&mut w, regular);
+                assert!(w.resource::<Physics>().bodies()[body].is_sleeping());
+                w.get_mut::<Collider>(a).unwrap().collision_groups =
+                    Some(physics::CollisionGroups::new(1, 0));
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(
+                    phases(&read(&w, &cursor)),
+                    [Phase::Stopped(Reason::FilteredOut)]
+                );
+                w.get_mut::<Collider>(a).unwrap().collision_groups = None;
+                sync(&mut w, regular);
+                advance(&mut w);
+                assert_eq!(phases(&read(&w, &cursor)), [Phase::Started]);
+            }
+        }
+
+        #[test]
+        fn editing_groups_preserves_handles_and_balances_observed_pairs() {
+            use physics::CollisionGroups as Groups;
+            for regular in [false, true] {
+                for sensor in [false, true] {
+                    for late_tracking in [false, true] {
+                        let (mut w, a, b) = setup(!late_tracking, true, regular);
+                        w.get_mut::<Collider>(a).unwrap().sensor =
+                            sensor.then(SensorSettings::default);
+                        sync(&mut w, regular);
+                        let cursor = EventCursor::new();
+                        advance(&mut w);
+                        if late_tracking {
+                            assert!(read(&w, &cursor).is_empty());
+                            w.get_mut::<Collider>(a).unwrap().collision_events =
+                                Some(CollisionEventSettings::default());
+                            sync(&mut w, regular);
+                            advance(&mut w);
+                        }
+                        let started = read(&w, &cursor);
+                        assert_eq!(phases(&started), [Phase::Started]);
+                        let body = w.resource::<Physics>().body_for_entity(b).unwrap();
+                        let handles = w.resource::<Physics>().bodies()[body].colliders().to_vec();
+                        w.get_mut::<Collider>(a).unwrap().collision_groups =
+                            Some(Groups::new(1, 0));
+                        sync(&mut w, regular);
+                        assert!(read(&w, &cursor).is_empty());
+                        advance(&mut w);
+                        let stopped = read(&w, &cursor);
+                        assert_eq!(phases(&stopped), [Phase::Stopped(Reason::FilteredOut)]);
+                        assert_eq!((started[0].a, started[0].b), (stopped[0].a, stopped[0].b));
+                        advance(&mut w);
+                        assert!(read(&w, &cursor).is_empty());
+                        // Restoring defaults permits the overlapping pair again.
+                        w.get_mut::<Collider>(a).unwrap().collision_groups = None;
+                        sync(&mut w, regular);
+                        advance(&mut w);
+                        assert_eq!(phases(&read(&w, &cursor)), [Phase::Started]);
+                        assert_eq!(w.resource::<Physics>().body_for_entity(b), Some(body));
+                        assert_eq!(w.resource::<Physics>().bodies()[body].colliders(), handles);
+                        // A changed mask that still allows the pair must not restart it.
+                        w.get_mut::<Collider>(a).unwrap().collision_groups =
+                            Some(Groups::new(1, 2));
+                        sync(&mut w, regular);
+                        advance(&mut w);
+                        assert!(read(&w, &cursor).is_empty());
+                        // Filtering by the non-observing participant must close tracking too.
+                        w.get_mut::<Collider>(b).unwrap().collision_groups =
+                            Some(Groups::new(4, 1));
+                        sync(&mut w, regular);
+                        advance(&mut w);
+                        assert_eq!(
+                            phases(&read(&w, &cursor)),
+                            [Phase::Stopped(Reason::FilteredOut)]
+                        );
+                        w.get_mut::<Collider>(b).unwrap().collision_groups =
+                            Some(Groups::new(2, 1));
+                        sync(&mut w, regular);
+                        advance(&mut w);
+                        assert_eq!(phases(&read(&w, &cursor)), [Phase::Started]);
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn ordinary_contacts_report_start_and_separation() {
             for regular in [false, true] {
                 let (mut w, a, b) = setup(true, true, regular);

@@ -129,7 +129,8 @@ macro_rules! collision_events {
                 let (Some(a), Some(b)) = (colliders.get(pair.0), colliders.get(pair.1)) else {
                     return;
                 };
-                if !enabled(a) && !enabled(b) {
+                if (!enabled(a) && !enabled(b)) || !a.collision_groups().test(b.collision_groups())
+                {
                     return;
                 }
                 let capture = |handle, c: &Collider| $participant {
@@ -179,6 +180,9 @@ macro_rules! collision_events {
                                 || b.is_sensor() != old[1].is_sensor =>
                         {
                             Some(super::CollisionStopReason::Reconfigured)
+                        }
+                        (Some(a), Some(b)) if !a.collision_groups().test(b.collision_groups()) => {
+                            Some(super::CollisionStopReason::FilteredOut)
                         }
                         (Some(_), Some(_)) => None,
                         _ => Some(super::CollisionStopReason::Removed),

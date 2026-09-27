@@ -175,6 +175,7 @@ impl PhysicsWorld3D {
             live.set_friction(collider.friction as Real);
             live.set_restitution(collider.restitution as Real);
             live.set_sensor(collider.sensor.is_some());
+            live.set_collision_groups(collider.collision_groups.unwrap_or_default().into());
             live.set_active_events(if collider.collision_events.is_some() {
                 ActiveEvents::COLLISION_EVENTS
             } else {
@@ -182,6 +183,7 @@ impl PhysicsWorld3D {
             });
             if old_collider.sensor != collider.sensor
                 || old_collider.collision_events != collider.collision_events
+                || old_collider.collision_groups != collider.collision_groups
             {
                 self.collision_events
                     .collider_changed(*collider_handle, live);

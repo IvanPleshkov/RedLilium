@@ -149,6 +149,55 @@ checkpoint: runtime velocities, contacts and solver state are not preserved.
 Bodies loaded as children of a prefab root must be detached before physics sync,
 as required by the root-body contract above.
 
+## Collision groups
+
+`Collider2D` and `Collider3D` share `Option<CollisionGroups>`. Each setting has
+two `u32` masks: `memberships` identifies the groups the collider belongs to,
+and `filter` identifies the groups it accepts. The 32 bits are user-defined;
+the engine does not reserve any layers.
+
+```rust,ignore
+use redlilium_ecs::physics::CollisionGroups;
+
+const PLAYER: u32 = 1 << 0;
+const WORLD: u32 = 1 << 1;
+const ENEMY: u32 = 1 << 2;
+
+let player = Collider3D::ball(0.5)
+    .with_collision_groups(Some(CollisionGroups::new(PLAYER, WORLD | ENEMY)));
+let enemy = Collider3D::ball(0.5)
+    .with_collision_groups(Some(CollisionGroups::new(ENEMY, PLAYER | WORLD)));
+```
+
+Both sides must accept the pair:
+`(a.memberships & b.filter) != 0 && (b.memberships & a.filter) != 0`.
+`None` and `Some(CollisionGroups::default())` both mean all memberships and
+all accepted groups. A zero mask in either field rejects every pair. Masks
+apply to solid contacts and sensor intersections alike. They do not override
+Rapier's body-type rules (for example, fixed–fixed pairs remain excluded).
+This configures collision detection, not just solver forces.
+
+Groups are serialized and editable in the inspector as hexadecimal masks.
+Body sync applies edits in place, preserving handles, joints and body motion.
+At the next successful step, a newly rejected tracked pair closes with
+`Stopped(FilteredOut)`; a newly allowed active pair emits `Started`.
+An edit that keeps the pair allowed does not force a stop/start.
+If several settings change together, removal takes priority, then disabling
+tracking, then a sensor-role change, then group filtering.
+
+The shared settings convert into either dimension's Rapier `InteractionGroups`
+using `.into()`, including for free-collider builders and scene queries:
+
+```rust,ignore
+let filter = QueryFilter::default()
+    .groups(CollisionGroups::new(PLAYER, WORLD | ENEMY).into());
+let hit = physics.cast_ray_filtered(origin, direction, max_toi, filter);
+```
+
+Query masks use the same bilateral rule: the query's memberships must also be
+accepted by the collider. `cast_ray` and a default `QueryFilter` do not filter
+by groups, so they can still hit colliders whose masks reject all collisions.
+
 ## Collision events and triggers
 
 Opt in per collider with `Option<SensorSettings>` and
@@ -199,6 +248,7 @@ reasons are:
 | Reason | Meaning |
 |---|---|
 | `Separated` | The reported contact/intersection ended |
+| `FilteredOut` | The current collision groups reject the pair |
 | `Removed` | At least one collider was removed, including ECS despawn/exclusion or loss of a required component |
 | `TrackingDisabled` | Neither participant requests collision events anymore |
 | `Reconfigured` | A participant changed its sensor role |

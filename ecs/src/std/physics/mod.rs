@@ -76,3 +76,6 @@ pub use events::{CollisionEventSettings, CollisionPhase, CollisionStopReason, Se
 pub mod events2d;
 #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
 pub mod events3d;
+
+mod groups;
+pub use groups::CollisionGroups;

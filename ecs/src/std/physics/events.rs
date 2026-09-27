@@ -20,6 +20,8 @@ pub enum CollisionPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollisionStopReason {
     Separated,
+    /// The current collision groups no longer allow the pair.
+    FilteredOut,
     Removed,
     TrackingDisabled,
     /// At least one participant changed its sensor role.

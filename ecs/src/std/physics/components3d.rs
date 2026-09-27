@@ -5,7 +5,7 @@
 //! [`SyncPhysicsJoints3D`](super::physics3d::SyncPhysicsJoints3D) systems
 //! to automatically materialize these descriptors into rapier physics objects.
 
-use super::{CollisionEventSettings, SensorSettings};
+use super::{CollisionEventSettings, CollisionGroups, SensorSettings};
 use redlilium_core::math::Vec3;
 
 /// 3D collider shape.
@@ -128,6 +128,8 @@ pub struct Collider3D {
     pub sensor: Option<SensorSettings>,
     /// Opt-in collision tracking. Register Events<CollisionEvent3D> before stepping.
     pub collision_events: Option<CollisionEventSettings>,
+    /// Optional group filtering. None allows all groups; both sides must allow a pair.
+    pub collision_groups: Option<CollisionGroups>,
 }
 
 impl Collider3D {
@@ -182,6 +184,12 @@ impl Collider3D {
         self
     }
 
+    /// Sets group filtering; None restores membership in and interaction with all groups.
+    pub fn with_collision_groups(mut self, v: Option<CollisionGroups>) -> Self {
+        self.collision_groups = v;
+        self
+    }
+
     /// Some enables sensor behavior; None restores a solid collider.
     pub fn with_sensor(mut self, v: Option<SensorSettings>) -> Self {
         self.sensor = v;
@@ -204,6 +212,7 @@ impl Default for Collider3D {
             density: 1.0,
             sensor: None,
             collision_events: None,
+            collision_groups: None,
         }
     }
 }
@@ -456,6 +465,7 @@ impl Collider3D {
             .restitution(self.restitution as Real)
             .density(self.density as Real)
             .sensor(self.sensor.is_some())
+            .collision_groups(self.collision_groups.unwrap_or_default().into())
             .active_events(if self.collision_events.is_some() {
                 ActiveEvents::COLLISION_EVENTS
             } else {

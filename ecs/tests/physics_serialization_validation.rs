@@ -75,7 +75,13 @@ macro_rules! descriptor_tests {
                     .with_restitution(0.4)
                     .with_density(2.5)
                     .with_sensor(Some(physics::SensorSettings::default()))
-                    .with_collision_events((i % 2 == 0).then(physics::CollisionEventSettings::default));
+                    .with_collision_events((i % 2 == 0).then(physics::CollisionEventSettings::default))
+                    .with_collision_groups(match i {
+                        0 => None,
+                        1 => Some(physics::CollisionGroups::default()),
+                        2 => Some(physics::CollisionGroups::new(0, 0)),
+                        _ => Some(physics::CollisionGroups::new(1 << 31, 0x8000_0003)),
+                    });
                 let e = w
                     .spawn_with((
                         Name::new(format!("body{i}")),

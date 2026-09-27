@@ -2,6 +2,17 @@
 // can represent unmapped bodies without adding a public structural escape hatch.
 macro_rules! world_boundary_tests {
     () => {
+        #[test]
+        #[ignore = "Rapier 0.32 panics after manually sleeping an active body; independent of groups"]
+        fn manual_sleep_does_not_panic_on_next_step() {
+            let mut physics = Physics::default();
+            let body = physics.add_body(RigidBodyBuilder::dynamic().build());
+            physics.add_collider(ColliderBuilder::ball(0.5).build(), body);
+            physics.step();
+            physics.body_motion(body).unwrap().sleep();
+            physics.step();
+        }
+
         fn ray_fixture() -> (
             Physics,
             crate::Entity,
@@ -23,6 +34,42 @@ macro_rules! world_boundary_tests {
                 physics.add_free_collider(ColliderBuilder::ball(0.5).translation(near).build());
             physics.step();
             (physics, entity, free, body, collider)
+        }
+
+        #[test]
+        fn collision_groups_filter_ray_hits_and_free_colliders() {
+            use crate::physics::CollisionGroups;
+            let (mut physics, entity, free, _, collider) = ray_fixture();
+            physics.colliders[free].set_collision_groups(CollisionGroups::new(1, 4).into());
+            physics.colliders[collider]
+                .set_collision_groups(CollisionGroups::new(2, 4).into());
+            physics.step();
+            let origin = GameVector::zeros();
+            let mut dir = GameVector::zeros();
+            dir.x = 1.0;
+            let hit = physics
+                .cast_ray_filtered(
+                    origin,
+                    dir,
+                    10.0,
+                    QueryFilter::default().groups(CollisionGroups::new(4, 2).into()),
+                )
+                .unwrap();
+            assert_eq!(hit.collider, collider);
+            assert_eq!(hit.entity, Some(entity));
+            // Query membership must also be accepted by the collider.
+            assert!(
+                physics
+                    .cast_ray_filtered(
+                        origin,
+                        dir,
+                        10.0,
+                        QueryFilter::default().groups(CollisionGroups::new(8, 2).into()),
+                    )
+                    .is_none()
+            );
+            // Queries without a group filter still see every collider.
+            assert_eq!(physics.cast_ray(origin, dir, 10.0).unwrap().collider, free);
         }
 
         #[test]
