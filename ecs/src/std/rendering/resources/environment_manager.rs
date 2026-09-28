@@ -14,7 +14,7 @@
 //! meanwhile), and [`invalidate`](Self::invalidate) drops the resolution + data
 //! so an edited record reloads from fresh settings.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use redlilium_assets::{AssetDb, AssetManager, AssetProcessor, Guid, ResidentCache};
@@ -64,6 +64,8 @@ pub struct EnvironmentManager {
     cache: ResidentCache<Guid, ResolvedEnvironment>,
     /// Environments being (re)resolved — demanded but not yet published.
     demanded: HashSet<Guid>,
+    // Park dependent resolutions while the texture's failure latch is set.
+    waiting_textures: HashMap<Guid, TextureSource>,
 }
 
 impl EnvironmentManager {
@@ -98,6 +100,7 @@ impl EnvironmentManager {
         self.cache.invalidate(&guid);
         self.data.invalidate(guid);
         self.demanded.remove(&guid);
+        self.waiting_textures.remove(&guid);
     }
 
     /// Advance all demanded environments: load the data, resolve the three
@@ -135,6 +138,12 @@ impl EnvironmentManager {
         let mut failed_now: Vec<Guid> = Vec::new();
 
         'demanded: for guid in self.demanded.iter().copied() {
+            if let Some(source) = self.waiting_textures.get(&guid) {
+                if texture_mgr.is_failed(source) {
+                    continue;
+                }
+                self.waiting_textures.remove(&guid);
+            }
             // Phase 1: the environment data (request once, then poll).
             let Some(data) = self.data.get_or_request(processor, db, guid) else {
                 if self.data.is_failed(guid) {
@@ -152,9 +161,10 @@ impl EnvironmentManager {
             ];
             let mut resolved: Vec<ResolvedCube> = Vec::with_capacity(3);
             for source in sources {
+                // Keep demand, but park resolution while the dependency's own
+                // failure latch is set. Its invalidation resumes this request.
                 if texture_mgr.is_failed(&source) {
-                    log::warn!("environment {guid:?}: cubemap {source:?} failed to load");
-                    failed_now.push(guid);
+                    self.waiting_textures.insert(guid, source);
                     continue 'demanded;
                 }
                 match texture_mgr.get(&source) {

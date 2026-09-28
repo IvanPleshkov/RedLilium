@@ -63,6 +63,7 @@ impl<K: Eq + Hash, T> ResidentCache<K, T> {
 
     /// Publish (or republish — hot reload) the resident value for `key`.
     pub fn publish(&mut self, key: K, value: Arc<T>) {
+        self.failed.remove(&key);
         self.resident.insert(key, value);
         self.generation += 1;
     }

@@ -34,7 +34,7 @@ use crate::std::rendering::loaders::{
     MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource, Shader, TextureSource,
 };
 use crate::std::rendering::shading::{
-    OpaqueBinding, PropValue, StorageBufferSource, opaque_bindings, pack_props,
+    OpaqueBinding, StorageBufferSource, opaque_bindings, pack_props, resolve_properties,
 };
 
 /// A resolved opaque material-property binding, in schema order — what
@@ -122,6 +122,10 @@ pub struct MaterialInstanceManager {
     /// Instances being (re)resolved by `drive` — demanded but not yet published
     /// (or republished after a parent change).
     demanded: HashSet<Guid>,
+    // Avoid re-packing properties every frame for a known failed dependency.
+    waiting_textures: HashMap<Guid, (TextureSource, Arc<super::ResolvedMaterial>)>,
+    /// Invalid overrides are retried only after the parent or instance changes.
+    rejected_overrides: HashMap<Guid, Arc<super::ResolvedMaterial>>,
     /// Externally-produced GPU buffers bound by `StorageBufferSource::Ref`
     /// properties, published under a guid (a compute pass output, an ECS-owned
     /// buffer). A `Ref` property whose buffer is not yet here keeps the instance
@@ -138,6 +142,8 @@ impl MaterialInstanceManager {
             data: AssetManager::new(),
             cache: ResidentCache::new(),
             demanded: HashSet::new(),
+            waiting_textures: HashMap::new(),
+            rejected_overrides: HashMap::new(),
             buffers: HashMap::new(),
             pending_uploads: Vec::new(),
         }
@@ -166,6 +172,8 @@ impl MaterialInstanceManager {
     /// rebuild takes (a preview re-publishing per gizmo-drag tick flickers).
     pub fn publish_virtual(&mut self, guid: Guid, data: MaterialInstanceData) {
         self.data.publish(guid, Arc::new(data));
+        self.waiting_textures.remove(&guid);
+        self.rejected_overrides.remove(&guid);
         self.demanded.insert(guid);
     }
 
@@ -199,6 +207,8 @@ impl MaterialInstanceManager {
         self.cache.invalidate(&guid);
         self.data.invalidate(guid);
         self.demanded.remove(&guid);
+        self.waiting_textures.remove(&guid);
+        self.rejected_overrides.remove(&guid);
     }
 
     /// Advance all demanded instances: load the data, resolve the parent
@@ -286,23 +296,49 @@ impl MaterialInstanceManager {
                 continue; // parent (or its shader) still loading
             };
 
+            if let Some((source, previous_parent)) = self.waiting_textures.get(&guid) {
+                if Arc::ptr_eq(&parent, previous_parent) && texture_mgr.is_failed(source) {
+                    continue;
+                }
+                self.waiting_textures.remove(&guid);
+            }
+            if let Some(rejected_parent) = self.rejected_overrides.get(&guid) {
+                if Arc::ptr_eq(&parent, rejected_parent) {
+                    continue;
+                }
+                self.rejected_overrides.remove(&guid);
+            }
+
             // Phase 3: resolve the opaque properties (schema order — the
             // descriptor-slot order). All must be resident before the group is
             // built: textures via the texture manager, `Ref` storage buffers via
             // the published-buffer registry (both keep the instance unresolved
             // while pending). Inline storage buffers need no resolution — their
             // bytes upload at build time.
-            let merged = merge_overrides(&parent.properties, &data.overrides);
+            let merged = match resolve_properties(
+                parent
+                    .properties
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value)),
+                &data.overrides,
+            ) {
+                Ok(merged) => merged,
+                Err(e) => {
+                    log::warn!("material instance {guid:?}: {e}");
+                    self.cache.fail(guid);
+                    self.rejected_overrides.insert(guid, parent);
+                    continue;
+                }
+            };
             let mut bindings = Vec::new();
             let mut textures = Vec::new();
-            for (name, binding) in opaque_bindings(&merged) {
+            for (_name, binding) in opaque_bindings(&merged) {
                 match binding {
                     OpaqueBinding::Texture(source) => {
+                        // Park this resolution, rather than latching its parent
+                        // permanently or repeating property packing every frame.
                         if texture_mgr.is_failed(&source) {
-                            log::warn!(
-                                "material instance {guid:?}: texture '{name}' failed to load"
-                            );
-                            failed_now.push(guid);
+                            self.waiting_textures.insert(guid, (source, parent.clone()));
                             continue 'demanded;
                         }
                         match texture_mgr.get(&source) {
@@ -457,23 +493,4 @@ impl MaterialInstanceManager {
     pub(crate) fn request_rescan(&mut self) {
         self.cache.bump_generation();
     }
-}
-
-/// Overlay instance overrides onto the parent's schema-ordered property list:
-/// each slot keeps the parent's value unless the instance overrides it by name.
-fn merge_overrides(
-    parent: &[(String, PropValue)],
-    overrides: &[(String, PropValue)],
-) -> Vec<(String, PropValue)> {
-    parent
-        .iter()
-        .map(|(name, base)| {
-            let value = overrides
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| base.clone());
-            (name.clone(), value)
-        })
-        .collect()
 }

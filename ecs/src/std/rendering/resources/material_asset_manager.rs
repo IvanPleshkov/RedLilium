@@ -14,6 +14,7 @@
 //! [`invalidate`](MaterialAssetManager::invalidate) drops both the resolution
 //! and the data so an edited record reloads from fresh settings.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use redlilium_assets::{AssetDb, AssetManager, AssetProcessor, Guid, ResidentCache};
@@ -49,6 +50,8 @@ pub struct MaterialAssetManager {
     data: AssetManager<MaterialLoader>,
     /// The resolution: guid → the single shared [`ResolvedMaterial`].
     cache: ResidentCache<Guid, ResolvedMaterial>,
+    // Variant validation failures are tied to the shader version they used.
+    rejected_shaders: HashMap<Guid, (Guid, Arc<Shader>)>,
 }
 
 impl MaterialAssetManager {
@@ -80,7 +83,13 @@ impl MaterialAssetManager {
             }
         }
         if self.cache.is_failed(&guid) {
-            return None;
+            let (shader_guid, rejected) = self.rejected_shaders.get(&guid)?;
+            let current = shader_mgr.get_or_request(processor, db, *shader_guid)?;
+            if Arc::ptr_eq(&current, rejected) {
+                return None;
+            }
+            self.rejected_shaders.remove(&guid);
+            self.cache.invalidate(&guid);
         }
 
         // Phase 1: the material data (request once, then poll).
@@ -94,6 +103,14 @@ impl MaterialAssetManager {
             );
             self.cache.fail(guid);
             return None;
+        };
+        let properties = match model.resolve(&data.properties) {
+            Ok(properties) => properties,
+            Err(e) => {
+                log::warn!("material {guid:?}: {e}");
+                self.cache.fail(guid);
+                return None;
+            }
         };
         let shader = shader_mgr.get_or_request(processor, db, model.shader)?; // None → still loading
 
@@ -114,6 +131,8 @@ impl MaterialAssetManager {
                 Ok(variant) => variant,
                 Err(e) => {
                     log::warn!("material {guid:?}: invalid shader features: {e}");
+                    self.rejected_shaders
+                        .insert(guid, (model.shader, shader.clone()));
                     self.cache.fail(guid);
                     return None;
                 }
@@ -125,7 +144,7 @@ impl MaterialAssetManager {
             shading_model: data.shading_model.clone(),
             shader_guid: model.shader,
             shader,
-            properties: model.resolve(&data.properties),
+            properties,
             variant,
         });
         self.cache.publish(guid, resolved.clone());
@@ -144,5 +163,6 @@ impl MaterialAssetManager {
     pub fn invalidate(&mut self, guid: Guid) {
         self.cache.invalidate(&guid);
         self.data.invalidate(guid);
+        self.rejected_shaders.remove(&guid);
     }
 }

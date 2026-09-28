@@ -1,27 +1,21 @@
-//! # RedLilium asset system (prototype)
+//! # RedLilium asset system
 //!
-//! A trait-based asset pipeline. Each asset type is one [`AssetLoader`]
-//! declaration (`Source`/`Settings`/`Raw`/`Cpu` + async `read`/`decode` +
-//! `decoded_size`); types that need a GPU resource add the optional [`GpuStage`]
-//! (`Cpu -> Gpu` through the frame graph) — folded into the same loader, no
-//! separate render-asset layer.
+//! An [`AssetLoader`] builds a nonempty sequence of IO/CPU [`AssetStage`]s,
+//! optionally ending in one GPU stage. [`AssetProcessor`] hands asynchronous
+//! work to the ECS executors and emits GPU transfers through render graphs.
 //!
-//! **Contract:** a consumer `request(source)`s and gets an [`AssetHandle<T>`] —
-//! an `Arc`-backed handle that is the *demand to load* while held; poll
-//! [`AssetHandle::get`] until ready, then keep the `Arc<T>` and drop the handle.
-//! Dropping before completion cancels the in-flight load. **No dedup/cache** —
-//! sharing/reuse is the consumer's job.
+//! [`AssetHandle`] carries demand and the eventual result. Dropping every clone
+//! abandons the request: an issued stage finishes or is dropped by its executor,
+//! its result is discarded, and no following stage starts. The processor retains
+//! that task's admission slot until its completion is collected. It does not
+//! interrupt an executing stage or shut down the executors.
 //!
-//! Pipeline stages run on different executors (read → IO runtime, decode →
-//! compute pool, upload → render thread/frame graph). The processor (an ECS
-//! system; *next chunk*) drives them under two mutable budgets: **RAM** (gates
-//! decode intake) and **GPU bytes/frame** (gates uploads).
+//! Budgets count admitted requests (including intermediate data waiting for GPU)
+//! and GPU stages per flush. They are not byte limits. Resident caches are owned
+//! by managers; each processor request is independent and is not deduplicated.
 //!
-//! Identity: a stable [`Guid`] resolved to `(mount, path)` via the central
-//! bijection-checked [`AssetDb`]; components store the [`AssetSource`].
-//!
-//! *This module currently provides the contract shapes (loaders + handle); the
-//! request processor / ECS bridge is the next step.*
+//! [`AssetManager`] / [`ResidentCache`] share resident `Arc`s. Components retain
+//! [`AssetRef`]s, while [`AssetDb`] maps stable [`Guid`]s to mounted paths.
 
 mod asset_ref;
 mod db;
@@ -34,6 +28,7 @@ mod processor;
 mod scan;
 mod source;
 mod stage;
+mod task;
 
 pub use asset_ref::{AssetRef, AssetRefSource};
 pub use db::{AssetDb, AssetPath, AssetRecord, DbError, extract_guids};

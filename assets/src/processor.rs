@@ -30,7 +30,8 @@ use crate::error::AssetError;
 use crate::handle::{AssetHandle, RequestSlot};
 use crate::loader::AssetLoader;
 use crate::source::AssetSource;
-use crate::stage::{AnyAsset, Executor, LoadEnv};
+use crate::stage::{AnyAsset, AssetStage, Executor, LoadEnv};
+use crate::task::{StageTask, guarded};
 
 /// Identifies one in-flight request (for routing async results back).
 type RequestId = u64;
@@ -46,15 +47,26 @@ type Deliver = Box<dyn FnOnce(Result<Box<dyn Any>, AssetError>) + Send + Sync>;
 /// transfer passes don't collide on a name.
 static PROCESSOR_SEQ: AtomicU64 = AtomicU64::new(0);
 
+struct StageEntry {
+    executor: Executor,
+    stage: Box<dyn AssetStage>,
+}
+
+// Admission covers the entire request, including values waiting for another
+// stage. Running is retained even after demand disappears, until task disposal
+// has been reported through the completion channel.
+enum RequestState {
+    Queued(AnyAsset),
+    Ready(AnyAsset),
+    Running,
+}
+
 struct Request {
-    stages: Vec<Box<dyn crate::stage::AssetStage>>,
+    stages: Vec<StageEntry>,
     next: usize,
-    /// Input to `stages[next]`; `None` while an async stage is in flight.
-    value: Option<AnyAsset>,
+    state: RequestState,
     deliver: Option<Deliver>,
-    /// Demand check: false once the consumer dropped the handle.
     alive: Box<dyn Fn() -> bool + Send + Sync>,
-    in_flight: bool,
 }
 
 /// Runs requests through their stage pipelines.
@@ -72,7 +84,7 @@ pub struct AssetProcessor {
     /// `mpsc::Receiver` is `!Sync`; the `Mutex` makes the processor `Sync` so it
     /// can be an ECS resource. Only `collect` locks it (briefly, to drain).
     result_rx: Mutex<Receiver<(RequestId, Result<AnyAsset, AssetError>)>>,
-    /// Max requests in flight (trivial RAM proxy).
+    /// Max admitted requests, including waiting data and abandoned running tasks.
     ram_budget: usize,
     /// Max GPU stages run per frame.
     gpu_per_frame: usize,
@@ -135,7 +147,11 @@ impl AssetProcessor {
         .await
     }
 
-    /// Set the (mutable, per-tick) budgets.
+    /// Set the admission limit and GPU stages per flush (call once per frame).
+    /// `ram_budget` is a count of admitted requests, not bytes: each retains a
+    /// slot across IO, CPU and GPU waits. Zero pauses admission; already admitted
+    /// requests can finish. Queued stage captures and resident caches are outside
+    /// this bound. Reducing the limit does not evict admitted requests.
     pub fn set_budgets(&mut self, ram_budget: usize, gpu_per_frame: usize) {
         self.ram_budget = ram_budget;
         self.gpu_per_frame = gpu_per_frame;
@@ -172,7 +188,32 @@ impl AssetProcessor {
             vfs: self.vfs.clone(),
             device: Arc::clone(&self.device),
         };
-        let stages = L::pipeline(&source, &deps, &env);
+        let stages = match guarded("pipeline construction", || {
+            L::pipeline(&source, &deps, &env)
+                .into_iter()
+                .map(|stage| StageEntry {
+                    executor: stage.executor(),
+                    stage,
+                })
+                .collect::<Vec<_>>()
+        }) {
+            Ok(stages) => stages,
+            Err(error) => {
+                slot.fulfill(Err(error));
+                return handle;
+            }
+        };
+        if stages.is_empty()
+            || stages
+                .iter()
+                .take(stages.len() - 1)
+                .any(|s| s.executor == Executor::Gpu)
+        {
+            slot.fulfill(Err(AssetError::Pipeline(
+                "pipeline must be nonempty, with a GPU stage only at the end".into(),
+            )));
+            return handle;
+        }
 
         let demand = Arc::downgrade(&slot);
         let alive = Box::new(move || demand.strong_count() > 0);
@@ -190,86 +231,94 @@ impl AssetProcessor {
             Request {
                 stages,
                 next: 0,
-                value: Some(Box::new(())), // first stage's input is unit
+                state: RequestState::Queued(Box::new(())), // first input is unit
                 deliver: Some(deliver),
                 alive,
-                in_flight: false,
             },
         );
         handle
     }
 
-    /// Drop requests whose handle is gone (coarse cancel: any in-flight task
-    /// completes but its result is discarded).
+    /// Discard abandoned queued/ready requests. Running tasks retain their
+    /// admission slot until they finish or their executor drops the future.
     fn drop_abandoned(&mut self) {
-        self.requests.retain(|_, r| (r.alive)());
+        self.requests
+            .retain(|_, r| (r.alive)() || matches!(r.state, RequestState::Running));
     }
 
-    /// Produce async (IO/CPU) stage tasks to spawn, up to the RAM budget. The
-    /// ECS bridge spawns each on its executor; results return via the channel.
+    fn admitted(&self) -> usize {
+        self.requests
+            .values()
+            .filter(|r| !matches!(r.state, RequestState::Queued(_)))
+            .count()
+    }
+
+    /// Produce async stage tasks. A request holds one budget slot from its
+    /// first stage through delivery, including time spent waiting for GPU.
+    /// Dropping a returned task reports a failure on the next collect.
     pub fn drain_tasks(&mut self) -> Vec<AsyncTask> {
+        self.collect();
         self.drop_abandoned();
         let mut tasks = Vec::new();
-        let mut in_flight = self.requests.values().filter(|r| r.in_flight).count();
-
+        let mut admitted = self.admitted();
         for (&id, r) in self.requests.iter_mut() {
-            if in_flight >= self.ram_budget {
-                break;
-            }
-            if r.in_flight || r.next >= r.stages.len() {
+            if matches!(r.state, RequestState::Running)
+                || r.stages[r.next].executor == Executor::Gpu
+            {
                 continue;
             }
-            if r.stages[r.next].executor() == Executor::Gpu {
-                continue; // GPU stages run in flush_gpu
+            if matches!(r.state, RequestState::Queued(_)) {
+                if admitted >= self.ram_budget {
+                    continue;
+                }
+                admitted += 1;
             }
-            let Some(value) = r.value.take() else {
-                continue;
+            let state = std::mem::replace(&mut r.state, RequestState::Running);
+            let (RequestState::Queued(value) | RequestState::Ready(value)) = state else {
+                unreachable!()
             };
-            let fut = r.stages[r.next].run_async(value);
-            let tx = self.result_tx.clone();
-            r.in_flight = true;
-            in_flight += 1;
-            let executor = r.stages[r.next].executor();
-            tasks.push((
-                executor,
-                Box::pin(async move {
-                    let _ = tx.send((id, fut.await));
-                }) as Pin<Box<dyn Future<Output = ()> + Send>>,
-            ));
+            match guarded("async stage construction", || {
+                r.stages[r.next].stage.run_async(value)
+            }) {
+                Ok(future) => tasks.push((
+                    r.stages[r.next].executor,
+                    Box::pin(StageTask::new(id, future, self.result_tx.clone()))
+                        as Pin<Box<dyn Future<Output = ()> + Send>>,
+                )),
+                Err(error) => {
+                    let _ = self.result_tx.send((id, Err(error)));
+                }
+            }
         }
+        self.collect();
         tasks
     }
 
-    /// Apply finished async stage results, advancing each request (and
-    /// delivering when its last stage was async).
+    /// Apply finished or interrupted async stages. Abandoned results are
+    /// discarded without starting another stage or publishing a value.
     pub fn collect(&mut self) {
-        // Drain under the lock, then process (the body needs `&mut self`).
-        let drained: Vec<(RequestId, Result<AnyAsset, AssetError>)> =
-            self.result_rx.lock().try_iter().collect();
+        let drained: Vec<_> = self.result_rx.lock().try_iter().collect();
         for (id, result) in drained {
-            let Some(r) = self.requests.get_mut(&id) else {
-                continue; // request was abandoned
+            let Some(mut r) = self.requests.remove(&id) else {
+                continue;
             };
-            r.in_flight = false;
+            if !(r.alive)() {
+                continue;
+            }
             match result {
                 Ok(value) => {
                     r.next += 1;
-                    if r.next >= r.stages.len() {
-                        let deliver = r.deliver.take().unwrap();
-                        let final_value: Box<dyn Any> = value; // drop +Send+Sync for delivery
-                        deliver(Ok(final_value));
-                        self.requests.remove(&id);
+                    if r.next == r.stages.len() {
+                        r.deliver.take().unwrap()(Ok(value));
                     } else {
-                        r.value = Some(value);
+                        r.state = RequestState::Ready(value);
+                        self.requests.insert(id, r);
                     }
                 }
-                Err(e) => {
-                    let deliver = r.deliver.take().unwrap();
-                    deliver(Err(e));
-                    self.requests.remove(&id);
-                }
+                Err(error) => r.deliver.take().unwrap()(Err(error)),
             }
         }
+        self.drop_abandoned();
     }
 
     /// Run pending GPU stages (up to `gpu_per_frame`) and return their ops as
@@ -290,38 +339,47 @@ impl AssetProcessor {
     /// the main frame graph. Returns an empty `Vec` when no GPU stage was
     /// ready. Call in `on_draw`.
     pub fn flush_gpu(&mut self) -> Vec<RenderGraph> {
+        self.collect();
+        self.drop_abandoned();
+        let mut admitted = self.admitted();
         let ready: Vec<RequestId> = self
             .requests
             .iter()
-            .filter(|(_, r)| {
-                !r.in_flight
-                    && r.next < r.stages.len()
-                    && r.stages[r.next].executor() == Executor::Gpu
+            .filter_map(|(&id, r)| {
+                if matches!(r.state, RequestState::Running)
+                    || r.stages[r.next].executor != Executor::Gpu
+                {
+                    return None;
+                }
+                if matches!(r.state, RequestState::Queued(_)) {
+                    if admitted >= self.ram_budget {
+                        return None;
+                    }
+                    admitted += 1;
+                }
+                Some(id)
             })
-            .map(|(&id, _)| id)
             .take(self.gpu_per_frame)
             .collect();
 
         let mut ops = Vec::new();
         for id in ready {
-            let r = self.requests.get_mut(&id).unwrap();
-            let Some(value) = r.value.take() else {
+            let mut r = self.requests.remove(&id).unwrap();
+            // Demand can disappear since selection (handles are Send + Sync).
+            if !(r.alive)() {
                 continue;
+            }
+            let (RequestState::Queued(value) | RequestState::Ready(value)) = r.state else {
+                unreachable!()
             };
-            match r.stages[r.next].run_gpu(value) {
+            let result =
+                guarded("GPU stage", || r.stages[r.next].stage.run_gpu(value)).and_then(|r| r);
+            match result {
                 Ok((gpu_value, mut stage_ops)) => {
                     ops.append(&mut stage_ops);
-                    r.next += 1;
-                    // GPU is the residency tail → this is the final value.
-                    let deliver = r.deliver.take().unwrap();
-                    deliver(Ok(gpu_value));
-                    self.requests.remove(&id);
+                    r.deliver.take().unwrap()(Ok(gpu_value));
                 }
-                Err(e) => {
-                    let deliver = r.deliver.take().unwrap();
-                    deliver(Err(e));
-                    self.requests.remove(&id);
-                }
+                Err(error) => r.deliver.take().unwrap()(Err(error)),
             }
         }
 
@@ -366,10 +424,11 @@ impl AssetProcessor {
         self.requests.len()
     }
 
-    /// Whether the pool has fully drained — every request delivered or abandoned.
-    /// A blue-green swap ticks the old processor until this is true, then drops
-    /// it (stop calling `request`; keep calling `drain_tasks`/`collect`/
-    /// `flush_gpu`).
+    /// Whether all requests and their issued stage futures have drained.
+    /// Stop requesting and keep calling collect/drain_tasks/flush_gpu to drain.
+    /// Running stages whose handles were dropped still count until completion
+    /// or executor cancellation is collected. Executor shutdown remains a
+    /// separate requirement before unloading a game module.
     pub fn is_idle(&self) -> bool {
         self.requests.is_empty()
     }

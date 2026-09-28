@@ -3,19 +3,16 @@
 //! Contract: a consumer calls `request(source)` and gets an `AssetHandle<T>` —
 //! an `Arc`-backed handle that (a) carries the eventual result and (b) **is the
 //! demand for loading** while held. The consumer polls [`get`](AssetHandle::get)
-//! each tick (or `await`s); once it has the `Arc<T>`, it drops the handle and
+//! each tick; once it has the `Arc<T>`, it drops the handle and
 //! keeps the `Arc<T>` (that becomes the resource's lifetime — one refcount).
 //!
-//! Dropping the handle **before** completion cancels the in-flight load: the
-//! processor sees the request is no longer demanded (the handle's strong count
-//! dropped) and trips the [`CancellationToken`], so the read/decode tasks bail
-//! at their next checkpoint.
+//! Dropping every handle clone before completion abandons the load. Queued
+//! stages are discarded when the processor is driven. An already issued stage
+//! finishes (or is dropped by its executor); its result is discarded and no
+//! subsequent stage is started. There is no cooperative cancellation token.
 //!
 //! There is **no dedup** — each `request` is an independent load. Sharing/reuse
 //! is the consumer's responsibility.
-
-// The slot's setters/token are driven by the request processor (next chunk).
-#![allow(dead_code)]
 
 use std::sync::Arc;
 

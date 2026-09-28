@@ -83,6 +83,7 @@ impl AssetSource for TextureSource {
 /// combinations). The texture manager interns the resulting GPU samplers by
 /// content, so textures sharing parameters share one `Arc<Sampler>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TextureSettings {
     /// Decode as sRGB (color data — base color, emissive). Linear (`false`)
     /// suits data textures: normal maps, roughness/metallic masks.
@@ -138,6 +139,16 @@ impl Default for TextureSettings {
 }
 
 impl TextureSettings {
+    /// Parse record settings. Only absent settings use the full defaults;
+    /// malformed settings and unknown fields are errors.
+    pub fn from_record(settings: Option<&str>) -> Result<Self, AssetError> {
+        match settings {
+            None => Ok(Self::default()),
+            Some(text) => ron::from_str(text)
+                .map_err(|e| AssetError::Decode(format!("texture settings: {e}"))),
+        }
+    }
+
     /// The sampler these settings describe (interned by the texture manager).
     pub fn to_sampler(&self) -> CpuSampler {
         CpuSampler {
@@ -168,17 +179,16 @@ impl AssetLoader for TextureLoader {
         let mut mip_filter = MipmapFilter::default();
         match source {
             TextureSource::File(_) => {
+                let settings = match TextureSettings::from_record(env.settings.as_deref()) {
+                    Ok(settings) => settings,
+                    Err(error) => return vec![Box::new(InvalidSettingsStage(error))],
+                };
                 if let Some(path) = &env.path {
                     stages.push(Box::new(ReadImageStage {
                         path: path.clone(),
                         vfs: env.vfs.clone(),
                     }));
                 }
-                let settings = env
-                    .settings
-                    .as_deref()
-                    .and_then(|s| ron::from_str::<TextureSettings>(s).ok())
-                    .unwrap_or_default();
                 generate_mips = settings.generate_mips;
                 mip_filter = settings.mip_filter;
                 stages.push(Box::new(DecodeImageStage { settings }));
@@ -211,6 +221,20 @@ impl AssetLoader for TextureLoader {
             generate_mips,
         }));
         stages
+    }
+}
+
+/// Report invalid settings before reading pixels or creating GPU resources.
+struct InvalidSettingsStage(AssetError);
+
+impl AssetStage for InvalidSettingsStage {
+    fn executor(&self) -> Executor {
+        Executor::Cpu
+    }
+
+    fn run_async(&self, _input: AnyAsset) -> StageFuture {
+        let error = self.0.clone();
+        Box::pin(async move { Err(error) })
     }
 }
 
@@ -521,6 +545,41 @@ mod tests {
         // Old records with no `generate_mips` field default to on (#96).
         assert!(s.generate_mips);
         assert_eq!(s.mip_filter, MipmapFilter::Color);
+    }
+
+    #[test]
+    fn invalid_settings_fail_before_io() {
+        assert_eq!(
+            TextureSettings::from_record(None).unwrap(),
+            TextureSettings::default()
+        );
+        assert!(
+            !TextureSettings::from_record(Some("(srgb:false)"))
+                .unwrap()
+                .srgb
+        );
+        for text in [
+            "",
+            "not ron",
+            "(srg:false)",
+            "(srgb:42)",
+            "(srgb:true,srgb:false)",
+        ] {
+            let env = LoadEnv {
+                path: Some(AssetPath::new("missing", "image.png")),
+                settings: Some(text.into()),
+                vfs: Vfs::new(),
+                device: dummy_device(),
+            };
+            let stages =
+                TextureLoader::pipeline(&TextureSource::File(Guid::stable("image")), &(), &env);
+            assert_eq!(stages.len(), 1);
+            assert_eq!(stages[0].executor(), Executor::Cpu);
+            assert!(matches!(
+                ready(stages[0].run_async(Box::new(()))),
+                Err(AssetError::Decode(_))
+            ));
+        }
     }
 
     /// `floor(log2(max(w,h))) + 1` — the full 2D mip count.

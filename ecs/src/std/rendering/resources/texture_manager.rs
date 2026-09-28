@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use redlilium_assets::{AssetDb, AssetHandle, AssetProcessor, ResidentCache};
+use redlilium_assets::{AssetDb, AssetError, AssetHandle, AssetProcessor, ResidentCache};
 use redlilium_graphics::{GraphicsDevice, Sampler, Texture};
 
 use crate::std::rendering::loaders::{TextureLoader, TextureSettings, TextureSource};
@@ -45,8 +45,8 @@ impl redlilium_assets::AssetRefSource for TextureSource {
 pub struct TextureManager {
     device: Arc<GraphicsDevice>,
     cache: ResidentCache<TextureSource, ResolvedTexture>,
-    /// In-flight loads.
-    pending: HashMap<TextureSource, AssetHandle<Texture>>,
+    /// In-flight loads with the settings snapshot used to decode their pixels.
+    pending: HashMap<TextureSource, (AssetHandle<Texture>, TextureSettings)>,
     /// Sources demanded but not yet requested (no processor at `request` time).
     demanded: Vec<TextureSource>,
     /// Settings → the canonical shared sampler. Samplers are immutable value
@@ -152,12 +152,20 @@ impl TextureManager {
     /// Call from a load system.
     pub fn drive(&mut self, processor: &mut AssetProcessor, db: &AssetDb) {
         for source in self.demanded.drain(..) {
+            let settings = match record_settings(db, &source) {
+                Ok(settings) => settings,
+                Err(e) => {
+                    log::warn!("texture {source:?} failed to load: {e}");
+                    self.cache.fail(source);
+                    continue;
+                }
+            };
             let handle = processor.request::<TextureLoader>(db, source.clone(), ());
-            self.pending.insert(source, handle);
+            self.pending.insert(source, (handle, settings));
         }
 
         let mut done: Vec<(TextureSource, Option<Arc<Texture>>)> = Vec::new();
-        for (source, handle) in self.pending.iter() {
+        for (source, (handle, _)) in self.pending.iter() {
             match handle.get() {
                 None => {}
                 Some(Ok(texture)) => done.push((source.clone(), Some(texture))),
@@ -168,12 +176,14 @@ impl TextureManager {
             }
         }
         for (source, texture) in done {
-            self.pending.remove(&source);
+            let (_, settings) = self
+                .pending
+                .remove(&source)
+                .expect("completed load is pending");
             let Some(texture) = texture else {
                 self.cache.fail(source);
                 continue;
             };
-            let settings = record_settings(db, &source);
             match self.intern_sampler(&settings) {
                 Ok(sampler) => {
                     self.cache
@@ -212,12 +222,9 @@ impl TextureManager {
 
 /// The texture settings of `source`'s DB record (defaults for `Solid` sources
 /// and records without settings).
-fn record_settings(db: &AssetDb, source: &TextureSource) -> TextureSettings {
+fn record_settings(db: &AssetDb, source: &TextureSource) -> Result<TextureSettings, AssetError> {
     let TextureSource::File(guid) = source else {
-        return TextureSettings::default();
+        return Ok(TextureSettings::default());
     };
-    db.record(guid)
-        .and_then(|r| r.settings.as_deref())
-        .and_then(|s| ron::from_str::<TextureSettings>(s).ok())
-        .unwrap_or_default()
+    TextureSettings::from_record(db.record(guid).and_then(|r| r.settings.as_deref()))
 }

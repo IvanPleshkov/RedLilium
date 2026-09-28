@@ -630,9 +630,9 @@ impl System for EguiRender {
 #[derive(Default)]
 pub struct MeshLoad {
     /// Manager generations at the previous scan (mesh, instance, texture,
-    /// environment). Used to gate: unchanged generations → skip the expensive
-    /// scan pass.
+    /// environment). Unchanged generations restrict the scan to changed components.
     last_gens: Option<[u64; 4]>,
+    last_scan_tick: Option<u64>,
 }
 
 impl ExclusiveSystem for MeshLoad {
@@ -678,12 +678,11 @@ impl ExclusiveSystem for MeshLoad {
         let changed = self.last_gens != Some(gens);
         self.last_gens = Some(gens);
 
-        if !changed {
-            return Ok(());
-        }
+        let since = if changed { None } else { self.last_scan_tick };
+        self.last_scan_tick = Some(world.current_tick());
 
         let mut stale: Vec<(&'static str, u32)> = Vec::new();
-        world.scan_asset_refs(None, &mut |component, idx, any| {
+        world.scan_asset_refs(since, &mut |component, idx, any| {
             if let Some(r) = any.downcast_ref::<AssetRef<MeshSource>>() {
                 match mesh_mgr.get(r.source()) {
                     Some(mesh) if !r.is_current(mesh) => stale.push((component, idx)),

@@ -41,7 +41,9 @@ pub trait AssetLoader: 'static {
     /// Assemble the stage sequence for `source`, given any resolved `deps`.
     /// Decided at runtime — omit the IO stage for generated sources, the decode
     /// stage for GPU-ready formats, the GPU stage for prefabs, etc. The last
-    /// stage's output must be the (boxed) `Asset`.
+    /// stage's output must be the (boxed) `Asset`. The sequence must be nonempty;
+    /// a GPU stage is permitted only as the final stage. Invalid sequences fail
+    /// the returned handle with `AssetError::Pipeline` before executing any stage.
     fn pipeline(
         source: &Self::Source,
         deps: &Self::Deps,

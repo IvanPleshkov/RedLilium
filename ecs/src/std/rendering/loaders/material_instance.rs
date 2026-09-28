@@ -32,10 +32,13 @@ impl From<Guid> for MaterialInstanceSource {
 /// A material instance's authored data (DB record `settings`, RON): the parent
 /// material asset and the property values it overrides (others inherit).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaterialInstanceData {
     /// The parent `Material` asset guid.
     pub parent: Guid,
     /// Overridden property values by name; unset slots inherit from the parent.
+    /// Unknown names, duplicates and mismatched types fail resolution, including
+    /// for data published at runtime.
     pub overrides: Vec<(String, PropValue)>,
 }
 
@@ -88,6 +91,18 @@ impl AssetStage for InstanceFromSettingsStage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_instance_fields_are_rejected() {
+        let data = MaterialInstanceData {
+            parent: Guid::stable("parent"),
+            overrides: vec![],
+        };
+        let mut text = ron::to_string(&data).unwrap();
+        text.pop();
+        text.push_str(",overides:[])");
+        assert!(ron::from_str::<MaterialInstanceData>(&text).is_err());
+    }
 
     #[test]
     fn instance_data_ron_roundtrip() {

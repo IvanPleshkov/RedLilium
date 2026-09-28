@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use redlilium_assets::Guid;
+use redlilium_assets::{AssetError, Guid};
 
 use crate::std::rendering::loaders::TextureSource;
 
@@ -50,6 +50,17 @@ pub enum PropValue {
 }
 
 impl PropValue {
+    fn type_name(&self) -> &'static str {
+        match self {
+            Self::Float(_) => "Float",
+            Self::Vec3(_) => "Vec3",
+            Self::Vec4(_) => "Vec4",
+            Self::Texture(_) => "Texture",
+            Self::TextureArray(_) => "TextureArray",
+            Self::StorageBuffer(_) => "StorageBuffer",
+        }
+    }
+
     /// Append this value's little-endian float bytes to `out` (uniform packing).
     /// Textures and storage buffers contribute nothing — they bind as
     /// descriptor slots, not uniform bytes (see [`opaque_bindings`]).
@@ -204,19 +215,55 @@ impl ShadingModel {
     /// Resolve property values against this model's schema: every schema slot in
     /// order, taking the supplied value (matched by name) or the model default.
     /// The result is the canonical packing order for the material binding.
-    pub fn resolve(&self, values: &[(String, PropValue)]) -> Vec<(String, PropValue)> {
-        self.schema
-            .iter()
-            .map(|slot| {
-                let value = values
-                    .iter()
-                    .find(|(n, _)| n == &slot.name)
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or_else(|| slot.default.clone());
-                (slot.name.clone(), value)
-            })
-            .collect()
+    /// Unknown names, duplicate assignments and mismatched value types fail.
+    pub fn resolve(
+        &self,
+        values: &[(String, PropValue)],
+    ) -> Result<Vec<(String, PropValue)>, AssetError> {
+        resolve_properties(
+            self.schema
+                .iter()
+                .map(|slot| (slot.name.as_str(), &slot.default)),
+            values,
+        )
     }
+}
+
+/// Shared validation/overlay for templates and instance overrides. Defaults
+/// supply both the slot order and its type; no numeric or texture coercions.
+pub(crate) fn resolve_properties<'a>(
+    defaults: impl Iterator<Item = (&'a str, &'a PropValue)> + Clone,
+    values: &[(String, PropValue)],
+) -> Result<Vec<(String, PropValue)>, AssetError> {
+    for (index, (name, value)) in values.iter().enumerate() {
+        let Some((_, default)) = defaults.clone().find(|(slot, _)| *slot == name) else {
+            return Err(AssetError::Decode(format!(
+                "unknown material property '{name}'"
+            )));
+        };
+        if values[..index].iter().any(|(previous, _)| previous == name) {
+            return Err(AssetError::Decode(format!(
+                "duplicate material property '{name}'"
+            )));
+        }
+        if std::mem::discriminant(value) != std::mem::discriminant(default) {
+            return Err(AssetError::Decode(format!(
+                "material property '{name}': expected {}, got {}",
+                default.type_name(),
+                value.type_name()
+            )));
+        }
+    }
+    Ok(defaults
+        .map(|(name, default)| {
+            let value = values
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, value)| value)
+                .unwrap_or(default);
+            (name.to_owned(), value.clone())
+        })
+        .collect())
 }
 
 /// The engine's shading-model registry (becomes an ECS resource in a later step).
@@ -460,6 +507,60 @@ impl Default for ShadingRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn property_resolution_validates_names_types_and_duplicates() {
+        let model = ShadingRegistry::opaque_textured();
+        for values in [
+            vec![("base_colour".into(), PropValue::Vec4([1.0; 4]))],
+            vec![("base_color".into(), PropValue::Float(1.0))],
+            vec![(
+                "base_texture".into(),
+                PropValue::TextureArray(TextureSource::WHITE_ARRAY),
+            )],
+            vec![("base_color".into(), PropValue::Vec4([1.0; 4])); 2],
+        ] {
+            assert!(matches!(model.resolve(&values), Err(AssetError::Decode(_))));
+        }
+        let values = vec![
+            (
+                "base_texture".into(),
+                PropValue::Texture(TextureSource::FLAT_NORMAL),
+            ),
+            ("base_color".into(), PropValue::Vec4([0.5; 4])),
+        ];
+        let resolved = model.resolve(&values).unwrap();
+        assert_eq!(resolved[0], values[1]);
+        assert_eq!(resolved[1].1, model.schema[1].default);
+        assert_eq!(resolved[2], values[0]);
+    }
+
+    #[test]
+    fn every_property_kind_requires_its_exact_type() {
+        let kinds = [
+            PropValue::Float(1.0),
+            PropValue::Vec3([1.0; 3]),
+            PropValue::Vec4([1.0; 4]),
+            PropValue::Texture(TextureSource::WHITE),
+            PropValue::TextureArray(TextureSource::WHITE_ARRAY),
+            PropValue::StorageBuffer(StorageBufferSource::Inline(vec![0; 16])),
+        ];
+        for (i, expected) in kinds.iter().enumerate() {
+            for (j, supplied) in kinds.iter().enumerate() {
+                let result = resolve_properties(
+                    std::iter::once(("property", expected)),
+                    &[("property".into(), supplied.clone())],
+                );
+                assert_eq!(result.is_ok(), i == j);
+                if let Err(error) = result {
+                    let message = error.to_string();
+                    assert!(message.contains("property"));
+                    assert!(message.contains(expected.type_name()));
+                    assert!(message.contains(supplied.type_name()));
+                }
+            }
+        }
+    }
 
     /// Texture properties contribute no uniform bytes (they bind as
     /// texture/sampler slots) and are extracted in schema order.

@@ -5,6 +5,8 @@ use redlilium_graphics::GraphicsError;
 /// Error produced while loading an asset (read / decode / gpu stage).
 #[derive(Debug, Clone)]
 pub enum AssetError {
+    /// Invalid pipeline, panicking stage, or interrupted executor task.
+    Pipeline(String),
     /// A file-backed source had no resolved path (DB lookup failed / missing).
     NotResolved,
     /// I/O / VFS failure while reading the source or a referenced file.
@@ -18,6 +20,7 @@ pub enum AssetError {
 impl std::fmt::Display for AssetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Pipeline(m) => write!(f, "asset pipeline error: {m}"),
             Self::NotResolved => write!(f, "asset source has no resolved path"),
             Self::Io(m) => write!(f, "asset I/O error: {m}"),
             Self::Decode(m) => write!(f, "asset decode error: {m}"),

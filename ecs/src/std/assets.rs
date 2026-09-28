@@ -39,7 +39,8 @@ impl System for AssetPump {
             match executor {
                 // Fire-and-forget: the work is already scheduled (tokio / the
                 // compute pool); each future reports its result through the
-                // processor's own channel, so the returned handle is dropped
+                // processor's completion channel (including panic/task-drop
+                // failures), so the returned executor handle is dropped
                 // (neither pool cancels a task when its handle is dropped).
                 Executor::Io => {
                     drop(ctx.io().run(fut));

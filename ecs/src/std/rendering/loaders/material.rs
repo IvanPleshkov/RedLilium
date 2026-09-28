@@ -32,10 +32,12 @@ impl From<Guid> for MaterialSource {
 /// A material's authored data (stored in the DB record `settings` as RON): the
 /// shading model it uses and its property values. Settings-agnostic surface.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaterialData {
     /// The shading model id (looked up in the `ShadingRegistry`).
     pub shading_model: String,
-    /// Property values by name; any omitted slot falls back to the model default.
+    /// Property values by name; omitted slots use the model defaults. Unknown
+    /// names, duplicate assignments and mismatched types fail resolution.
     pub properties: Vec<(String, PropValue)>,
     /// Feature-axis selections for the shader's `//#pragma variant` axes
     /// (#6, Decision 5's material half). Unset axes take their pragma
@@ -90,6 +92,14 @@ impl AssetStage for MaterialFromSettingsStage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_material_fields_are_rejected() {
+        assert!(
+            ron::from_str::<MaterialData>("(shading_model:\"opaque\",properties:[],featuers:[])")
+                .is_err()
+        );
+    }
 
     /// A material with feature selections round-trips through RON, and an old
     /// record without the field parses as "all defaults".

@@ -25,7 +25,7 @@ pub struct VertexLayoutManager {
     /// generated) collapse to one `Arc` so pointer-equality batching holds.
     interned: HashMap<VertexLayout, Arc<VertexLayout>>,
     /// Per-guid memo `(inner Arc ptr → interned Arc)` so a resident hit skips
-    /// the content hash; invalidated implicitly when the inner `Arc` changes.
+    /// the content hash. Cleared on invalidation before an address can be reused.
     memo: HashMap<Guid, (usize, Arc<VertexLayout>)>,
 }
 
@@ -82,8 +82,9 @@ impl VertexLayoutManager {
     /// and skip rebuilding.
     pub fn invalidate(&mut self, guid: Guid) {
         self.inner.invalidate(guid);
-        // The memo entry self-invalidates: the reloaded inner `Arc` is new, so
-        // the stored pointer no longer matches.
+        // `raw_ptr` is an address, not a generation. Once the inner Arc is
+        // released, the allocator may reuse that address for a different layout.
+        self.memo.remove(&guid);
     }
 }
 

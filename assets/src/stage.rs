@@ -32,7 +32,7 @@ pub enum Executor {
     Io,
     /// Compute pool (decode/generate; cooperatively yields if heavy).
     Cpu,
-    /// Render thread, in `on_draw` with the frame graph (GPU residency).
+    /// Final stage on the render thread, with the frame graph (GPU residency).
     Gpu,
 }
 
