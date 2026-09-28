@@ -18,6 +18,19 @@ pub struct Collider2DHandle(pub ColliderHandle);
 #[derive(Debug, Clone, Copy)]
 pub struct ImpulseJoint2DHandle(pub ImpulseJointHandle);
 
+/// Render-side history of the two most recent authoritative fixed-step poses.
+/// [`RecordPhysicsPose2D`](super::systems2d::RecordPhysicsPose2D) records after each
+/// step; [`InterpolatePhysics2D`](super::systems2d::InterpolatePhysics2D) blends
+/// into Transform using Time::fixed_alpha. Angles are radians around Z.
+/// History is runtime-only and is cleared when the body is removed.
+#[derive(Debug, Clone, Copy)]
+pub struct PhysicsInterpolation2D {
+    pub prev_translation: redlilium_core::math::Vec2,
+    pub prev_rotation: f32,
+    pub cur_translation: redlilium_core::math::Vec2,
+    pub cur_rotation: f32,
+}
+
 pub use super::queries2d::{QueryTarget2D, RayHit2D, ShapeCastGeometry2D, ShapeCastHit2D};
 
 /// Temporary access to a body's motion. Dereferences to a read-only Rapier body;

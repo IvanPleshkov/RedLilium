@@ -4,7 +4,9 @@
 //! and manage rigid body / joint creation and removal.
 
 use super::rapier2d::prelude::*;
-use super::world2d::{ImpulseJoint2DHandle, PhysicsWorld2D, RigidBody2DHandle};
+use super::world2d::{
+    ImpulseJoint2DHandle, PhysicsInterpolation2D, PhysicsWorld2D, RigidBody2DHandle,
+};
 
 // ---- StepPhysics2D system ----
 
@@ -141,6 +143,7 @@ impl crate::System for StepPhysics2D {
                         transform.rotation =
                             redlilium_core::math::quat_from_rotation_z(pose.rotation);
                     }
+                    physics.pose_resets.insert(handle);
                 }
                 if let Some(dt) = fixed_dt {
                     physics.integration_parameters.dt = dt as Real;
@@ -187,6 +190,154 @@ impl crate::System for StepPhysics2D {
     }
 }
 
+// ---- Fixed-step pose history + render interpolation ----
+
+/// Records each body's authoritative fixed-step pose into its
+/// [`PhysicsInterpolation2D`] history. Runs in `FixedUpdate` **after**
+/// [`StepPhysics2D`]. Poses are read directly from Rapier, so presentation
+/// changes cannot enter the history. It executes once per fixed step, including the
+/// extra iterations of a catch-up frame, leaving the two most recent steps in
+/// `prev`/`cur`.
+///
+/// Bodies without the component are seeded with `prev == cur`, so a freshly
+/// spawned body renders at its spawn pose instead of lerping in from wherever
+/// the history would otherwise have started.
+pub struct RecordPhysicsPose2D;
+
+impl crate::System for RecordPhysicsPose2D {
+    type Result = ();
+    fn run<'a>(
+        &'a self,
+        ctx: &'a crate::SystemContext<'a>,
+    ) -> Result<(), crate::system::SystemError> {
+        let to_seed = ctx
+            .lock::<(
+                crate::Read<RigidBody2DHandle>,
+                crate::ResMut<PhysicsWorld2D>,
+                crate::WriteAll<PhysicsInterpolation2D>,
+            )>()
+            .execute(|(handles, mut physics, mut interps)| {
+                redlilium_core::profile_scope!("ecs: record_physics_pose_2d");
+                let mut seed = Vec::new();
+                for (idx, handle) in handles.iter() {
+                    let Some(body) = physics.bodies.get(handle.0) else {
+                        continue;
+                    };
+                    if body.is_fixed() {
+                        continue;
+                    }
+                    let pose = super::control2d::PhysicsPose2D::from_rapier(body.position());
+                    let reset = physics.pose_resets.remove(&handle.0);
+                    if let Some(mut interp) = interps.get_mut(idx) {
+                        interp.prev_translation = if reset {
+                            pose.translation
+                        } else {
+                            interp.cur_translation
+                        };
+                        interp.prev_rotation = if reset {
+                            pose.rotation
+                        } else {
+                            interp.cur_rotation
+                        };
+                        interp.cur_translation = pose.translation;
+                        interp.cur_rotation = pose.rotation;
+                    } else if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
+                        seed.push((entity, handle.0, pose.translation, pose.rotation));
+                    }
+                }
+                seed
+            });
+
+        if !to_seed.is_empty() {
+            ctx.commands(move |world| {
+                for (entity, handle, translation, rotation) in to_seed {
+                    if world.is_alive(entity)
+                        && world
+                            .get::<RigidBody2DHandle>(entity)
+                            .is_some_and(|h| h.0 == handle)
+                    {
+                        let _ = world.insert(
+                            entity,
+                            PhysicsInterpolation2D {
+                                prev_translation: translation,
+                                prev_rotation: rotation,
+                                cur_translation: translation,
+                                cur_rotation: rotation,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Blends each body's two most recent fixed-step poses into `Transform` for
+/// rendering, by the frame's [`Time::fixed_alpha`](crate::Time::fixed_alpha).
+///
+/// Runs in `PostUpdate` **before** transform propagation, so the interpolated
+/// pose is what `GlobalTransform` and rendering see. Z translation is preserved.
+/// Rotation follows the shortest arc; rotations exceeding half a turn per fixed
+/// step need a higher physics tick rate. Only dynamic and kinematic
+/// bodies are interpolated; their Transform is output only. Fixed bodies read
+/// Transform as input before each step and are never interpolated.
+pub struct InterpolatePhysics2D;
+
+impl crate::System for InterpolatePhysics2D {
+    type Result = ();
+    fn run<'a>(
+        &'a self,
+        ctx: &'a crate::SystemContext<'a>,
+    ) -> Result<(), crate::system::SystemError> {
+        // Worlds ticked without `run_frame` carry no `Time`; there is no
+        // accumulator to blend against, so show the latest step.
+        let alpha = {
+            let world = ctx.raw_world();
+            let banked = if world.has_resource::<crate::Time>() {
+                world.resource::<crate::Time>().fixed_alpha() as f32
+            } else {
+                1.0
+            };
+            banked.clamp(0.0, 1.0)
+        };
+
+        ctx.lock::<(
+            crate::Read<PhysicsInterpolation2D>,
+            crate::Read<RigidBody2DHandle>,
+            crate::Res<PhysicsWorld2D>,
+            crate::WriteAll<crate::Transform>,
+        )>()
+        .execute(|(interps, handles, physics, mut transforms)| {
+            redlilium_core::profile_scope!("ecs: interpolate_physics_2d");
+            for (idx, interp) in interps.iter() {
+                if !handles
+                    .get(idx)
+                    .and_then(|h| physics.bodies.get(h.0))
+                    .is_some_and(|body| !body.is_fixed())
+                {
+                    continue;
+                }
+                let Some(mut transform) = transforms.get_mut(idx) else {
+                    continue;
+                };
+                let translation = interp.prev_translation.lerp(&interp.cur_translation, alpha);
+                transform.translation.x = translation.x;
+                transform.translation.y = translation.y;
+                // Preserve presentation Z (draw ordering) and scale. Use the
+                // shortest arc across the -pi/pi branch cut, as in 3D slerp.
+                let delta = interp.cur_rotation - interp.prev_rotation;
+                let shortest = (delta + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                transform.rotation = redlilium_core::math::quat_from_rotation_z(
+                    interp.prev_rotation + shortest * alpha,
+                );
+            }
+        });
+        Ok(())
+    }
+}
+
 // Remove through Rapier first, then reconcile joints against the actual set.
 // Descriptor endpoints may already have changed, so they are not a reliable
 // source for discovering which live joints the removed bodies owned.
@@ -228,6 +379,7 @@ fn remove_body_components(
     for &entity in bodies {
         if world.is_alive(entity) {
             let _ = world.remove::<RigidBody2DHandle>(entity);
+            let _ = world.remove::<PhysicsInterpolation2D>(entity);
         }
     }
 }

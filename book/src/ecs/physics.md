@@ -40,8 +40,8 @@ A managed body requires `RigidBody*` and `Transform`. On the next body sync,
 removing either component, despawning the entity or excluding it from game
 queries removes the Rapier body, its colliders and attached joints. Their mappings
 and handle components are cleaned up too. Removing a `Collider*` removes only
-that collider; the body and its joints survive even with no colliders. In 3D, body removal
-also clears `PhysicsInterpolation`; recreating a body starts a fresh history.
+that collider; the body and its joints survive even with no colliders. Body removal
+also clears `PhysicsInterpolation` (3D) or `PhysicsInterpolation2D`; recreating a body starts a fresh history.
 Deferred creation validates the full entity identity and prerequisites again
 when publishing handles and removes cancelled Rapier objects.
 
@@ -68,9 +68,40 @@ unsupported hierarchy/scale or invalid pose, before their simulation step.
 
 Dynamic and kinematic transforms are presentation output. Writing one does not
 teleport a body. `PhysicsWorld3D::pose(entity)` (or its 2D equivalent) reads the
-current simulation pose. In 3D, `RecordPhysicsPose` reads Rapier directly after
-each step; `InterpolatePhysics` writes presentation transforms before global
-transform propagation. Fixed bodies are never interpolated.
+current simulation pose. `RecordPhysicsPose` (3D) / `RecordPhysicsPose2D` reads
+Rapier directly after each step; `InterpolatePhysics` / `InterpolatePhysics2D`
+writes presentation transforms before global transform propagation. Fixed bodies
+are never interpolated.
+
+Interpolation is opt-in by scheduling both systems. The 2D wiring is:
+
+```rust,ignore
+use redlilium_ecs::physics::systems2d::{
+    StepPhysics2D, RecordPhysicsPose2D, InterpolatePhysics2D,
+};
+let fixed = schedules.get_mut::<FixedUpdate>();
+fixed.add(StepPhysics2D); // After body/joint sync and motion-input systems.
+fixed.add(RecordPhysicsPose2D);
+fixed.add_edge::<StepPhysics2D, RecordPhysicsPose2D>()?;
+let post = schedules.get_mut::<PostUpdate>();
+post.add(InterpolatePhysics2D);
+post.add(UpdateGlobalTransforms);
+post.add_edge::<InterpolatePhysics2D, UpdateGlobalTransforms>()?;
+```
+
+Each fixed step shifts the two recorded poses, including multiple catch-up steps
+in one frame. Rendering blends them by `Time::fixed_alpha`, adding one fixed step
+of presentation latency. Without `Time`, it shows the latest recorded pose.
+New histories start with identical previous/current poses; teleports and body-type
+changes reset the history. Physics never consumes the interpolated transform of a
+moving body.
+
+2D interpolation blends XY translation and the shortest angular arc around Z,
+preserving `Transform.translation.z` for draw ordering and leaving scale unchanged.
+Angles crossing ±π interpolate through that boundary, not through zero. Like 3D
+shortest-arc interpolation, it cannot recover rotations exceeding half a turn
+between recorded poses; use a higher physics tick rate for such motion. History
+components are runtime data and are not serialized with scenes.
 
 Call `register_std_components` when preparing the world, including the control
 components. A position target is persistent: absent input holds the current
