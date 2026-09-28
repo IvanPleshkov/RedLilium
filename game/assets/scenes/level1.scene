@@ -1040,7 +1040,7 @@
         component_schemas: {
             "DirectionalLight": "12b906e5389ce958",
             "Name": "e8b72b8ee639d17d",
-            "RigidBody3D": "4c303fe7f34110a5",
+            "RigidBody3D": "fff886ffc9f9527b",
             "Children": "2bb9642f7f8700bb",
             "FollowCamera": "21d1db18d14cff54",
             "EditorOnly": "c680d604bee70f02",
@@ -1048,7 +1048,7 @@
             "CarSpawn": "c680d604bee70f02",
             "RenderPath": "a423c0d36d1e6289",
             "CameraOutput": "ac6c44bbf8aba2c0",
-            "Collider3D": "a39247f1249750e7",
+            "Collider3D": "3423acdc4b89a332",
             "Parent": "a91799e57333f547",
             "PointLight": "c2de590ad3761220",
             "Visibility": "c1bac1b299fc1b84",

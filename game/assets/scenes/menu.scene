@@ -745,7 +745,7 @@
         engine_fingerprint: "",
         timestamp: 1784462088,
         component_schemas: {
-            "RigidBody3D": "4c303fe7f34110a5",
+            "RigidBody3D": "fff886ffc9f9527b",
             "RoadSegment": "0b419cbd0c745715",
             "SpotLight": "00945c87ce2de8db",
             "Name": "e8b72b8ee639d17d",
@@ -757,7 +757,7 @@
             "CarSpawn": "c680d604bee70f02",
             "EditorOnly": "c680d604bee70f02",
             "EdgeAnchor": "8bd5bd105a1910c6",
-            "Collider3D": "a39247f1249750e7",
+            "Collider3D": "3423acdc4b89a332",
             "Parent": "a91799e57333f547",
             "PointLight": "c2de590ad3761220",
             "FollowCamera": "21d1db18d14cff54",
