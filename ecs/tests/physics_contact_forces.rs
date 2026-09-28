@@ -95,7 +95,7 @@ macro_rules! force_tests {
                     assert_eq!(e.step, 1);
                     assert_eq!(e.strongest_contact.normal_impulse, e.normal_impulse);
                     assert!((e.strongest_contact.point.x - 0.5).abs() < 0.05, "{e:?}");
-                    let sign = if e.a.entity == Some(fixed) { 1.0 } else { -1.0 };
+                    let sign = if e.a.body_entity == Some(fixed) { 1.0 } else { -1.0 };
                     assert!((e.strongest_contact.normal.x - sign).abs() < 1e-5, "{e:?}");
                     assert_eq!(e.strongest_contact.normal.y, 0.0);
                     assert!(e.a.collider.into_raw_parts() < e.b.collider.into_raw_parts());
@@ -104,7 +104,7 @@ macro_rules! force_tests {
                     w.despawn(moving);
                     assert!(sync(&mut w, regular).is_empty());
                     assert_eq!(read(&w), events);
-                    assert!(!w.is_alive(e.a.entity.unwrap()));
+                    assert!(!w.is_alive(e.a.body_entity.unwrap()));
                 }
             }
         }
@@ -218,8 +218,8 @@ macro_rules! force_tests {
             assert!(EcsRunner::multi_thread(2).run(&mut w, &systems).is_empty());
             let events = read(&w);
             assert_eq!(events.len(), 1);
-            assert!([events[0].a.entity, events[0].b.entity].contains(&Some(a)));
-            assert!([events[0].a.entity, events[0].b.entity].contains(&Some(b)));
+            assert!([events[0].a.body_entity, events[0].b.body_entity].contains(&Some(a)));
+            assert!([events[0].a.body_entity, events[0].b.body_entity].contains(&Some(b)));
         }
 
         #[test]
@@ -298,7 +298,7 @@ macro_rules! force_tests {
                     let e = events[0];
                     let participant = if e.a.collider == free { e.a } else { e.b };
                     assert_eq!(participant.body, None);
-                    assert_eq!(participant.entity, None);
+                    assert_eq!(participant.body_entity, None);
                 } else {
                     assert!(events.is_empty());
                 }

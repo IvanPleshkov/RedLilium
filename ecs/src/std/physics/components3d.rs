@@ -22,6 +22,126 @@ pub enum ColliderShape3D {
     CapsuleY { half_height: f32, radius: f32 },
     /// Cylinder (Y-axis) defined by half height and radius.
     Cylinder { half_height: f32, radius: f32 },
+    /// One collider with a flat list of primitive parts and shared settings.
+    Compound { parts: Vec<ColliderPart3D> },
+}
+
+/// Explicit physical owner; absent means the body on the same entity.
+/// Independent of Parent/Transform. A missing body leaves the collider inactive.
+#[derive(Debug, Clone, Copy, PartialEq, crate::Component)]
+pub struct ColliderBody3D {
+    pub body: crate::Entity,
+}
+
+/// Local pose relative to the body (or to the collider for a compound part).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ColliderPose3D {
+    pub translation: redlilium_core::math::Vec3,
+    pub rotation: redlilium_core::math::Quat,
+}
+impl Default for ColliderPose3D {
+    fn default() -> Self {
+        Self {
+            translation: redlilium_core::math::Vec3::zeros(),
+            rotation: redlilium_core::math::Quat::identity(),
+        }
+    }
+}
+impl ColliderPose3D {
+    pub(super) fn to_rapier(self) -> Pose {
+        super::control3d::PhysicsPose3D {
+            translation: self.translation,
+            rotation: self.rotation,
+        }
+        .to_rapier()
+    }
+    pub(super) fn validate(&self, entity: crate::Entity) -> Result<(), crate::SystemError> {
+        super::control3d::PhysicsPose3D {
+            translation: self.translation,
+            rotation: self.rotation,
+        }
+        .validate(entity)
+    }
+}
+
+/// Primitive geometry of a compound part. Compounds cannot nest.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ColliderPrimitive3D {
+    /// Sphere defined by radius.
+    Ball { radius: f32 },
+    /// Box defined by half extents along each axis.
+    Cuboid { half_extents: Vec3 },
+    /// Capsule (Y-axis) defined by half height and radius.
+    CapsuleY { half_height: f32, radius: f32 },
+    /// Cylinder (Y-axis) defined by half height and radius.
+    Cylinder { half_height: f32, radius: f32 },
+}
+
+/// Geometry and pose only; material, groups and events belong to the collider.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ColliderPart3D {
+    pub shape: ColliderPrimitive3D,
+    pub local_pose: ColliderPose3D,
+}
+impl ColliderPart3D {
+    pub fn ball(radius: f32) -> Self {
+        Self {
+            shape: ColliderPrimitive3D::Ball { radius },
+            local_pose: Default::default(),
+        }
+    }
+    pub fn cuboid(half_extents: redlilium_core::math::Vec3) -> Self {
+        Self {
+            shape: ColliderPrimitive3D::Cuboid { half_extents },
+            local_pose: Default::default(),
+        }
+    }
+    pub fn capsule_y(half_height: f32, radius: f32) -> Self {
+        Self {
+            shape: ColliderPrimitive3D::CapsuleY {
+                half_height,
+                radius,
+            },
+            local_pose: Default::default(),
+        }
+    }
+    pub fn with_local_pose(mut self, pose: ColliderPose3D) -> Self {
+        self.local_pose = pose;
+        self
+    }
+}
+impl ColliderPart3D {
+    pub fn cylinder(half_height: f32, radius: f32) -> Self {
+        Self {
+            shape: ColliderPrimitive3D::Cylinder {
+                half_height,
+                radius,
+            },
+            local_pose: Default::default(),
+        }
+    }
+}
+impl From<ColliderPrimitive3D> for ColliderShape3D {
+    fn from(value: ColliderPrimitive3D) -> Self {
+        match value {
+            ColliderPrimitive3D::Ball { radius } => Self::Ball { radius },
+            ColliderPrimitive3D::Cuboid { half_extents } => Self::Cuboid { half_extents },
+            ColliderPrimitive3D::CapsuleY {
+                half_height,
+                radius,
+            } => Self::CapsuleY {
+                half_height,
+                radius,
+            },
+            ColliderPrimitive3D::Cylinder {
+                half_height,
+                radius,
+            } => Self::Cylinder {
+                half_height,
+                radius,
+            },
+        }
+    }
 }
 
 /// Rigid body type.
@@ -40,8 +160,7 @@ pub enum RigidBodyType {
 
 /// Describes a 3D rigid body's type and physical properties.
 ///
-/// Attach this component to an entity along with [`Collider3D`] and
-/// [`Transform`](crate::Transform), then run
+/// Attach this component to an entity along with [`Transform`](crate::Transform), then run
 /// [`SyncPhysicsBodies3D`](super::physics3d::SyncPhysicsBodies3D).
 /// Sync validates settings before creating or updating Rapier objects.
 // Serialized: scenes/prefabs must carry physics authoring data (#101/#106).
@@ -139,6 +258,8 @@ impl Default for RigidBody3D {
 pub struct Collider3D {
     /// Collider shape.
     pub shape: ColliderShape3D,
+    /// Pose relative to the owning body, independent of visual Transform.
+    pub local_pose: ColliderPose3D,
     /// Friction coefficient.
     pub friction: f32,
     /// Restitution (bounciness, 0.0–1.0).
@@ -158,6 +279,17 @@ pub struct Collider3D {
 }
 
 impl Collider3D {
+    pub fn compound(parts: Vec<ColliderPart3D>) -> Self {
+        Self {
+            shape: ColliderShape3D::Compound { parts },
+            ..Default::default()
+        }
+    }
+    pub fn with_local_pose(mut self, pose: ColliderPose3D) -> Self {
+        self.local_pose = pose;
+        self
+    }
+
     pub fn ball(radius: f32) -> Self {
         Self {
             shape: ColliderShape3D::Ball { radius },
@@ -258,6 +390,7 @@ impl Default for Collider3D {
     fn default() -> Self {
         Self {
             shape: ColliderShape3D::Ball { radius: 0.5 },
+            local_pose: Default::default(),
             friction: 0.5,
             restitution: 0.0,
             density: 1.0,
@@ -301,7 +434,7 @@ pub enum JointType3D {
 ///
 /// Attach this component to a (possibly dedicated) entity to create a joint
 /// constraint. The `body1` and `body2` fields reference entities that must
-/// have [`RigidBody3D`] + [`Collider3D`] components.
+/// have [`RigidBody3D`] + [`Transform`](crate::Transform) components.
 ///
 /// Entity references are automatically remapped during prefab instantiation
 /// via the `#[derive(Component)]` macro.
@@ -394,7 +527,9 @@ impl ImpulseJoint3D {
 // ---------------------------------------------------------------------------
 
 use super::rapier3d::prelude::*;
-use super::world3d::{PhysicsWorld3D, RigidBody3DHandle};
+use super::world3d::PhysicsWorld3D;
+#[cfg(test)]
+use super::world3d::RigidBody3DHandle;
 
 // The descriptor is validated before conversion; rescaling handles very small
 // and very large finite directions without changing their orientation.
@@ -499,24 +634,10 @@ impl Collider3D {
     pub(crate) fn to_collider(&self) -> Collider {
         use redlilium_core::math::Real;
 
-        let shared = match &self.shape {
-            ColliderShape3D::Ball { radius } => SharedShape::ball(*radius as Real),
-            ColliderShape3D::Cuboid { half_extents } => SharedShape::cuboid(
-                half_extents.x as Real,
-                half_extents.y as Real,
-                half_extents.z as Real,
-            ),
-            ColliderShape3D::CapsuleY {
-                half_height,
-                radius,
-            } => SharedShape::capsule_y(*half_height as Real, *radius as Real),
-            ColliderShape3D::Cylinder {
-                half_height,
-                radius,
-            } => SharedShape::cylinder(*half_height as Real, *radius as Real),
-        };
+        let shared = self.shape.to_shared_shape();
 
         ColliderBuilder::new(shared)
+            .position(self.local_pose.to_rapier())
             .friction(self.friction as Real)
             .restitution(self.restitution as Real)
             .density(self.density as Real)
@@ -573,53 +694,26 @@ impl Collider3D {
     note = "Use `SyncPhysicsBodies3D` exclusive system instead, which automatically tracks spawns and despawns."
 )]
 pub fn build_physics_world_3d(world: &mut crate::World) -> Result<(), crate::SystemError> {
-    // Phase 1: collect entity data (clone non-Copy components, copy the rest)
-    let entities: Vec<_> = world
+    for entity in world
         .iter_entities()
-        .filter_map(|entity| {
-            let body = world.get::<RigidBody3D>(entity)?.clone();
-            let collider = world.get::<Collider3D>(entity)?.clone();
-            let transform = *world.get::<crate::Transform>(entity)?;
-            Some((entity, body, collider, transform))
-        })
-        .collect();
-
-    for (entity, body, collider, transform) in &entities {
-        body.validate(*entity)?;
-        collider.validate(*entity)?;
-        super::validation::transform(
-            *entity,
-            transform,
-            world.get::<crate::Parent>(*entity).is_some(),
-        )?;
+        .filter(|e| !world.is_excluded_from_game(*e))
+    {
+        if let Some(body) = world.get::<RigidBody3D>(entity) {
+            body.validate(entity)?;
+            if let Some(t) = world.get::<crate::Transform>(entity) {
+                super::validation::transform(
+                    entity,
+                    t,
+                    world.get::<crate::Parent>(entity).is_some(),
+                )?;
+            }
+        }
+        if let Some(collider) = world.get::<Collider3D>(entity) {
+            collider.validate(entity)?;
+        }
     }
-
-    // Phase 2: build rapier world from descriptors
-    let mut physics = PhysicsWorld3D::default();
-    let mut handle_pairs = Vec::with_capacity(entities.len());
-
-    for (entity, body_desc, collider_desc, transform) in &entities {
-        let rapier_body = body_desc.to_rigid_body(transform);
-        let body_handle = physics.add_body(rapier_body);
-
-        let rapier_collider = collider_desc.to_collider();
-        let collider_handle = physics.add_collider(rapier_collider, body_handle);
-        physics.applied_bodies.insert(
-            body_handle,
-            (body_desc.clone(), collider_desc.clone(), collider_handle),
-        );
-
-        physics.entity_to_body.insert(*entity, body_handle);
-        physics.body_to_entity.insert(body_handle, *entity);
-        handle_pairs.push((*entity, body_handle));
-    }
-
-    // Phase 3: insert resource and handles
-    world.insert_resource(physics);
-    for (entity, handle) in handle_pairs {
-        let _ = world.insert(entity, RigidBody3DHandle(handle));
-    }
-    Ok(())
+    world.insert_resource(PhysicsWorld3D::default());
+    crate::ExclusiveSystem::run(&mut super::systems3d::SyncPhysicsBodies3D, world)
 }
 
 #[cfg(test)]
@@ -723,5 +817,74 @@ mod tests {
         let physics = world.resource::<PhysicsWorld3D>();
         assert_eq!(physics.bodies.len(), 2);
         assert_eq!(physics.colliders.len(), 2);
+    }
+}
+
+impl ColliderShape3D {
+    pub(super) fn to_shared_shape(&self) -> SharedShape {
+        match self {
+            ColliderShape3D::Ball { radius } => SharedShape::ball(*radius as Real),
+            ColliderShape3D::Cuboid { half_extents } => SharedShape::cuboid(
+                half_extents.x as Real,
+                half_extents.y as Real,
+                half_extents.z as Real,
+            ),
+            ColliderShape3D::CapsuleY {
+                half_height,
+                radius,
+            } => SharedShape::capsule_y(*half_height as Real, *radius as Real),
+            ColliderShape3D::Cylinder {
+                half_height,
+                radius,
+            } => SharedShape::cylinder(*half_height as Real, *radius as Real),
+            ColliderShape3D::Compound { parts } => SharedShape::compound(
+                parts
+                    .iter()
+                    .map(|part| {
+                        (
+                            part.local_pose.to_rapier(),
+                            ColliderShape3D::from(part.shape.clone()).to_shared_shape(),
+                        )
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl crate::ComponentField for ColliderPose3D {
+    fn inspect_field(
+        &self,
+        name: &str,
+        ui: &mut egui::Ui,
+        ctx: &crate::FieldInspectCtx<'_>,
+    ) -> Option<Self> {
+        ui.push_id(name, |ui| {
+            ui.label(name);
+            let mut edited = *self;
+            let translation = self.translation.inspect_field("Translation", ui, ctx);
+            let rotation = self.rotation.inspect_field("Rotation", ui, ctx);
+            if let Some(v) = translation {
+                edited.translation = v;
+            }
+            if let Some(v) = rotation {
+                edited.rotation = v;
+            }
+            (translation.is_some() || rotation.is_some()).then_some(edited)
+        })
+        .inner
+    }
+    fn serialize_field(
+        &self,
+        name: &str,
+        ctx: &mut crate::serialize::SerializeContext<'_>,
+    ) -> Result<(), crate::serialize::SerializeError> {
+        ctx.write_serde(name, self)
+    }
+    fn deserialize_field(
+        name: &str,
+        ctx: &mut crate::serialize::DeserializeContext<'_>,
+    ) -> Result<Self, crate::serialize::DeserializeError> {
+        ctx.read_serde(name)
     }
 }

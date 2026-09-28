@@ -73,7 +73,7 @@ macro_rules! world_boundary_tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(hit.target.collider, collider);
-            assert_eq!(hit.target.entity, Some(entity));
+            assert_eq!(hit.target.body_entity, Some(entity));
             // Query membership must also be accepted by the collider.
             assert!(
                 physics
@@ -120,7 +120,7 @@ macro_rules! world_boundary_tests {
                 .unwrap();
             assert_eq!(hit.target.collider, free);
             assert_eq!(hit.target.body, None);
-            assert_eq!(hit.target.entity, None);
+            assert_eq!(hit.target.body_entity, None);
             assert!((hit.fraction - 0.15).abs() < 1e-5);
             let only_ecs = |_: ColliderHandle, c: &Collider| {
                 c.parent()
@@ -138,7 +138,7 @@ macro_rules! world_boundary_tests {
                 .unwrap();
             assert_eq!(hit.target.collider, collider);
             assert_eq!(hit.target.body, Some(body));
-            assert_eq!(hit.target.entity, Some(entity));
+            assert_eq!(hit.target.body_entity, Some(entity));
             assert!((hit.fraction - 0.45).abs() < 1e-5);
             // Doubling displacement halves the hit fraction without changing the surface.
             let hit = physics
@@ -195,7 +195,7 @@ macro_rules! world_boundary_tests {
                 .unwrap();
             assert_eq!(hit.target.collider, collider);
             assert_eq!(hit.target.body, Some(body));
-            assert_eq!(hit.target.entity, None);
+            assert_eq!(hit.target.body_entity, None);
         }
 
         #[test]

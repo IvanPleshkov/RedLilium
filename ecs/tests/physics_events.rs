@@ -386,8 +386,8 @@ macro_rules! event_tests {
                 let start = read(&w, &fast);
                 assert_eq!(phases(&start), [Phase::Started]);
                 assert_eq!(start[0].step, 1);
-                assert!(start[0].a.entity == Some(a) || start[0].b.entity == Some(a));
-                assert!(start[0].a.entity == Some(b) || start[0].b.entity == Some(b));
+                assert!(start[0].a.body_entity == Some(a) || start[0].b.body_entity == Some(a));
+                assert!(start[0].a.body_entity == Some(b) || start[0].b.body_entity == Some(b));
                 assert_ne!(start[0].a.is_sensor, start[0].b.is_sensor);
                 assert!(read(&w, &fast).is_empty());
                 advance(&mut w);
@@ -523,8 +523,8 @@ macro_rules! event_tests {
                 let cursor = EventCursor::new();
                 let started = read(&w, &cursor);
                 assert_eq!(phases(&started), [Phase::Started]);
-                assert!(started[0].a.entity == Some(a) || started[0].b.entity == Some(a));
-                assert!(started[0].a.entity == Some(b) || started[0].b.entity == Some(b));
+                assert!(started[0].a.body_entity == Some(a) || started[0].b.body_entity == Some(a));
+                assert!(started[0].a.body_entity == Some(b) || started[0].b.body_entity == Some(b));
                 if !cancel {
                     w.despawn(b);
                     sync(&mut w, true);
@@ -841,7 +841,9 @@ macro_rules! event_tests {
                     [Phase::Stopped(Reason::Removed), Phase::Started]
                 );
                 assert_eq!((start.a, start.b), (events[0].a, events[0].b));
-                assert!(events[1].a.entity == Some(new) || events[1].b.entity == Some(new));
+                assert!(
+                    events[1].a.body_entity == Some(new) || events[1].b.body_entity == Some(new)
+                );
                 assert!(events.iter().all(|e| e.step == 2));
             }
         }
@@ -867,7 +869,7 @@ macro_rules! event_tests {
                 start[0].b
             };
             assert_eq!(participant.collider, free);
-            assert_eq!(participant.entity, None);
+            assert_eq!(participant.body_entity, None);
             assert_eq!(participant.body, None);
             assert!(participant.is_sensor);
             assert!(w.resource_mut::<Physics>().remove_free_collider(free));
@@ -946,7 +948,7 @@ macro_rules! event_tests {
                 [Phase::Started, Phase::Stopped(Reason::Separated)]
             );
             assert_eq!(all.iter().map(|e| e.step).collect::<Vec<_>>(), [1, 2]);
-            assert!(all[0].a.entity == Some(a) || all[0].b.entity == Some(a));
+            assert!(all[0].a.body_entity == Some(a) || all[0].b.body_entity == Some(a));
             schedules.run_frame(&mut w, &EcsRunner::single_thread(), 0.0);
             assert!(read(&w, &fast).is_empty());
             schedules.run_frame(&mut w, &EcsRunner::single_thread(), 0.0);

@@ -136,11 +136,9 @@ impl PhysicsWorld3D {
         &mut self,
         handle: RigidBodyHandle,
         desc: &super::components3d::RigidBody3D,
-        collider: &super::components3d::Collider3D,
     ) {
         use super::components3d::RigidBodyType as Kind;
-        let Some((old_body, old_collider, collider_handle)) = self.applied_bodies.get_mut(&handle)
-        else {
+        let Some(old_body) = self.applied_bodies.get_mut(&handle) else {
             return;
         };
         let Some(body) = self.bodies.get_mut(handle) else {
@@ -158,9 +156,11 @@ impl PhysicsWorld3D {
                     true,
                 );
                 self.pose_resets.insert(handle);
-                if let Some(live) = self.colliders.get(*collider_handle) {
-                    self.collision_events
-                        .collider_changed(*collider_handle, live);
+                for &collider_handle in body.colliders() {
+                    if let Some(live) = self.colliders.get(collider_handle) {
+                        self.collision_events
+                            .collider_changed(collider_handle, live);
+                    }
                 }
             }
             body.set_locked_axes(desc.locked_axes.unwrap_or_default().into(), true);
@@ -175,11 +175,23 @@ impl PhysicsWorld3D {
             body.wake_up(true);
             *old_body = desc.clone();
         }
+    }
+    pub(super) fn apply_collider_settings(
+        &mut self,
+        collider_handle: ColliderHandle,
+        collider: &super::components3d::Collider3D,
+    ) {
+        let Some(old_collider) = self.applied_colliders.get_mut(&collider_handle) else {
+            return;
+        };
         if old_collider != collider
-            && let Some(live) = self.colliders.get_mut(*collider_handle)
+            && let Some(live) = self.colliders.get_mut(collider_handle)
         {
             if old_collider.shape != collider.shape {
-                live.set_shape(collider.to_collider().shared_shape().clone());
+                live.set_shape(collider.shape.to_shared_shape());
+            }
+            if old_collider.local_pose != collider.local_pose {
+                live.set_position_wrt_parent(collider.local_pose.to_rapier());
             }
             live.set_density(collider.density as Real);
             live.set_friction(collider.friction as Real);
@@ -219,7 +231,7 @@ impl PhysicsWorld3D {
                 );
                 self.collision_events
                     .forces
-                    .configure(*collider_handle, live);
+                    .configure(collider_handle, live);
                 // Rapier's event flag setter does not dirty existing solver pairs.
                 let groups = live.collision_groups();
                 live.set_collision_groups(InteractionGroups {
@@ -234,9 +246,11 @@ impl PhysicsWorld3D {
                 || old_collider.collision_types != collider.collision_types
             {
                 self.collision_events
-                    .collider_changed(*collider_handle, live);
+                    .collider_changed(collider_handle, live);
             }
-            body.wake_up(true);
+            if let Some(body) = live.parent().and_then(|h| self.bodies.get_mut(h)) {
+                body.wake_up(true);
+            }
             *old_collider = collider.clone();
         }
     }

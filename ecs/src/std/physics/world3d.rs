@@ -139,7 +139,7 @@ impl BodyMotion3D<'_> {
 /// // In a system, cast a ray and get the hit entity:
 /// ctx.lock::<(Res<PhysicsWorld3D>,)>().execute(|(physics,)| {
 ///     if let Ok(Some(hit)) = physics.cast_ray(origin, displacement, RayCastOptions::default(), QueryFilter::default()) {
-///         // `hit.target.entity` is Some(entity) for an ECS-managed body
+///         // `hit.target.body_entity` is Some(entity) for an ECS-managed body
 ///     }
 /// });
 /// ```
@@ -154,14 +154,10 @@ pub struct PhysicsWorld3D {
         ),
     >,
     pub(super) pose_resets: std::collections::HashSet<RigidBodyHandle>,
-    pub(super) applied_bodies: HashMap<
-        RigidBodyHandle,
-        (
-            super::components3d::RigidBody3D,
-            super::components3d::Collider3D,
-            ColliderHandle,
-        ),
-    >,
+    pub(super) applied_bodies: HashMap<RigidBodyHandle, super::components3d::RigidBody3D>,
+    pub(super) applied_colliders: HashMap<ColliderHandle, super::components3d::Collider3D>,
+    pub(super) entity_to_collider: HashMap<crate::Entity, ColliderHandle>,
+    pub(super) collider_to_entity: HashMap<ColliderHandle, crate::Entity>,
     pub(super) applied_joints: HashMap<ImpulseJointHandle, super::components3d::ImpulseJoint3D>,
     pub gravity: Vector,
     pub integration_parameters: IntegrationParameters,
@@ -192,6 +188,9 @@ impl Default for PhysicsWorld3D {
             teleports: HashMap::new(),
             pose_resets: Default::default(),
             applied_bodies: HashMap::new(),
+            applied_colliders: HashMap::new(),
+            entity_to_collider: HashMap::new(),
+            collider_to_entity: HashMap::new(),
             applied_joints: HashMap::new(),
             gravity: Vector::new(0.0, -9.81, 0.0),
             integration_parameters: IntegrationParameters::default(),
@@ -289,6 +288,7 @@ impl PhysicsWorld3D {
             &self.bodies,
             &self.narrow_phase,
             &self.body_to_entity,
+            &self.collider_to_entity,
         );
     }
 
@@ -349,6 +349,39 @@ impl PhysicsWorld3D {
         handle
     }
 
+    /// Removes a managed collider without removing its owning body or joints.
+    pub(super) fn remove_collider(&mut self, handle: ColliderHandle) {
+        self.collision_events.collider_removed(handle);
+        self.applied_colliders.remove(&handle);
+        if let Some(entity) = self.collider_to_entity.remove(&handle) {
+            if self.entity_to_collider.get(&entity) == Some(&handle) {
+                self.entity_to_collider.remove(&entity);
+            }
+        }
+        self.colliders.remove(
+            handle,
+            &mut self.island_manager,
+            &mut self.bodies,
+            &mut self.soft_bodies,
+            true,
+        );
+    }
+
+    /// The live managed collider on this entity, independently of its body owner.
+    pub fn collider_for_entity(&self, entity: crate::Entity) -> Option<ColliderHandle> {
+        self.entity_to_collider
+            .get(&entity)
+            .copied()
+            .filter(|h| self.colliders.contains(*h))
+    }
+    /// ECS entity carrying this collider's descriptor; free colliders have no owner.
+    pub fn entity_for_collider(&self, handle: ColliderHandle) -> Option<crate::Entity> {
+        self.collider_to_entity
+            .get(&handle)
+            .copied()
+            .filter(|_| self.colliders.contains(handle))
+    }
+
     /// Adds an impulse joint between two bodies and returns its handle.
     pub(super) fn add_impulse_joint(
         &mut self,
@@ -361,7 +394,6 @@ impl PhysicsWorld3D {
 
     /// Removes a rigid body and all its attached colliders and joints.
     pub(super) fn remove_body(&mut self, handle: RigidBodyHandle) {
-        self.collision_events.pending_entities.remove(&handle);
         if let Some(body) = self.bodies.get(handle) {
             for &collider in body.colliders() {
                 self.collision_events.collider_removed(collider);

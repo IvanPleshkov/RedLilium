@@ -30,15 +30,17 @@ redlilium-ecs = { path = "../ecs", features = ["physics-3d"] }
 
 For ongoing synchronization, run `SyncPhysicsBodies3D`, then
 `SyncPhysicsJoints3D`, then `StepPhysics3D` in `FixedUpdate`, with explicit
-ordering edges. The `2D` systems follow the same order. The exclusive sync
-systems publish handles immediately. Regular `SyncPhysicsBodiesSystem*` and
-`SyncPhysicsJointsSystem*` publish through deferred commands, so joints can
-appear on the next schedule invocation after their bodies.
+ordering edges. The `2D` systems follow the same order. Body sync creates/updates bodies first, then their colliders. Native identity
+maps are available when sync finishes. The exclusive systems also publish ECS
+handle components immediately; regular `SyncPhysicsBodiesSystem*` and
+`SyncPhysicsJointsSystem*` publish them through deferred commands. Order joint
+sync after body sync, even when both are regular systems.
 
-A managed body requires `RigidBody*`, `Collider*` and `Transform`. On the next
-body sync, removing any of these components, despawning the entity or excluding
-it from game queries removes the Rapier body, its colliders and attached joints.
-Their mappings and handle components are cleaned up too. In 3D, body removal
+A managed body requires `RigidBody*` and `Transform`. On the next body sync,
+removing either component, despawning the entity or excluding it from game
+queries removes the Rapier body, its colliders and attached joints. Their mappings
+and handle components are cleaned up too. Removing a `Collider*` removes only
+that collider; the body and its joints survive even with no colliders. In 3D, body removal
 also clears `PhysicsInterpolation`; recreating a body starts a fresh history.
 Deferred creation validates the full entity identity and prerequisites again
 when publishing handles and removes cancelled Rapier objects.
@@ -113,6 +115,84 @@ Changing a joint descriptor rebuilds that joint, including when endpoints
 change. Other bodies and joints remain intact. If an endpoint is unavailable,
 the old joint is removed and creation waits for valid endpoints. Physics-world
 caches retain the last applied descriptors to avoid rebuilding unchanged objects.
+
+### Collider ownership and local geometry
+
+The same contract applies to 2D and 3D. A `Collider3D` without `ColliderBody3D`
+uses the rigid body on its own entity. An explicit `ColliderBody3D { body }`
+attaches it to that entity's body. There is no search through `Parent` and no
+fallback when an explicit owner is unavailable. One entity carries at most one
+collider per dimension; a body can have any number of collider entities.
+
+```rust,ignore
+use redlilium_ecs::physics::components3d::{
+    Collider3D, ColliderBody3D, ColliderPose3D, ColliderPart3D,
+};
+
+// Body and primary collider can still share one entity.
+let car = world.spawn_with((
+    Transform::IDENTITY,
+    RigidBody3D::dynamic(),
+    Collider3D::cuboid(Vec3::new(1.0, 0.5, 2.0)),
+))?;
+
+// The sensor has its own identity/settings and an explicit physical owner.
+let sensor = world.spawn_with((
+    ColliderBody3D { body: car },
+    Collider3D::ball(2.0)
+        .with_sensor(Some(SensorSettings {}))
+        .with_local_pose(ColliderPose3D {
+            translation: Vec3::new(0.0, 1.0, 0.0),
+            ..Default::default()
+        }),
+))?;
+
+// A compound is ONE collider with shared settings and no part identities.
+let furniture = Collider3D::compound(vec![
+    ColliderPart3D::cuboid(Vec3::new(1.0, 0.1, 1.0)),
+    ColliderPart3D::cuboid(Vec3::new(0.1, 1.0, 0.1))
+        .with_local_pose(ColliderPose3D {
+            translation: Vec3::new(0.8, -1.0, 0.8),
+            ..Default::default()
+        }),
+]);
+```
+
+`ColliderPose*` defaults to identity, has no scale, and is relative to the
+body origin, not its centre of mass. In 2D its rotation is a Z angle in radians;
+in 3D it is a quaternion. The world pose of a compound part is
+`body_pose * collider_local_pose * part_local_pose`. Collider-entity `Transform`
+and `Parent` do not supply a physical pose. They may still serve presentation
+or prefab grouping; the existing root/unit-scale rule applies to body entities.
+
+Compounds contain a nonempty, flat list of `ColliderPart*` values. Each part has
+primitive geometry (`ColliderPrimitive*`) and a local pose. Parts share material,
+density, sensor status, groups and event settings. For independently identifiable
+or configurable parts, use separate collider entities. Overlapping parts are
+not a geometric union for mass calculation; their mass contributions add.
+Sensors retain the configured density too; use density zero if they should not
+contribute mass. Bodies with no colliders have no collider-derived mass/inertia.
+
+A missing, disabled or removed body leaves collider descriptors inactive, without
+despawning their entities. Restoring the body activates them at the next sync.
+The reference includes the entity generation, so slot reuse cannot retarget it.
+Removing an explicit `ColliderBody*` switches back to the colocated-body rule.
+Changing the physical owner recreates the collider, ending its old observed
+pairs with `Removed`; new contacts may start on the next step. Geometry, material
+and local-pose edits preserve the collider handle and wake its body. Unchanged
+settings preserve sleep; a pose-only edit reuses the existing shared geometry.
+Geometry is built on creation/shape changes, not on every sync. Validation checks
+the complete sync batch before mutating native objects, including waiting colliders.
+
+`Collider*Handle` belongs to the collider entity; `RigidBody*Handle` belongs to
+the body entity. Physics worlds expose `collider_for_entity` and
+`entity_for_collider` alongside the existing body lookup methods. Collision and
+force participants and query targets carry **both** `collider_entity` and
+`body_entity`. They coincide for a colocated collider. Free colliders have neither.
+Events remain per collider pair; there is no implicit deduplication by body or
+separate event identity for a compound part. Events retain their captured identities
+after removal/reparenting. Descriptors, local geometry and explicit owner references
+round-trip through scenes/prefabs, with entity references remapped on load.
 
 ### Axis locks
 
@@ -629,7 +709,8 @@ Remove the descriptor or despawn the entity, then run sync. `PhysicsWorld` does
 not expose public body/joint insertion, deletion or mutable collections.
 `bodies()`, `colliders()`, `impulse_joints()` and `narrow_phase()` provide
 read-only Rapier access for inspection and contact queries. Use
-`body_for_entity`, `entity_for_body` and `joint_for_entity` for handle lookup.
+`body_for_entity`, `entity_for_body`, `collider_for_entity`,
+`entity_for_collider` and `joint_for_entity` for handle lookup.
 
 `body_motion(handle)` returns a temporary `BodyMotion3D` / `BodyMotion2D`:
 it provides read access to the body and methods for velocities, forces,
@@ -683,9 +764,12 @@ let completed = physics.visit_overlaps(&shape, pose, filter, |target| {
 })?;
 ```
 
-`shape` is an existing `ColliderShape2D/3D` descriptor and `pose` is a
+`shape` is a `ColliderShape2D/3D` descriptor and `pose` is a
 `PhysicsPose2D/3D`, without visual scale. Query primitives are borrowed from
-stack storage; no temporary collider or shared geometry allocation is created.
+stack storage without geometry allocations. Compound query descriptors build
+temporary shared geometry for the query; they do not create a collider in the
+world. A shape query uses the shape and its part poses, not the `Collider`'s
+outer local pose; compose that explicitly into the query pose when needed.
 They can still hit complex scene geometry, including free terrain colliders.
 
 Casts return `Result<Option<Hit>, PhysicsQueryError>`: `Ok(None)` is a valid
@@ -705,8 +789,8 @@ without predicting their motion.
 
 Results live in `physics::queries2d/queries3d` and are also re-exported by the
 world modules. `RayHit*` and `ShapeCastHit*` contain a `QueryTarget*` with collider
-handle, optional body handle and optional ECS entity. Free colliders remain
-valid hits with no ECS owner. These are snapshots, not references; handles and
+handle, optional body handle, `collider_entity` and `body_entity`. Free colliders
+remain valid hits with neither ECS identity. These are snapshots, not references; handles and
 full entity identities may already be dead when read later.
 
 `RayHit*` contains `fraction`, world-space `point`, and an optional unit

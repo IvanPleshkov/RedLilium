@@ -129,7 +129,7 @@ macro_rules! contact_force_events {
                 dt: Real,
                 colliders: &ColliderSet,
                 entities: &std::collections::HashMap<RigidBodyHandle, crate::Entity>,
-                pending_entities: &std::collections::HashMap<RigidBodyHandle, crate::Entity>,
+                collider_entities: &std::collections::HashMap<ColliderHandle, crate::Entity>,
             ) {
                 let dt = dt as f64;
                 for (pair, sum) in collector.0.get_mut().unwrap().drain() {
@@ -147,12 +147,8 @@ macro_rules! contact_force_events {
                         Some($participant {
                             collider: handle,
                             body: c.parent(),
-                            entity: c.parent().and_then(|h| {
-                                entities
-                                    .get(&h)
-                                    .or_else(|| pending_entities.get(&h))
-                                    .copied()
-                            }),
+                            collider_entity: collider_entities.get(&handle).copied(),
+                            body_entity: c.parent().and_then(|h| entities.get(&h).copied()),
                             is_sensor: c.is_sensor(),
                         })
                     };
@@ -296,7 +292,7 @@ macro_rules! contact_force_events {
                     params.dt,
                     &colliders,
                     &entities,
-                    &entities,
+                    &Default::default(),
                 );
                 assert!(state.pending.is_empty());
                 handler
@@ -314,7 +310,7 @@ macro_rules! contact_force_events {
                     params.dt,
                     &colliders,
                     &entities,
-                    &entities,
+                    &Default::default(),
                 );
                 assert_eq!(state.pending.len(), 1);
                 let event = state.pending[0];

@@ -433,7 +433,7 @@ macro_rules! spatial_query_tests {
             assert_ne!(hit.target.collider, next);
             assert_eq!(hit.target.collider, handle);
             assert_eq!(hit.target.body, None);
-            assert_eq!(hit.target.entity, None);
+            assert_eq!(hit.target.body_entity, None);
         }
 
         #[test]

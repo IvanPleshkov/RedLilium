@@ -199,8 +199,8 @@ macro_rules! ccd_tests {
                 );
                 assert_eq!(events[0].step, events[1].step);
                 assert_eq!((events[0].a, events[0].b), (events[1].a, events[1].b));
-                assert!(events[0].a.entity == Some(a) || events[0].b.entity == Some(a));
-                assert!(events[0].a.entity == Some(b) || events[0].b.entity == Some(b));
+                assert!(events[0].a.body_entity == Some(a) || events[0].b.body_entity == Some(a));
+                assert!(events[0].a.body_entity == Some(b) || events[0].b.body_entity == Some(b));
                 step(&mut w);
                 assert_eq!(w.resource::<Events<Collision>>().read(&cursor).count(), 0);
             }

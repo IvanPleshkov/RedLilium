@@ -8,7 +8,10 @@ macro_rules! collision_events {
         pub struct $participant {
             pub collider: ColliderHandle,
             pub body: Option<RigidBodyHandle>,
-            pub entity: Option<crate::Entity>,
+            /// Entity carrying the collider descriptor (None for free colliders).
+            pub collider_entity: Option<crate::Entity>,
+            /// Entity carrying the attached rigid body descriptor.
+            pub body_entity: Option<crate::Entity>,
             pub is_sensor: bool,
         }
 
@@ -79,9 +82,6 @@ macro_rules! collision_events {
         pub(super) struct EventState {
             step: u64,
             pub(super) forces: ForceState,
-            // Regular sync allocates Rapier bodies before deferred handle publication.
-            // Keep their identities available to events until publication or rollback.
-            pub(super) pending_entities: std::collections::HashMap<RigidBodyHandle, crate::Entity>,
             enabled: std::collections::HashSet<ColliderHandle>,
             dirty: std::collections::HashSet<ColliderHandle>,
             active: std::collections::HashMap<PairKey, [$participant; 2]>,
@@ -142,6 +142,7 @@ macro_rules! collision_events {
                 colliders: &ColliderSet,
                 bodies: &RigidBodySet,
                 entities: &std::collections::HashMap<RigidBodyHandle, crate::Entity>,
+                collider_entities: &std::collections::HashMap<ColliderHandle, crate::Entity>,
             ) {
                 if self.active.contains_key(&pair) {
                     return;
@@ -155,12 +156,8 @@ macro_rules! collision_events {
                 let capture = |handle, c: &Collider| $participant {
                     collider: handle,
                     body: c.parent(),
-                    entity: c.parent().and_then(|h| {
-                        entities
-                            .get(&h)
-                            .or_else(|| self.pending_entities.get(&h))
-                            .copied()
-                    }),
+                    collider_entity: collider_entities.get(&handle).copied(),
+                    body_entity: c.parent().and_then(|h| entities.get(&h).copied()),
                     is_sensor: c.is_sensor(),
                 };
                 let a = capture(pair.0, a);
@@ -223,6 +220,7 @@ macro_rules! collision_events {
                 bodies: &RigidBodySet,
                 narrow: &NarrowPhase,
                 entities: &std::collections::HashMap<RigidBodyHandle, crate::Entity>,
+                collider_entities: &std::collections::HashMap<ColliderHandle, crate::Entity>,
             ) {
                 self.forces.finish(
                     &mut self.collector.1,
@@ -230,7 +228,7 @@ macro_rules! collision_events {
                     dt,
                     colliders,
                     entities,
-                    &self.pending_entities,
+                    collider_entities,
                 );
                 // Reuse the callback buffer; no world access, user callbacks or queue
                 // mutation is performed inside Rapier's callback.
@@ -244,7 +242,7 @@ macro_rules! collision_events {
                                 && (a.is_sensor() || b.is_sensor())
                                     == flags.contains(CollisionEventFlags::SENSOR)
                             {
-                                self.start(pair, colliders, bodies, entities);
+                                self.start(pair, colliders, bodies, entities, collider_entities);
                             }
                         }
                         RapierEvent::Stopped(_, _, flags) => {
@@ -282,7 +280,7 @@ macro_rules! collision_events {
                     }
                 }
                 for pair in touching {
-                    self.start(pair, colliders, bodies, entities);
+                    self.start(pair, colliders, bodies, entities, collider_entities);
                 }
             }
         }

@@ -8,7 +8,8 @@ macro_rules! spatial_queries {
         pub struct $target {
             pub collider: ColliderHandle,
             pub body: Option<RigidBodyHandle>,
-            pub entity: Option<crate::Entity>,
+            pub collider_entity: Option<crate::Entity>,
+            pub body_entity: Option<crate::Entity>,
         }
 
         #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,7 +84,8 @@ macro_rules! spatial_queries {
                 $target {
                     collider: handle,
                     body,
-                    entity: body.and_then(|h| self.entity_for_body(h)),
+                    collider_entity: self.entity_for_collider(handle),
+                    body_entity: body.and_then(|h| self.entity_for_body(h)),
                 }
             }
 
@@ -156,7 +158,7 @@ macro_rules! spatial_queries {
                 }))
             }
 
-            /// Nearest hit while translating a primitive through displacement.
+            /// Nearest hit while translating a shape through displacement.
             /// Rotation stays fixed; other colliders are tested at their current
             /// physical poses, without predicting their motion. No simulation runs.
             /// The query shape does not restrict the kinds of scene colliders hit.

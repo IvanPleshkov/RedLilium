@@ -387,138 +387,18 @@ fn remove_body_components(
     }
 }
 
-// ---- SyncPhysicsBodies3D exclusive system ----
-
-/// Exclusive system that creates/removes rapier bodies from ECS descriptor components.
-///
-/// Detects entities with [`RigidBody3D`](super::components3d::RigidBody3D) +
-/// [`Collider3D`](super::components3d::Collider3D) +
-/// [`Transform`](crate::Transform) and creates corresponding rapier objects.
-/// Removing any required component, despawning or excluding an entity from game
-/// queries removes its body, attached colliders and joints on the next sync.
-///
-/// # Example
-///
-/// ```ignore
-/// let mut systems = SystemsContainer::new();
-/// systems.add_exclusive(SyncPhysicsBodies3D);
-/// systems.add(StepPhysics3D);
-/// systems.add_edge::<SyncPhysicsBodies3D, StepPhysics3D>().unwrap();
-/// ```
-pub struct SyncPhysicsBodies3D;
-
-impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
-    type Result = ();
-
-    fn run(&mut self, world: &mut crate::World) -> Result<(), crate::system::SystemError> {
-        redlilium_core::profile_scope!("ecs: sync_physics_bodies_3d");
-
-        for entity in world
-            .iter_entities()
-            .filter(|e| !world.is_excluded_from_game(*e))
-        {
-            if let Some(body) = world.get::<super::components3d::RigidBody3D>(entity) {
-                body.validate(entity)?;
-                if let Some(collider) = world.get::<super::components3d::Collider3D>(entity) {
-                    collider.validate(entity)?;
-                    if let Some(t) = world.get::<crate::Transform>(entity) {
-                        super::validation::transform(
-                            entity,
-                            t,
-                            world.get::<crate::Parent>(entity).is_some(),
-                        )?;
-                    }
-                }
-            }
-        }
-
-        // Ensure resource exists
-        if !world.has_resource::<PhysicsWorld3D>() {
-            world.insert_resource(PhysicsWorld3D::default());
-        }
-
-        // Phase 1: Find bodies whose entity is excluded, dead or missing prerequisites.
-        let stale: Vec<crate::Entity> = {
-            let physics = world.resource::<PhysicsWorld3D>();
-            physics
-                .entity_to_body
-                .keys()
-                .filter(|e| {
-                    !world.is_alive(**e)
-                        || world.is_excluded_from_game(**e)
-                        || world.get::<super::components3d::RigidBody3D>(**e).is_none()
-                        || world.get::<super::components3d::Collider3D>(**e).is_none()
-                        || world.get::<crate::Transform>(**e).is_none()
-                })
-                .copied()
-                .collect()
-        };
-
-        if !stale.is_empty() {
-            let stale_joints = remove_bodies(&mut world.resource_mut::<PhysicsWorld3D>(), &stale);
-            remove_body_components(world, &stale, &stale_joints);
-        }
-
-        // Phase 2: Find new bodies (have descriptors, new or changed descriptors, not excluded)
-        let new_entities: Vec<(
-            crate::Entity,
-            super::components3d::RigidBody3D,
-            super::components3d::Collider3D,
-            crate::Transform,
-        )> = {
-            let physics = world.resource::<PhysicsWorld3D>();
-            world
-                .iter_entities()
-                .filter(|e| !world.is_excluded_from_game(*e))
-                .filter_map(|entity| {
-                    let body = world.get::<super::components3d::RigidBody3D>(entity)?;
-                    let collider = world.get::<super::components3d::Collider3D>(entity)?;
-                    if physics
-                        .entity_to_body
-                        .get(&entity)
-                        .and_then(|h| physics.applied_bodies.get(h))
-                        .is_some_and(|(old_body, old_collider, _)| {
-                            old_body == body && old_collider == collider
-                        })
-                    {
-                        return None;
-                    }
-                    let transform = *world.get::<crate::Transform>(entity)?;
-                    Some((entity, body.clone(), collider.clone(), transform))
-                })
-                .collect()
-        };
-
-        if !new_entities.is_empty() {
-            let mut handles = Vec::with_capacity(new_entities.len());
-            {
-                let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                for (entity, body_desc, collider_desc, transform) in &new_entities {
-                    if let Some(handle) = physics.entity_to_body.get(entity).copied() {
-                        physics.apply_body_settings(handle, body_desc, collider_desc);
-                        continue;
-                    }
-                    let rapier_body = body_desc.to_rigid_body(transform);
-                    let body_handle = physics.add_body(rapier_body);
-                    let rapier_collider = collider_desc.to_collider();
-                    let collider_handle = physics.add_collider(rapier_collider, body_handle);
-                    physics.applied_bodies.insert(
-                        body_handle,
-                        (body_desc.clone(), collider_desc.clone(), collider_handle),
-                    );
-                    physics.entity_to_body.insert(*entity, body_handle);
-                    physics.body_to_entity.insert(body_handle, *entity);
-                    handles.push((*entity, body_handle));
-                }
-            }
-            for (entity, handle) in handles {
-                let _ = world.insert(entity, RigidBody3DHandle(handle));
-            }
-        }
-
-        Ok(())
-    }
-}
+use super::components3d::{Collider3D, ColliderBody3D, RigidBody3D};
+use super::world3d::Collider3DHandle;
+super::sync_support::collider_sync!(
+    PhysicsWorld3D,
+    RigidBody3D,
+    Collider3D,
+    ColliderBody3D,
+    RigidBody3DHandle,
+    Collider3DHandle,
+    SyncPhysicsBodies3D,
+    SyncPhysicsBodiesSystem3D
+);
 
 // ---- SyncPhysicsJoints3D exclusive system ----
 
@@ -647,134 +527,10 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
 
 // ---- Regular system variants ----
 
-/// Regular system variant of [`SyncPhysicsBodies3D`].
-///
-/// Uses lock-execute + deferred commands instead of exclusive world access.
-/// Allows parallel scheduling but joints may lag 1 frame behind body creation.
-pub struct SyncPhysicsBodiesSystem3D;
-
-impl crate::System for SyncPhysicsBodiesSystem3D {
-    type Result = ();
-
-    fn run<'a>(
-        &'a self,
-        ctx: &'a crate::SystemContext<'a>,
-    ) -> Result<(), crate::system::SystemError> {
-        redlilium_core::profile_scope!("ecs: sync_physics_bodies_system_3d");
-
-        let (new_entities, stale_entities, stale_joints) = ctx
-            .lock::<(
-                crate::ResMut<PhysicsWorld3D>,
-                crate::Read<super::components3d::RigidBody3D>,
-                crate::Read<super::components3d::Collider3D>,
-                crate::Read<crate::Transform>,
-                crate::Read<crate::Parent>,
-            )>()
-            .execute(|(mut physics, bodies, colliders, transforms, parents)| {
-                for (idx, body) in bodies.iter() {
-                    if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
-                        body.validate(entity)?;
-                        if let Some(collider) = colliders.get(idx) {
-                            collider.validate(entity)?;
-                            if let Some(t) = transforms.get(idx) {
-                                super::validation::transform(
-                                    entity,
-                                    t,
-                                    parents.get(idx).is_some(),
-                                )?;
-                            }
-                        }
-                    }
-                }
-                // Remove stale: entity dead (full-identity check, so a recycled
-                // slot does not keep the old body), excluded, or missing prerequisites.
-                let stale: Vec<crate::Entity> = physics
-                    .entity_to_body
-                    .keys()
-                    .filter(|e| {
-                        !ctx.is_alive(**e)
-                            || ctx.is_excluded_from_game(**e)
-                            || bodies.get(e.index()).is_none()
-                            || colliders.get(e.index()).is_none()
-                            || transforms.get(e.index()).is_none()
-                    })
-                    .copied()
-                    .collect();
-                let stale_joints = remove_bodies(&mut physics, &stale);
-
-                // Create new
-                let mut new_pairs: Vec<(crate::Entity, RigidBodyHandle)> = Vec::new();
-                for (idx, body_desc) in bodies.iter() {
-                    if let Some(entity) = ctx.raw_world().entity_at_index(idx)
-                        && let (Some(collider_desc), Some(transform)) =
-                            (colliders.get(idx), transforms.get(idx))
-                    {
-                        if let Some(handle) = physics.entity_to_body.get(&entity).copied() {
-                            physics.apply_body_settings(handle, body_desc, collider_desc);
-                            continue;
-                        }
-                        let rapier_body = body_desc.to_rigid_body(transform);
-                        let body_handle = physics.add_body(rapier_body);
-                        let rapier_collider = collider_desc.to_collider();
-                        let collider_handle = physics.add_collider(rapier_collider, body_handle);
-                        physics.applied_bodies.insert(
-                            body_handle,
-                            (body_desc.clone(), collider_desc.clone(), collider_handle),
-                        );
-                        physics
-                            .collision_events
-                            .pending_entities
-                            .insert(body_handle, entity);
-                        new_pairs.push((entity, body_handle));
-                    }
-                }
-
-                Ok::<_, crate::SystemError>((new_pairs, stale, stale_joints))
-            })?;
-
-        if !new_entities.is_empty() || !stale_entities.is_empty() || !stale_joints.is_empty() {
-            ctx.commands(move |world| {
-                remove_body_components(world, &stale_entities, &stale_joints);
-                for (entity, handle) in new_entities {
-                    // Earlier commands can despawn/recycle the slot or remove prerequisites.
-                    // Never publish a pending body against a different entity generation.
-                    let valid = world.is_alive(entity)
-                        && !world.is_excluded_from_game(entity)
-                        && world
-                            .get::<super::components3d::RigidBody3D>(entity)
-                            .is_some()
-                        && world
-                            .get::<super::components3d::Collider3D>(entity)
-                            .is_some()
-                        && world.get::<crate::Transform>(entity).is_some_and(|t| {
-                            super::validation::transform(
-                                entity,
-                                t,
-                                world.get::<crate::Parent>(entity).is_some(),
-                            )
-                            .is_ok()
-                        });
-                    if valid {
-                        let _ = world.insert(entity, RigidBody3DHandle(handle));
-                        let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                        physics.entity_to_body.insert(entity, handle);
-                        physics.body_to_entity.insert(handle, entity);
-                        physics.collision_events.pending_entities.remove(&handle);
-                    } else {
-                        world.resource_mut::<PhysicsWorld3D>().remove_body(handle);
-                    }
-                }
-            });
-        }
-
-        Ok(())
-    }
-}
-
 /// Regular system variant of [`SyncPhysicsJoints3D`].
 ///
-/// Uses lock-execute + deferred commands. Joint creation may lag 1 frame behind
-/// body creation when both are spawned in the same frame.
+/// Uses lock-execute + deferred commands. Run after body sync; native body
+/// mappings are available even before ECS handles are published.
 pub struct SyncPhysicsJointsSystem3D;
 
 impl crate::System for SyncPhysicsJointsSystem3D {

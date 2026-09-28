@@ -44,6 +44,14 @@ fn with_shape<R>(
         }
     };
     match shape {
+        ShapeDesc::Compound { .. } => {
+            shape
+                .validate(crate::Entity::DANGLING)
+                .map_err(|_| PhysicsQueryError::InvalidShape)?;
+            let shared = shape.to_shared_shape();
+            Ok(f(shared.as_ref()))
+        }
+
         ShapeDesc::Ball { radius } => {
             positive(*radius)?;
             Ok(f(&Ball::new(*radius as Real)))

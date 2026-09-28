@@ -127,7 +127,13 @@ mod dim2 {
             if let Some(settings) = self.contact_force_events {
                 nonnegative(entity, "contact_force_events.min_force", settings.min_force)?;
             }
-            match &self.shape {
+            self.local_pose.validate(entity)?;
+            self.shape.validate(entity)
+        }
+    }
+    impl ColliderShape2D {
+        pub(in crate::std::physics) fn validate(&self, entity: Entity) -> Result<(), SystemError> {
+            match self {
                 ColliderShape2D::Ball { radius } => positive(entity, "radius", *radius)?,
                 ColliderShape2D::Cuboid { half_extents } => {
                     for extent in half_extents.iter() {
@@ -140,6 +146,15 @@ mod dim2 {
                 } => {
                     nonnegative(entity, "half_height", *half_height)?;
                     positive(entity, "radius", *radius)?;
+                }
+                ColliderShape2D::Compound { parts } => {
+                    if parts.is_empty() {
+                        return Err(invalid(entity, "compound must contain at least one part"));
+                    }
+                    for part in parts {
+                        part.local_pose.validate(entity)?;
+                        ColliderShape2D::from(part.shape.clone()).validate(entity)?;
+                    }
                 }
             }
             Ok(())
@@ -189,7 +204,13 @@ mod dim3 {
             if let Some(settings) = self.contact_force_events {
                 nonnegative(entity, "contact_force_events.min_force", settings.min_force)?;
             }
-            match &self.shape {
+            self.local_pose.validate(entity)?;
+            self.shape.validate(entity)
+        }
+    }
+    impl ColliderShape3D {
+        pub(in crate::std::physics) fn validate(&self, entity: Entity) -> Result<(), SystemError> {
+            match self {
                 ColliderShape3D::Ball { radius } => positive(entity, "radius", *radius)?,
                 ColliderShape3D::Cuboid { half_extents } => {
                     for extent in half_extents.iter() {
@@ -209,6 +230,15 @@ mod dim3 {
                 } => {
                     positive(entity, "half_height", *half_height)?;
                     positive(entity, "radius", *radius)?;
+                }
+                ColliderShape3D::Compound { parts } => {
+                    if parts.is_empty() {
+                        return Err(invalid(entity, "compound must contain at least one part"));
+                    }
+                    for part in parts {
+                        part.local_pose.validate(entity)?;
+                        ColliderShape3D::from(part.shape.clone()).validate(entity)?;
+                    }
                 }
             }
             Ok(())

@@ -72,12 +72,9 @@ macro_rules! lifecycle_tests {
         #[test]
         fn removing_each_required_component_cleans_body_colliders_and_joint_and_allows_recreation()
         {
-            let removals: [fn(&mut World, Entity); 3] = [
+            let removals: [fn(&mut World, Entity); 2] = [
                 |w, e| {
                     w.remove::<Body>(e).unwrap();
-                },
-                |w, e| {
-                    w.remove::<Collider>(e).unwrap();
                 },
                 |w, e| {
                     w.remove::<Transform>(e).unwrap();
@@ -125,7 +122,7 @@ macro_rules! lifecycle_tests {
         }
         #[test]
         fn deferred_body_creation_rejects_recycled_dead_or_incomplete_entity() {
-            let edits: [fn(&mut World, Entity); 5] = [
+            let edits: [fn(&mut World, Entity); 4] = [
                 |w, e| {
                     assert!(w.despawn(e));
                 },
@@ -134,9 +131,6 @@ macro_rules! lifecycle_tests {
                     let new = w.spawn_with((Transform::IDENTITY,)).unwrap();
                     assert_eq!(new.index(), e.index());
                     assert_ne!(new, e);
-                },
-                |w, e| {
-                    w.remove::<Collider>(e).unwrap();
                 },
                 |w, e| {
                     w.remove::<Transform>(e).unwrap();
