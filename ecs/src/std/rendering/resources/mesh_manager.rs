@@ -71,8 +71,24 @@ impl MeshManager {
     }
 
     /// The resident mesh for `source`, if loaded.
-    pub fn get(&self, source: &MeshSource) -> Option<&Arc<Mesh>> {
+    pub fn get(&self, source: &MeshSource) -> Option<Arc<Mesh>> {
         self.cache.get(source)
+    }
+
+    /// Release the manager's ownership and cancel its pending request.
+    /// A live version remains discoverable through `Weak`; this is not an
+    /// invalidation. Publish-only sources need a producer to reload once dead.
+    pub fn release(&mut self, source: &MeshSource) {
+        self.cache.release(source);
+        self.pending.remove(source);
+        self.cache.bump_generation();
+    }
+
+    /// Remove unreferenced resources and expired weak entries. In-flight
+    /// requests and failure latches remain; use `release` to cancel a request.
+    pub fn collect_unused(&mut self) -> usize {
+        let removed = self.cache.collect_unused().len();
+        removed
     }
 
     /// Bumped whenever the resident set changes (load / reload).

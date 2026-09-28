@@ -685,7 +685,7 @@ impl ExclusiveSystem for MeshLoad {
         world.scan_asset_refs(since, &mut |component, idx, any| {
             if let Some(r) = any.downcast_ref::<AssetRef<MeshSource>>() {
                 match mesh_mgr.get(r.source()) {
-                    Some(mesh) if !r.is_current(mesh) => stale.push((component, idx)),
+                    Some(mesh) if !r.is_current(&mesh) => stale.push((component, idx)),
                     Some(_) => {}
                     None => mesh_mgr.request(r.source()),
                 }
@@ -693,7 +693,7 @@ impl ExclusiveSystem for MeshLoad {
                 && let Some(instance_mgr) = instance_mgr.as_mut()
             {
                 match instance_mgr.get(r.source().guid) {
-                    Some(instance) if !r.is_current(instance) => stale.push((component, idx)),
+                    Some(instance) if !r.is_current(&instance) => stale.push((component, idx)),
                     Some(_) => {}
                     None => instance_mgr.request(r.source()),
                 }
@@ -701,7 +701,7 @@ impl ExclusiveSystem for MeshLoad {
                 && let Some(texture_mgr) = texture_mgr.as_mut()
             {
                 match texture_mgr.get(r.source()) {
-                    Some(texture) if !r.is_current(texture) => stale.push((component, idx)),
+                    Some(texture) if !r.is_current(&texture) => stale.push((component, idx)),
                     Some(_) => {}
                     None => texture_mgr.request(r.source()),
                 }
@@ -709,7 +709,7 @@ impl ExclusiveSystem for MeshLoad {
                 && let Some(env_mgr) = env_mgr.as_mut()
             {
                 match env_mgr.get(r.source().guid) {
-                    Some(env) if !r.is_current(env) => stale.push((component, idx)),
+                    Some(env) if !r.is_current(&env) => stale.push((component, idx)),
                     Some(_) => {}
                     None => env_mgr.request(r.source()),
                 }
@@ -722,28 +722,28 @@ impl ExclusiveSystem for MeshLoad {
             world.patch_asset_refs(component, idx, &mut |any| {
                 if let Some(r) = any.downcast_mut::<AssetRef<MeshSource>>() {
                     if let Some(mesh) = mesh_mgr.get(r.source())
-                        && !r.is_current(mesh)
+                        && !r.is_current(&mesh)
                     {
-                        r.resolve(mesh.clone());
+                        r.resolve(mesh);
                     }
                 } else if let Some(r) = any.downcast_mut::<AssetRef<MaterialInstanceSource>>()
                     && let Some(instance_mgr) = instance_mgr.as_mut()
                     && let Some(instance) = instance_mgr.get(r.source().guid)
-                    && !r.is_current(instance)
+                    && !r.is_current(&instance)
                 {
-                    r.resolve(instance.clone());
+                    r.resolve(instance);
                 } else if let Some(r) = any.downcast_mut::<AssetRef<TextureSource>>()
                     && let Some(texture_mgr) = texture_mgr.as_mut()
                     && let Some(texture) = texture_mgr.get(r.source())
-                    && !r.is_current(texture)
+                    && !r.is_current(&texture)
                 {
-                    r.resolve(texture.clone());
+                    r.resolve(texture);
                 } else if let Some(r) = any.downcast_mut::<AssetRef<EnvironmentSource>>()
                     && let Some(env_mgr) = env_mgr.as_mut()
                     && let Some(env) = env_mgr.get(r.source().guid)
-                    && !r.is_current(env)
+                    && !r.is_current(&env)
                 {
-                    r.resolve(env.clone());
+                    r.resolve(env);
                 }
             });
         }

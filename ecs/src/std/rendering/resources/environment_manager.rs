@@ -85,13 +85,38 @@ impl EnvironmentManager {
     }
 
     /// The resolved environment for `guid`, if resolved.
-    pub fn get(&self, guid: Guid) -> Option<&Arc<ResolvedEnvironment>> {
+    pub fn get(&self, guid: Guid) -> Option<Arc<ResolvedEnvironment>> {
         self.cache.get(&guid)
     }
 
     /// Bumped whenever the resident set changes (load / reload).
     pub fn generation(&self) -> u64 {
         self.cache.generation()
+    }
+
+    /// Release this resolution and cancel its pending work. Existing owners
+    /// still share the same version through the cache's weak reference.
+    pub fn release(&mut self, guid: Guid) {
+        self.cache.release(&guid);
+        self.demanded.remove(&guid);
+        self.waiting_textures.remove(&guid);
+        if self.cache.get(&guid).is_none() {
+            self.data.invalidate(guid);
+        }
+        self.cache.bump_generation();
+    }
+
+    /// Collect unused resolutions and their authored data. Live resolutions
+    /// retain their data for dependency reloads; pending work is not cancelled.
+    pub fn collect_unused(&mut self) -> usize {
+        let removed = self.cache.collect_unused();
+        for guid in &removed {
+            if self.demanded.contains(guid) {
+                continue;
+            }
+            self.data.invalidate(*guid);
+        }
+        removed.len()
     }
 
     /// Drop all state for `guid` — the resolution *and* the data — so it
@@ -124,7 +149,7 @@ impl EnvironmentManager {
             }
             for (source, texture) in &resolved.sources {
                 match texture_mgr.get(source) {
-                    Some(current) if !Arc::ptr_eq(current, texture) => {
+                    Some(current) if !Arc::ptr_eq(&current, texture) => {
                         self.demanded.insert(*guid);
                         break;
                     }

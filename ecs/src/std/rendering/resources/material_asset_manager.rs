@@ -70,7 +70,7 @@ impl MaterialAssetManager {
         registry: &ShadingRegistry,
         guid: Guid,
     ) -> Option<Arc<ResolvedMaterial>> {
-        if let Some(resolved) = self.cache.get(&guid).cloned() {
+        if let Some(resolved) = self.cache.get(&guid) {
             // Pull-validation (hot reload): is the shader we resolved with still
             // current? `get_or_request` re-requests an invalidated shader; while
             // it reloads (`None`) we keep serving the last-good resolution, and
@@ -152,8 +152,30 @@ impl MaterialAssetManager {
     }
 
     /// The resolved template for `guid` if already resident — no request side effect.
-    pub fn get(&self, guid: Guid) -> Option<&Arc<ResolvedMaterial>> {
+    pub fn get(&self, guid: Guid) -> Option<Arc<ResolvedMaterial>> {
         self.cache.get(&guid)
+    }
+
+    /// Release this resolution and cancel its pending work. Existing owners
+    /// still share the same version through the cache's weak reference.
+    pub fn release(&mut self, guid: Guid) {
+        self.cache.release(&guid);
+        self.rejected_shaders.remove(&guid);
+        if self.cache.get(&guid).is_none() {
+            self.data.invalidate(guid);
+        }
+        self.cache.bump_generation();
+    }
+
+    /// Collect unused resolutions and their authored data. Live resolutions
+    /// retain their data for dependency reloads; pending work is not cancelled.
+    pub fn collect_unused(&mut self) -> usize {
+        let removed = self.cache.collect_unused();
+        for guid in &removed {
+            self.rejected_shaders.remove(guid);
+            self.data.invalidate(*guid);
+        }
+        removed.len()
     }
 
     /// Drop all state for `guid` — the resolution *and* the data, so the next

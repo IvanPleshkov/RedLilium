@@ -130,7 +130,7 @@ pub struct MaterialInstanceManager {
     /// properties, published under a guid (a compute pass output, an ECS-owned
     /// buffer). A `Ref` property whose buffer is not yet here keeps the instance
     /// unresolved, exactly like a still-loading texture.
-    buffers: HashMap<Guid, Arc<Buffer>>,
+    buffers: ResidentCache<Guid, Buffer>,
     pending_uploads: Vec<TransferOperation>,
 }
 
@@ -144,7 +144,7 @@ impl MaterialInstanceManager {
             demanded: HashSet::new(),
             waiting_textures: HashMap::new(),
             rejected_overrides: HashMap::new(),
-            buffers: HashMap::new(),
+            buffers: ResidentCache::new(),
             pending_uploads: Vec::new(),
         }
     }
@@ -186,17 +186,50 @@ impl MaterialInstanceManager {
     /// [`invalidate`](Self::invalidate) on them to rebind (external buffers
     /// carry no version, so the swap is not auto-detected).
     pub fn publish_buffer(&mut self, guid: Guid, buffer: Arc<Buffer>) {
-        self.buffers.insert(guid, buffer);
+        self.buffers.publish(guid, buffer);
+    }
+
+    /// Release a published buffer's cache ownership. Live instances keep it
+    /// available to other instances through a weak reference.
+    pub fn release_buffer(&mut self, guid: Guid) {
+        self.buffers.release(&guid);
     }
 
     /// The resolved instance for `guid`, if resolved.
-    pub fn get(&self, guid: Guid) -> Option<&Arc<ResolvedInstance>> {
+    pub fn get(&self, guid: Guid) -> Option<Arc<ResolvedInstance>> {
         self.cache.get(&guid)
     }
 
     /// Bumped whenever the resident set changes (load / reload).
     pub fn generation(&self) -> u64 {
         self.cache.generation()
+    }
+
+    /// Release this resolution and cancel its pending work. Existing owners
+    /// still share the same version through the cache's weak reference.
+    pub fn release(&mut self, guid: Guid) {
+        self.cache.release(&guid);
+        self.demanded.remove(&guid);
+        self.waiting_textures.remove(&guid);
+        self.rejected_overrides.remove(&guid);
+        if self.cache.get(&guid).is_none() {
+            self.data.invalidate(guid);
+        }
+        self.cache.bump_generation();
+    }
+
+    /// Collect unused resolutions and their authored data. Live resolutions
+    /// retain their data for dependency reloads; pending work is not cancelled.
+    pub fn collect_unused(&mut self) -> usize {
+        let removed = self.cache.collect_unused();
+        for guid in &removed {
+            if self.demanded.contains(guid) {
+                continue;
+            }
+            self.data.invalidate(*guid);
+        }
+        // Resolutions must be collected before their buffer dependencies.
+        removed.len() + self.buffers.collect_unused().len()
     }
 
     /// Drop all state for `guid` — the resolution *and* the data — so it
@@ -253,7 +286,7 @@ impl MaterialInstanceManager {
             for (source, texture) in &resolved.textures {
                 match texture_mgr.get(source) {
                     // A different Arc landed — rebuild the instance with it.
-                    Some(current) if !Arc::ptr_eq(current, texture) => {
+                    Some(current) if !Arc::ptr_eq(&current, texture) => {
                         self.demanded.insert(*guid);
                         break;
                     }

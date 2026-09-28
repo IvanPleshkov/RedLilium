@@ -10,7 +10,7 @@
 //! pull-validate by pointer identity) skip rebuilding.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use redlilium_assets::{AssetDb, AssetManager, AssetProcessor, Guid};
 use redlilium_core::mesh::VertexLayout;
@@ -23,10 +23,10 @@ pub struct VertexLayoutManager {
     inner: AssetManager<VertexLayoutLoader>,
     /// Content → the canonical shared `Arc`: identical layouts (across guids, or
     /// generated) collapse to one `Arc` so pointer-equality batching holds.
-    interned: HashMap<VertexLayout, Arc<VertexLayout>>,
-    /// Per-guid memo `(inner Arc ptr → interned Arc)` so a resident hit skips
-    /// the content hash. Cleared on invalidation before an address can be reused.
-    memo: HashMap<Guid, (usize, Arc<VertexLayout>)>,
+    interned: HashMap<VertexLayout, Weak<VertexLayout>>,
+    /// Current canonical version by guid. Weak identity cannot suffer address
+    /// reuse; invalidation clears it along with the inner cache.
+    memo: HashMap<Guid, Weak<VertexLayout>>,
 }
 
 impl VertexLayoutManager {
@@ -39,21 +39,21 @@ impl VertexLayoutManager {
     /// Use this for generated / non-file layouts so they still share a pointer
     /// with file-loaded layouts of equal content.
     pub fn intern(&mut self, layout: VertexLayout) -> Arc<VertexLayout> {
-        if let Some(arc) = self.interned.get(&layout) {
-            return arc.clone();
+        if let Some(arc) = self.interned.get(&layout).and_then(Weak::upgrade) {
+            return arc;
         }
         let arc = Arc::new(layout.clone());
-        self.interned.insert(layout, arc.clone());
+        self.interned.insert(layout, Arc::downgrade(&arc));
         arc
     }
 
     /// Intern an already-`Arc`'d layout by content (reuse an equal existing
     /// `Arc` if present, else adopt this one as the canonical share).
     fn intern_arc(&mut self, arc: Arc<VertexLayout>) -> Arc<VertexLayout> {
-        if let Some(existing) = self.interned.get(arc.as_ref()) {
-            return existing.clone();
+        if let Some(existing) = self.interned.get(arc.as_ref()).and_then(Weak::upgrade) {
+            return existing;
         }
-        self.interned.insert((*arc).clone(), arc.clone());
+        self.interned.insert((*arc).clone(), Arc::downgrade(&arc));
         arc
     }
 
@@ -65,16 +65,28 @@ impl VertexLayoutManager {
         db: &AssetDb,
         guid: Guid,
     ) -> Option<Arc<VertexLayout>> {
-        let raw = self.inner.get_or_request(processor, db, guid)?;
-        let raw_ptr = Arc::as_ptr(&raw) as usize;
-        if let Some((ptr, shared)) = self.memo.get(&guid)
-            && *ptr == raw_ptr
-        {
-            return Some(shared.clone());
+        if let Some(shared) = self.memo.get(&guid).and_then(Weak::upgrade) {
+            return Some(shared);
         }
+        let raw = self.inner.get_or_request(processor, db, guid)?;
         let shared = self.intern_arc(raw);
-        self.memo.insert(guid, (raw_ptr, shared.clone()));
+        // Retain the canonical allocation, not a second equal raw layout.
+        self.inner.publish(guid, shared.clone());
+        self.memo.insert(guid, Arc::downgrade(&shared));
         Some(shared)
+    }
+
+    /// Release the file cache's ownership without losing a live canonical Arc.
+    pub fn release(&mut self, guid: Guid) {
+        self.inner.release(guid);
+    }
+
+    /// Collect cache-only layouts and prune expired content/memo weak entries.
+    pub fn collect_unused(&mut self) -> usize {
+        let removed = self.inner.collect_unused();
+        self.memo.retain(|_, value| value.strong_count() > 0);
+        self.interned.retain(|_, value| value.strong_count() > 0);
+        removed
     }
 
     /// Drop the loaded state for `guid` so it reloads (hot reload). Unchanged
@@ -82,8 +94,6 @@ impl VertexLayoutManager {
     /// and skip rebuilding.
     pub fn invalidate(&mut self, guid: Guid) {
         self.inner.invalidate(guid);
-        // `raw_ptr` is an address, not a generation. Once the inner Arc is
-        // released, the allocator may reuse that address for a different layout.
         self.memo.remove(&guid);
     }
 }
@@ -91,6 +101,19 @@ impl VertexLayoutManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interning_is_weak_and_collection_prunes_dead_allocations() {
+        let mut manager = VertexLayoutManager::new();
+        let layout = (*VertexLayout::position_only()).clone();
+        let shared = manager.intern(layout.clone());
+        assert_eq!(Arc::strong_count(&shared), 1);
+        manager.collect_unused();
+        assert!(Arc::ptr_eq(&manager.intern(layout.clone()), &shared));
+        drop(shared);
+        manager.collect_unused();
+        assert!(manager.interned.is_empty());
+    }
 
     /// Interning collapses equal-content layouts to one `Arc` (pointer-equal,
     /// which is what the renderer batches on) and keeps distinct ones apart.

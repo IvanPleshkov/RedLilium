@@ -296,5 +296,5 @@ fn successful_publication_clears_a_previous_failure_latch() {
     cache.fail(1);
     cache.publish(1, Arc::new(42));
     assert!(!cache.is_failed(&1));
-    assert_eq!(**cache.get(&1).unwrap(), 42);
+    assert_eq!(*cache.get(&1).unwrap(), 42);
 }

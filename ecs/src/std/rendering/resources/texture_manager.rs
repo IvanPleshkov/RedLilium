@@ -12,7 +12,8 @@
 //! record's [`TextureSettings`] and the manager interns the GPU objects by
 //! content — textures sharing parameters share one `Arc<Sampler>`, and a
 //! settings edit simply resolves to a different interned sampler on reload
-//! (samplers themselves are immutable, so the intern cache never invalidates).
+//! (samplers are immutable). Interning holds weak references; explicit
+//! collection prunes expired entries without pinning GPU samplers.
 //!
 //! Texture sources aren't plain guids (`File | Solid`), so this manager keeps
 //! its own (dependency-free) drive loop on top of a
@@ -20,7 +21,7 @@
 //! [`AssetManager`](redlilium_assets::AssetManager).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use redlilium_assets::{AssetDb, AssetError, AssetHandle, AssetProcessor, ResidentCache};
 use redlilium_graphics::{GraphicsDevice, Sampler, Texture};
@@ -51,7 +52,7 @@ pub struct TextureManager {
     demanded: Vec<TextureSource>,
     /// Settings → the canonical shared sampler. Samplers are immutable value
     /// objects: a settings edit is a *different* key, never an invalidation.
-    samplers: HashMap<TextureSettings, Arc<Sampler>>,
+    samplers: HashMap<TextureSettings, Weak<Sampler>>,
 }
 
 impl TextureManager {
@@ -117,7 +118,7 @@ impl TextureManager {
     }
 
     /// The resolved texture for `source`, if loaded.
-    pub fn get(&self, source: &TextureSource) -> Option<&Arc<ResolvedTexture>> {
+    pub fn get(&self, source: &TextureSource) -> Option<Arc<ResolvedTexture>> {
         self.cache.get(source)
     }
 
@@ -129,6 +130,25 @@ impl TextureManager {
     /// Whether `source` failed to load (latched until invalidated).
     pub fn is_failed(&self, source: &TextureSource) -> bool {
         self.cache.is_failed(source)
+    }
+
+    /// Release the manager's ownership and cancel its pending request.
+    /// A live version remains discoverable through `Weak`; this is not an
+    /// invalidation. Publish-only sources need a producer to reload once dead.
+    pub fn release(&mut self, source: &TextureSource) {
+        self.cache.release(source);
+        self.pending.remove(source);
+        self.demanded.retain(|s| s != source);
+        self.cache.bump_generation();
+    }
+
+    /// Remove unreferenced resources and expired weak entries. In-flight
+    /// requests and failure latches remain; use `release` to cancel a request.
+    pub fn collect_unused(&mut self) -> usize {
+        let removed = self.cache.collect_unused().len();
+        self.samplers
+            .retain(|_, sampler| sampler.strong_count() > 0);
+        removed
     }
 
     /// Bumped whenever the resident set changes (load / reload).
@@ -203,13 +223,14 @@ impl TextureManager {
         &mut self,
         settings: &TextureSettings,
     ) -> Result<Arc<Sampler>, redlilium_graphics::GraphicsError> {
-        if let Some(sampler) = self.samplers.get(settings) {
-            return Ok(sampler.clone());
+        if let Some(sampler) = self.samplers.get(settings).and_then(Weak::upgrade) {
+            return Ok(sampler);
         }
         let sampler = self
             .device
             .create_sampler_from_cpu(&settings.to_sampler())?;
-        self.samplers.insert(settings.clone(), sampler.clone());
+        self.samplers
+            .insert(settings.clone(), Arc::downgrade(&sampler));
         Ok(sampler)
     }
 

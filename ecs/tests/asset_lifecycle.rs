@@ -344,7 +344,7 @@ fn material_instance_recovers_after_its_texture_dependency_is_repaired() {
         &mut shaders,
         &db,
     );
-    assert!(Arc::ptr_eq(instances.get(instance).unwrap(), &resolved));
+    assert!(Arc::ptr_eq(&instances.get(instance).unwrap(), &resolved));
     // A repaired parent can remove a failed texture dependency entirely. Its
     // old failure must not park the instance against the new parent version.
     let missing = db.register_path(AssetPath::new("a", "missing.png"), "texture", 0);
@@ -374,13 +374,13 @@ fn material_instance_recovers_after_its_texture_dependency_is_repaired() {
         if source == TextureSource::File(missing) {
             assert!(textures.is_failed(&source));
             assert!(
-                Arc::ptr_eq(instances.get(instance).unwrap(), &resolved),
+                Arc::ptr_eq(&instances.get(instance).unwrap(), &resolved),
                 "last good stays visible"
             );
         }
     }
     assert!(
-        !Arc::ptr_eq(instances.get(instance).unwrap(), &resolved),
+        !Arc::ptr_eq(&instances.get(instance).unwrap(), &resolved),
         "new parent bypasses the old failed texture"
     );
 }
@@ -448,7 +448,7 @@ fn texture_settings_errors_and_request_snapshot() {
     let second = textures.get(&source).unwrap();
     assert_eq!(second.texture.format(), TextureFormat::Rgba8UnormSrgb);
     assert_eq!(second.sampler.descriptor().min_filter, FilterMode::Linear);
-    assert!(!Arc::ptr_eq(&first, second));
+    assert!(!Arc::ptr_eq(&first, &second));
 }
 
 #[test]
@@ -540,7 +540,7 @@ fn invalid_material_properties_never_publish_and_recover_after_repair() {
             &mut textures,
             &registry,
         );
-        assert!(Arc::ptr_eq(instances.get(instance).unwrap(), &last_good));
+        assert!(Arc::ptr_eq(&instances.get(instance).unwrap(), &last_good));
     }
     data.shading_model = "opaque_textured".into();
     db.set_settings(&guid, Some(ron::to_string(&data).unwrap()));
@@ -558,7 +558,7 @@ fn invalid_material_properties_never_publish_and_recover_after_repair() {
         pump(&mut p);
         p.flush_gpu();
     }
-    assert!(!Arc::ptr_eq(instances.get(instance).unwrap(), &last_good));
+    assert!(!Arc::ptr_eq(&instances.get(instance).unwrap(), &last_good));
 
     // File-backed instance data follows the same validation path.
     let file = db.register_path(
@@ -589,4 +589,136 @@ fn invalid_material_properties_never_publish_and_recover_after_repair() {
         pump(&mut p);
     }
     assert!(instances.get(file).is_none());
+
+    // Collect from dependent resolutions toward their inputs. A live released
+    // instance must keep the same identity and its dependencies available.
+    instances.release(file);
+    let current = instances.get(instance).unwrap();
+    let parent = Arc::downgrade(&current.parent);
+    instances.release(instance);
+    assert_eq!(instances.collect_unused(), 0);
+    assert_eq!(materials.collect_unused(), 0);
+    assert!(Arc::ptr_eq(&instances.get(instance).unwrap(), &current));
+    drop(current);
+    drop(last_good);
+    assert_eq!(instances.collect_unused(), 1);
+    assert_eq!(materials.collect_unused(), 1);
+    assert!(parent.upgrade().is_none());
+    assert_eq!(textures.collect_unused(), 1);
+}
+
+#[test]
+fn released_texture_reuses_the_same_resource_until_its_last_consumer_drops() {
+    use redlilium_ecs::rendering::{TextureManager, loaders::TextureSource};
+    let mut p = processor();
+    let db = AssetDb::new();
+    let mut textures = TextureManager::new(device());
+    let source = TextureSource::WHITE;
+    textures.request(&source);
+    for _ in 0..4 {
+        textures.drive(&mut p, &db);
+        pump(&mut p);
+        p.flush_gpu();
+    }
+    let owner = textures.get(&source).unwrap();
+    let gpu = Arc::downgrade(&owner.texture);
+    let sampler = Arc::downgrade(&owner.sampler);
+    textures.release(&source);
+    assert_eq!(Arc::strong_count(&owner), 1);
+    assert_eq!(textures.collect_unused(), 0);
+    textures.request(&source);
+    textures.drive(&mut p, &db);
+    let second = textures.get(&source).unwrap();
+    assert!(Arc::ptr_eq(&owner, &second));
+    assert!(p.is_idle(), "no duplicate load");
+    drop(owner);
+    drop(second);
+    assert!(gpu.upgrade().is_none());
+    assert!(sampler.upgrade().is_none());
+    assert_eq!(textures.collect_unused(), 1);
+    assert!(textures.get(&source).is_none());
+    assert_eq!(textures.collect_unused(), 0);
+    textures.request(&source);
+    for _ in 0..4 {
+        textures.drive(&mut p, &db);
+        pump(&mut p);
+        p.flush_gpu();
+    }
+    assert!(
+        textures.get(&source).is_some(),
+        "reload after final owner dropped"
+    );
+}
+
+#[test]
+fn released_file_layout_reuses_canonical_identity_and_collects_aliases() {
+    use redlilium_core::mesh::VertexLayout;
+    use redlilium_ecs::rendering::VertexLayoutManager;
+    let mut p = processor();
+    let mut db = AssetDb::new();
+    let mut layouts = VertexLayoutManager::new();
+    let a = db.register_path(AssetPath::new("a", "a.layout"), "vertex_layout", 0);
+    let b = db.register_path(AssetPath::new("a", "b.layout"), "vertex_layout", 0);
+    for guid in [a, b] {
+        db.set_settings(
+            &guid,
+            Some(ron::to_string(VertexLayout::position_only().as_ref()).unwrap()),
+        );
+    }
+    for _ in 0..3 {
+        layouts.get_or_request(&mut p, &db, a);
+        layouts.get_or_request(&mut p, &db, b);
+        pump(&mut p);
+    }
+    let first = layouts.get_or_request(&mut p, &db, a).unwrap();
+    let second = layouts.get_or_request(&mut p, &db, b).unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    layouts.release(a);
+    layouts.release(b);
+    assert_eq!(Arc::strong_count(&first), 2);
+    layouts.collect_unused();
+    assert!(Arc::ptr_eq(
+        &layouts.get_or_request(&mut p, &db, a).unwrap(),
+        &first
+    ));
+    assert!(p.is_idle());
+    drop(first);
+    drop(second);
+    assert_eq!(layouts.collect_unused(), 2);
+    assert!(layouts.get_or_request(&mut p, &db, a).is_none());
+    pump(&mut p);
+    let first = layouts.get_or_request(&mut p, &db, a).unwrap();
+    layouts.get_or_request(&mut p, &db, b);
+    pump(&mut p);
+    let second = layouts.get_or_request(&mut p, &db, b).unwrap();
+    let weak = Arc::downgrade(&first);
+    drop(first);
+    drop(second);
+    // Two strong cache entries for one allocation must not pin each other.
+    assert_eq!(layouts.collect_unused(), 2);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn generic_manager_release_cancels_pending_and_preserves_live_published_identity() {
+    use redlilium_ecs::rendering::{ShaderManager, loaders::Shader};
+    let mut p = processor();
+    let mut db = AssetDb::new();
+    let guid = db.register_path(AssetPath::new("a", "shader.slang"), "shader", 0);
+    let mut shaders = ShaderManager::new();
+    assert!(shaders.get_or_request(&mut p, &db, guid).is_none());
+    shaders.release(guid);
+    pump(&mut p);
+    assert!(p.is_idle());
+    let shader = Arc::new(Shader { source: vec![] });
+    shaders.publish(guid, shader.clone());
+    shaders.release(guid);
+    let second = shaders.get_or_request(&mut p, &db, guid).unwrap();
+    assert!(Arc::ptr_eq(&shader, &second));
+    assert!(p.is_idle());
+    shaders.invalidate(guid);
+    assert!(
+        shaders.get(guid).is_none(),
+        "invalidation must forget even a live weak version"
+    );
 }

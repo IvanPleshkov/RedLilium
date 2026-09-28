@@ -16,6 +16,9 @@
 //!
 //! [`AssetManager`] / [`ResidentCache`] share resident `Arc`s. Components retain
 //! [`AssetRef`]s, while [`AssetDb`] maps stable [`Guid`]s to mounted paths.
+//! Managers can `release` ownership while preserving live identity through
+//! `Weak`. Explicit `collect_unused` removes cache-only resources and expired
+//! weak entries; `invalidate` forgets even a live version for hot reload.
 
 mod asset_ref;
 mod db;

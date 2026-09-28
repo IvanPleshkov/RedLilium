@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::db::AssetDb;
 use crate::handle::AssetHandle;
@@ -31,9 +31,30 @@ use crate::source::Guid;
 /// (so a broken asset isn't re-requested every frame by demand-driven sync),
 /// and the generation counter.
 pub struct ResidentCache<K, T> {
-    resident: HashMap<K, Arc<T>>,
+    resident: HashMap<K, Cached<T>>,
     failed: HashSet<K>,
     generation: u64,
+}
+
+enum Cached<T> {
+    Retained(Arc<T>),
+    Released(Weak<T>),
+}
+
+impl<T> Cached<T> {
+    fn get(&self) -> Option<Arc<T>> {
+        match self {
+            Self::Retained(value) => Some(value.clone()),
+            Self::Released(value) => value.upgrade(),
+        }
+    }
+
+    fn is_unused(&self) -> bool {
+        match self {
+            Self::Retained(_) => false,
+            Self::Released(value) => value.strong_count() == 0,
+        }
+    }
 }
 
 impl<K: Eq + Hash, T> Default for ResidentCache<K, T> {
@@ -52,8 +73,59 @@ impl<K: Eq + Hash, T> ResidentCache<K, T> {
     }
 
     /// The resident value for `key`, if published.
-    pub fn get(&self, key: &K) -> Option<&Arc<T>> {
-        self.resident.get(key)
+    pub fn get(&self, key: &K) -> Option<Arc<T>> {
+        self.resident.get(key).and_then(Cached::get)
+    }
+
+    /// Stop retaining this version, but keep its identity while another owner
+    /// holds it. Does not invalidate it or clear a failure latch. Unlike
+    /// `invalidate`, a later lookup can still upgrade the weak reference.
+    pub fn release(&mut self, key: &K) {
+        if let Some(entry) = self.resident.get_mut(key)
+            && let Cached::Retained(value) = entry
+        {
+            *entry = Cached::Released(Arc::downgrade(value));
+            self.generation += 1;
+        }
+    }
+
+    /// Remove cache-only strong entries and expired weak entries. Returns the
+    /// removed keys so composite managers can retire associated metadata.
+    /// Live released entries and failure latches remain. Run explicitly at a
+    /// scene/preview boundary; this is not automatic eviction on every frame.
+    pub fn collect_unused(&mut self) -> Vec<K>
+    where
+        K: Clone,
+    {
+        // Equal assets may be published under multiple keys. Count all strong
+        // owners inside this cache so aliases do not keep each other alive.
+        let mut retained = HashMap::new();
+        for entry in self.resident.values() {
+            if let Cached::Retained(value) = entry {
+                *retained.entry(Arc::as_ptr(value)).or_insert(0usize) += 1;
+            }
+        }
+        for entry in self.resident.values_mut() {
+            if let Cached::Retained(value) = entry
+                && Arc::strong_count(value) == retained[&Arc::as_ptr(value)]
+            {
+                *retained.get_mut(&Arc::as_ptr(value)).unwrap() -= 1;
+                *entry = Cached::Released(Arc::downgrade(value));
+            }
+        }
+        let mut removed = Vec::new();
+        self.resident.retain(|key, value| {
+            if value.is_unused() {
+                removed.push(key.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if !removed.is_empty() {
+            self.generation += 1;
+        }
+        removed
     }
 
     /// Whether `key` is latched as failed.
@@ -64,7 +136,7 @@ impl<K: Eq + Hash, T> ResidentCache<K, T> {
     /// Publish (or republish — hot reload) the resident value for `key`.
     pub fn publish(&mut self, key: K, value: Arc<T>) {
         self.failed.remove(&key);
-        self.resident.insert(key, value);
+        self.resident.insert(key, Cached::Retained(value));
         self.generation += 1;
     }
 
@@ -88,8 +160,10 @@ impl<K: Eq + Hash, T> ResidentCache<K, T> {
     }
 
     /// Iterate the resident entries (e.g. for pull-validation passes).
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &Arc<T>)> {
-        self.resident.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&K, Arc<T>)> {
+        self.resident
+            .iter()
+            .filter_map(|(key, value)| value.get().map(|value| (key, value)))
     }
 
     /// Bump the generation without touching resident state: consumers that
@@ -148,7 +222,7 @@ where
 
     /// The resident asset for `guid`, requesting it once if not yet seen.
     /// `None` while loading (or after a failure) — call again next frame to
-    /// advance. On a resident hit this is a plain map lookup.
+    /// advance. A resident hit clones its retained Arc or upgrades its Weak.
     pub fn get_or_request(
         &mut self,
         processor: &mut AssetProcessor,
@@ -156,7 +230,7 @@ where
         guid: Guid,
     ) -> Option<Arc<L::Asset>> {
         if let Some(asset) = self.cache.get(&guid) {
-            return Some(asset.clone());
+            return Some(asset);
         }
         if self.cache.is_failed(&guid) {
             return None;
@@ -198,8 +272,24 @@ where
     }
 
     /// The resident asset for `guid` if loaded — no request side effect.
-    pub fn get(&self, guid: Guid) -> Option<&Arc<L::Asset>> {
+    pub fn get(&self, guid: Guid) -> Option<Arc<L::Asset>> {
         self.cache.get(&guid)
+    }
+
+    /// Release cache ownership and cancel this manager's pending request.
+    /// Existing consumers keep the version alive and subsequent requests reuse
+    /// it through a weak reference. Failure latches require invalidation.
+    pub fn release(&mut self, guid: Guid) {
+        self.cache.release(&guid);
+        if self.pending.remove(&guid).is_some() {
+            self.cache.bump_generation();
+        }
+    }
+
+    /// Collect unreferenced assets and dead weak entries; return entry count.
+    /// Pending requests and failure latches are not discarded.
+    pub fn collect_unused(&mut self) -> usize {
+        self.cache.collect_unused().len()
     }
 
     /// Whether `guid` is latched as failed.
@@ -224,6 +314,74 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn released_assets_reuse_identity_and_dead_weak_entries_are_collected() {
+        let mut cache = ResidentCache::new();
+        let value = Arc::new(vec![1u8; 1024]);
+        cache.publish(1, value.clone());
+        cache.release(&1);
+        assert_eq!(Arc::strong_count(&value), 1);
+        assert!(Arc::ptr_eq(&cache.get(&1).unwrap(), &value));
+        assert!(cache.collect_unused().is_empty());
+        let second_owner = cache.get(&1).unwrap();
+        drop(value);
+        assert!(Arc::ptr_eq(&cache.get(&1).unwrap(), &second_owner));
+        drop(second_owner);
+        assert!(cache.get(&1).is_none());
+        assert_eq!(
+            cache.resident.len(),
+            1,
+            "dead weak allocation remains tracked"
+        );
+        assert_eq!(cache.collect_unused(), vec![1]);
+        assert!(
+            cache.resident.is_empty(),
+            "including the weak allocation owner"
+        );
+        assert!(cache.collect_unused().is_empty());
+    }
+
+    #[test]
+    fn collect_unused_handles_aliases_without_evicting_external_owners() {
+        let mut cache = ResidentCache::new();
+        let value = Arc::new(42);
+        let weak = Arc::downgrade(&value);
+        cache.publish(1, value.clone());
+        cache.publish(2, value.clone());
+        cache.publish(3, value.clone());
+        cache.release(&3);
+        assert!(cache.collect_unused().is_empty());
+        drop(value);
+        let mut removed = cache.collect_unused();
+        removed.sort();
+        assert_eq!(removed, vec![1, 2, 3]);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn invalidation_and_republication_never_resurrect_released_versions() {
+        let mut cache = ResidentCache::new();
+        let old = Arc::new(1);
+        cache.publish(1, old.clone());
+        cache.release(&1);
+        cache.invalidate(&1);
+        assert!(cache.get(&1).is_none());
+        let new = Arc::new(2);
+        cache.publish(1, new.clone());
+        cache.release(&1);
+        assert!(Arc::ptr_eq(&cache.get(&1).unwrap(), &new));
+        assert!(!Arc::ptr_eq(&cache.get(&1).unwrap(), &old));
+        cache.publish(1, old.clone());
+        assert!(Arc::ptr_eq(&cache.get(&1).unwrap(), &old));
+        cache.fail(2);
+        cache.release(&2);
+        cache.collect_unused();
+        assert!(
+            cache.is_failed(&2),
+            "collection must not cause failure retry loops"
+        );
+    }
 
     /// Invalidation must bump the generation even when nothing was resident
     /// (mid-load / failed): consumers gate their demand-scan on the generation,
