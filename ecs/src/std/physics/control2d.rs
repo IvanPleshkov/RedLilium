@@ -183,6 +183,26 @@ impl PhysicsWorld2D {
             });
             live.set_friction(collider.friction as Real);
             live.set_restitution(collider.restitution as Real);
+            live.set_friction_combine_rule(
+                collider.friction_combine_rule.unwrap_or_default().into(),
+            );
+            live.set_restitution_combine_rule(
+                collider.restitution_combine_rule.unwrap_or_default().into(),
+            );
+            if old_collider.friction != collider.friction
+                || old_collider.restitution != collider.restitution
+                || old_collider.friction_combine_rule != collider.friction_combine_rule
+                || old_collider.restitution_combine_rule != collider.restitution_combine_rule
+            {
+                // Rapier 0.36 material setters do not dirty cached contact pairs.
+                // Refilter through its public API, restoring the mask before stepping.
+                let groups = live.collision_groups();
+                live.set_collision_groups(InteractionGroups {
+                    filter: groups.filter ^ Group::GROUP_1,
+                    ..groups
+                });
+                live.set_collision_groups(groups);
+            }
             live.set_sensor(collider.sensor.is_some());
             live.set_collision_groups(collider.collision_groups.unwrap_or_default().into());
             let types = collider.collision_types.unwrap_or_default().into();

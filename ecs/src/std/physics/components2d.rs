@@ -246,6 +246,10 @@ pub struct Collider2D {
     pub friction: f32,
     /// Restitution (bounciness, 0.0–1.0).
     pub restitution: f32,
+    /// Contact friction combination override. None uses Average.
+    pub friction_combine_rule: Option<super::CoefficientCombineRule>,
+    /// Contact restitution combination override. None uses Average.
+    pub restitution_combine_rule: Option<super::CoefficientCombineRule>,
     /// Mass density.
     pub density: f32,
     /// Whether this is a sensor/trigger (no contact forces).
@@ -296,6 +300,23 @@ impl Collider2D {
             },
             ..Self::default()
         }
+    }
+
+    /// Overrides contact friction combination; None restores Average.
+    pub fn with_friction_combine_rule(
+        mut self,
+        rule: Option<super::CoefficientCombineRule>,
+    ) -> Self {
+        self.friction_combine_rule = rule;
+        self
+    }
+    /// Overrides contact restitution combination; None restores Average.
+    pub fn with_restitution_combine_rule(
+        mut self,
+        rule: Option<super::CoefficientCombineRule>,
+    ) -> Self {
+        self.restitution_combine_rule = rule;
+        self
     }
 
     pub fn with_friction(mut self, v: f32) -> Self {
@@ -365,6 +386,8 @@ impl Default for Collider2D {
             local_pose: Default::default(),
             friction: 0.5,
             restitution: 0.0,
+            friction_combine_rule: None,
+            restitution_combine_rule: None,
             density: 1.0,
             sensor: None,
             collision_events: None,
@@ -627,6 +650,8 @@ impl Collider2D {
             .position(self.local_pose.to_rapier())
             .friction(self.friction as Real)
             .restitution(self.restitution as Real)
+            .friction_combine_rule(self.friction_combine_rule.unwrap_or_default().into())
+            .restitution_combine_rule(self.restitution_combine_rule.unwrap_or_default().into())
             .density(self.density as Real)
             .sensor(self.sensor.is_some())
             .collision_groups(self.collision_groups.unwrap_or_default().into())

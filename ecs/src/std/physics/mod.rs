@@ -107,3 +107,6 @@ pub use mass::{AngularInertia3D, MassSettings2D, MassSettings3D};
 
 mod joints;
 pub use joints::{JointDrive, JointLimits, JointMotor, JointMotorError, JointMotorModel};
+
+mod material;
+pub use material::CoefficientCombineRule;

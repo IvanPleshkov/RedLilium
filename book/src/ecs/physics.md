@@ -262,6 +262,45 @@ separate event identity for a compound part. Events retain their captured identi
 after removal/reparenting. Descriptors, local geometry and explicit owner references
 round-trip through scenes/prefabs, with entity references remapped on load.
 
+### Contact material combination
+
+`Collider2D/3D` has separate optional `friction_combine_rule` and
+`restitution_combine_rule` overrides. `None` uses `Average`. The engine-owned
+`physics::CoefficientCombineRule` supports:
+
+| Rule | Effective coefficient for values a, b |
+| --- | --- |
+| `Average` | (a + b) / 2 |
+| `Min` | min(a, b) |
+| `Multiply` | a × b |
+| `Max` | max(a, b) |
+| `ClampedSum` | clamp(a + b, 0, 1) |
+| `GeometricMean` | √(a × b) |
+
+When the two colliders request different rules, priority is
+`GeometricMean > ClampedSum > Max > Multiply > Min > Average`.
+Friction and restitution resolve independently. This is rule priority, not a
+comparison of the resulting coefficients. In particular, `Min` makes an icy
+surface slippery against `Average`, but does not override `Max` on the other
+surface. `ClampedSum` caps friction at one too; other friction rules may yield
+values above one.
+
+```rust,ignore
+use redlilium_ecs::physics::CoefficientCombineRule;
+let ice = Collider3D::cuboid(10.0, 0.1, 10.0)
+    .with_friction(0.0)
+    .with_friction_combine_rule(Some(CoefficientCombineRule::Min));
+let rubber = Collider3D::ball(0.5)
+    .with_restitution(0.8)
+    .with_restitution_combine_rule(Some(CoefficientCombineRule::Max));
+```
+
+Overrides are serialized with the collider and editable in the inspector. Sync
+applies changes to existing colliders, preserving handles, shape and mass.
+Updated materials take effect on contacts at the next physics step. Sensors
+retain the authored settings but produce no contact response. Existing numeric
+validation is unchanged: finite nonnegative friction and restitution in `[0, 1]`.
+
 ### Final mass, centre of mass and inertia
 
 `RigidBody2D/3D::with_mass_properties` accepts `Option<MassSettings2D/3D>`.
