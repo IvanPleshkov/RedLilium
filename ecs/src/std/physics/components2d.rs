@@ -7,7 +7,7 @@
 
 use super::{
     CcdSettings, CollisionEventSettings, CollisionGroups, CollisionTypes, ContactForceSettings,
-    LockedAxes2D, SensorSettings,
+    LockedAxes2D, MassSettings2D, SensorSettings,
 };
 use redlilium_core::math::Vec2;
 
@@ -155,6 +155,8 @@ pub struct RigidBody2D {
     pub ccd: Option<CcdSettings>,
     /// Optional world-axis locks for dynamic motion. None leaves all axes free.
     pub locked_axes: Option<LockedAxes2D>,
+    /// Final mass properties. None derives all properties from colliders.
+    pub mass_properties: Option<MassSettings2D>,
 }
 
 impl RigidBody2D {
@@ -208,6 +210,11 @@ impl RigidBody2D {
         self
     }
 
+    pub fn with_mass_properties(mut self, value: Option<MassSettings2D>) -> Self {
+        self.mass_properties = value;
+        self
+    }
+
     pub fn with_gravity_scale(mut self, v: f32) -> Self {
         self.gravity_scale = v;
         self
@@ -223,6 +230,7 @@ impl Default for RigidBody2D {
             gravity_scale: 1.0,
             ccd: None,
             locked_axes: None,
+            mass_properties: None,
         }
     }
 }
@@ -592,6 +600,14 @@ pub fn build_physics_world_2d(world: &mut crate::World) -> Result<(), crate::Sys
             collider.validate(entity)?;
         }
     }
+    super::systems2d::prepare_mass_updates(
+        world,
+        &PhysicsWorld2D::default(),
+        world.try_read::<RigidBody2D>().as_ref(),
+        world.try_read::<Collider2D>().as_ref(),
+        world.try_read::<ColliderBody2D>().as_ref(),
+        world.try_read::<crate::Transform>().as_ref(),
+    )?;
     world.insert_resource(PhysicsWorld2D::default());
     crate::ExclusiveSystem::run(&mut super::systems2d::SyncPhysicsBodies2D, world)
 }
@@ -739,5 +755,32 @@ impl crate::ComponentField for ColliderPose2D {
         ctx: &mut crate::serialize::DeserializeContext<'_>,
     ) -> Result<Self, crate::serialize::DeserializeError> {
         ctx.read_serde(name)
+    }
+}
+
+impl ColliderShape2D {
+    /// Analytic primitive mass calculation; compounds combine part mass properties
+    /// without constructing a temporary geometry/BVH for validation.
+    pub(super) fn mass_properties_for_density(&self, density: Real) -> MassProperties {
+        if density == 0.0 {
+            return MassProperties::default();
+        }
+        match self {
+            Self::Ball { radius } => Ball::new(*radius as Real).mass_properties(density),
+            Self::Cuboid { half_extents: v } => {
+                Cuboid::new(Vector::new(v.x as Real, v.y as Real)).mass_properties(density)
+            }
+            Self::CapsuleY {
+                half_height,
+                radius,
+            } => Capsule::new_y(*half_height as Real, *radius as Real).mass_properties(density),
+            Self::Compound { parts } => {
+                parts.iter().fold(MassProperties::default(), |sum, part| {
+                    sum + Self::from(part.shape.clone())
+                        .mass_properties_for_density(density)
+                        .transform_by(&part.local_pose.to_rapier())
+                })
+            }
+        }
     }
 }

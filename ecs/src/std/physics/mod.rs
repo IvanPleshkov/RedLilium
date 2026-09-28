@@ -100,3 +100,7 @@ mod locked_axes;
 pub use locked_axes::{LockedAxes2D, LockedAxes3D};
 
 mod sync_support;
+
+mod mass;
+mod mass_support;
+pub use mass::{AngularInertia3D, MassSettings2D, MassSettings3D};

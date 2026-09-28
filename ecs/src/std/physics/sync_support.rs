@@ -38,6 +38,8 @@ macro_rules! collider_sync {
                     collider.validate(entity)?;
                 }
             }
+            let mass_updates =
+                prepare_mass_updates(world, physics, bodies, colliders, owners, transforms)?;
             let mut changes = SyncChanges::default();
             changes.removed_bodies = physics
                 .entity_to_body
@@ -113,6 +115,11 @@ macro_rules! collider_sync {
                     physics.entity_to_collider.insert(entity, handle);
                     physics.collider_to_entity.insert(handle, entity);
                     changes.colliders.push((entity, handle));
+                }
+            }
+            for (entity, properties) in mass_updates {
+                if let Some(handle) = physics.body_for_entity(entity) {
+                    physics.apply_mass_update(handle, properties);
                 }
             }
             Ok(changes)
@@ -193,6 +200,7 @@ macro_rules! collider_sync {
                     world.resource_mut::<$physics>().remove_collider(handle);
                 }
             }
+            world.resource_mut::<$physics>().refresh_pending_mass();
         }
 
         /// Synchronizes bodies and their independently owned colliders.

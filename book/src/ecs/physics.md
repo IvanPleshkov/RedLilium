@@ -106,8 +106,8 @@ the body's control mode (position-based kinematics derives velocity from its tar
 `RigidBody*`, `Collider*` and `ImpulseJoint*` remain editable settings. Run the
 corresponding sync after game systems edit settings and before the physics step.
 Body and collider changes update the existing body/collider handles, preserving
-the body and its connections. Changing shape/density updates mass properties
-through Rapier on its next step. Changed settings wake the body; unchanged
+the body and its connections. Changing mass settings or collider shape/density/local pose updates mass
+properties by the end of body sync. Changed settings wake the body; unchanged
 settings do not wake it or overwrite its runtime velocity. Body-type changes
 also reset interpolation history.
 
@@ -171,7 +171,8 @@ density, sensor status, groups and event settings. For independently identifiabl
 or configurable parts, use separate collider entities. Overlapping parts are
 not a geometric union for mass calculation; their mass contributions add.
 Sensors retain the configured density too; use density zero if they should not
-contribute mass. Bodies with no colliders have no collider-derived mass/inertia.
+contribute mass. Bodies with no colliders have no collider-derived mass/inertia;
+fully explicit body mass properties can supply them.
 
 A missing, disabled or removed body leaves collider descriptors inactive, without
 despawning their entities. Restoring the body activates them at the next sync.
@@ -193,6 +194,78 @@ Events remain per collider pair; there is no implicit deduplication by body or
 separate event identity for a compound part. Events retain their captured identities
 after removal/reparenting. Descriptors, local geometry and explicit owner references
 round-trip through scenes/prefabs, with entity references remapped on load.
+
+### Final mass, centre of mass and inertia
+
+`RigidBody2D/3D::with_mass_properties` accepts `Option<MassSettings2D/3D>`.
+`None` derives all mass properties from attached colliders and their densities.
+`Some(settings)` sets the **final total mass**, not additional mass. The centre
+of mass and central angular inertia can each be inferred or overridden:
+
+```rust,ignore
+use redlilium_ecs::physics::{MassSettings3D, AngularInertia3D};
+
+let car = RigidBody3D::dynamic().with_mass_properties(Some(
+    MassSettings3D::new(1200.0)
+        .with_center_of_mass(Some(Vec3::new(0.0, -0.3, 0.0))),
+));
+
+// Fully explicit properties also work without any colliders.
+let body = RigidBody3D::dynamic().with_mass_properties(Some(
+    MassSettings3D::new(10.0)
+        .with_center_of_mass(Some(Vec3::zeros()))
+        .with_inertia(Some(AngularInertia3D::diagonal(Vec3::new(2.0, 3.0, 4.0)))),
+));
+```
+
+Settings contain `mass`, `center_of_mass: Option<Vec2/Vec3>` and
+`inertia: Option<f32/AngularInertia3D>`. In 3D, `AngularInertia3D` contains
+`principal: Vec3` and `rotation: Quat`: moments about the centre of mass and
+orientation of their principal axes relative to the body. Identity rotation
+aligns these axes with the body's local XYZ axes. The 2D moment is about Z.
+Mass is in kg and inertia in kg·m² when the length unit is a metre.
+
+For inferred values, the integration combines collider geometry, local poses
+and authored densities, then scales the distribution to the requested total
+mass. This preserves the density-weighted centre and scales central inertia
+proportionally. Zero-density colliders do not contribute; sensors follow the
+same density rule. Compound parts contribute additively.
+
+An overridden centre is relative to the body origin, not world space. Moving it
+preserves the inferred **central** inertia: this authors a virtual translation
+of the mass distribution relative to collision geometry. It does not move the
+body pose, colliders or joint anchors. Explicit moments are already for the
+requested final mass and are not automatically scaled.
+
+Sync validates all proposed mass models before mutating any native objects,
+including collider removal, owner changes and density/geometry edits. If an
+inferred value lacks a positive finite collider mass source, sync returns
+`InvalidConfiguration` and retains the previously applied physics state. Fully
+explicit settings require no geometry. Each authored mass/moment must be finite
+and positive; centre coordinates must be finite; 3D principal moments must satisfy
+the triangle inequalities (with rounding tolerance), and the axes quaternion
+must be finite and nonzero. Derived properties must also be representable in the
+active physics precision. Use `locked_axes` for locked rotation, not zero inertia.
+
+After sync, mass properties are immediately usable by impulses, before stepping.
+Edits preserve handles, joints, body-origin pose, linear centre-of-mass velocity
+and angular velocity; they do not conserve momentum automatically. Changed mass
+models wake their bodies; no-op sync preserves sleep. Fixed and kinematic bodies
+retain the settings for a later switch to dynamic.
+
+Only affected bodies are recalculated. Friction, event settings and other edits
+unrelated to mass do not rebuild the mass model. In explicit mode the backend
+colliders have zero mass contribution; ECS retains authored densities for
+inference and for returning to automatic mode. The raw read-only Rapier collider
+`density()` therefore reports zero in this mode. Total properties belong to the
+body. Returning to `None` restores collider contributions and removes the explicit
+override. Ordinary automatic bodies may have zero collider-derived mass.
+
+If earlier deferred commands cancel a newly synchronized collider, publication
+recalculates surviving explicit bodies. When cancellation removes a required
+mass source, `StepPhysics*` rejects the incomplete model until descriptors are
+corrected and body sync succeeds. Settings are serialized with the body and
+editable in the inspector.
 
 ### Axis locks
 

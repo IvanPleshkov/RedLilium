@@ -113,6 +113,9 @@ mod dim2 {
 
     impl RigidBody2D {
         pub(in crate::std::physics) fn validate(&self, entity: Entity) -> Result<(), SystemError> {
+            if let Some(settings) = self.mass_properties {
+                settings.validate(entity)?;
+            }
             body(
                 entity,
                 self.linear_damping,
@@ -190,6 +193,9 @@ mod dim3 {
 
     impl RigidBody3D {
         pub(in crate::std::physics) fn validate(&self, entity: Entity) -> Result<(), SystemError> {
+            if let Some(settings) = self.mass_properties {
+                settings.validate(entity)?;
+            }
             body(
                 entity,
                 self.linear_damping,

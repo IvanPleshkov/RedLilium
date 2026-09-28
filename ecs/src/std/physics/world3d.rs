@@ -154,6 +154,7 @@ pub struct PhysicsWorld3D {
         ),
     >,
     pub(super) pose_resets: std::collections::HashSet<RigidBodyHandle>,
+    pub(super) mass_dirty: std::collections::HashSet<RigidBodyHandle>,
     pub(super) applied_bodies: HashMap<RigidBodyHandle, super::components3d::RigidBody3D>,
     pub(super) applied_colliders: HashMap<ColliderHandle, super::components3d::Collider3D>,
     pub(super) entity_to_collider: HashMap<crate::Entity, ColliderHandle>,
@@ -187,6 +188,7 @@ impl Default for PhysicsWorld3D {
             collision_events: Default::default(),
             teleports: HashMap::new(),
             pose_resets: Default::default(),
+            mass_dirty: Default::default(),
             applied_bodies: HashMap::new(),
             applied_colliders: HashMap::new(),
             entity_to_collider: HashMap::new(),
@@ -351,6 +353,15 @@ impl PhysicsWorld3D {
 
     /// Removes a managed collider without removing its owning body or joints.
     pub(super) fn remove_collider(&mut self, handle: ColliderHandle) {
+        if let Some(parent) = self.colliders.get(handle).and_then(|c| c.parent()) {
+            if self
+                .applied_bodies
+                .get(&parent)
+                .is_some_and(|d| d.mass_properties.is_some())
+            {
+                self.mass_dirty.insert(parent);
+            }
+        }
         self.collision_events.collider_removed(handle);
         self.applied_colliders.remove(&handle);
         if let Some(entity) = self.collider_to_entity.remove(&handle) {
@@ -399,6 +410,7 @@ impl PhysicsWorld3D {
                 self.collision_events.collider_removed(collider);
             }
         }
+        self.mass_dirty.remove(&handle);
         self.applied_bodies.remove(&handle);
         self.pose_resets.remove(&handle);
         self.teleports.retain(|_, (body, _, _)| *body != handle);
@@ -556,3 +568,5 @@ mod tests {
         assert_eq!(physics.body_for_entity(entity), Some(bh));
     }
 }
+
+super::mass_support::mass_world!(PhysicsWorld3D);

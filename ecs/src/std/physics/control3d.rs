@@ -193,7 +193,15 @@ impl PhysicsWorld3D {
             if old_collider.local_pose != collider.local_pose {
                 live.set_position_wrt_parent(collider.local_pose.to_rapier());
             }
-            live.set_density(collider.density as Real);
+            let explicit_mass = live
+                .parent()
+                .and_then(|h| self.applied_bodies.get(&h))
+                .is_some_and(|b| b.mass_properties.is_some());
+            live.set_density(if explicit_mass {
+                0.0
+            } else {
+                collider.density as Real
+            });
             live.set_friction(collider.friction as Real);
             live.set_restitution(collider.restitution as Real);
             live.set_sensor(collider.sensor.is_some());

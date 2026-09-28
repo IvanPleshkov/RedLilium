@@ -79,6 +79,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (
@@ -154,6 +155,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (
@@ -250,6 +252,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (
@@ -346,6 +349,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (
@@ -442,6 +446,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (
@@ -538,6 +543,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (
@@ -634,6 +640,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (
@@ -730,6 +737,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (
@@ -826,6 +834,7 @@
                         ("gravity_scale", F32(1.0)),
                         ("ccd", Null),
                         ("locked_axes", Null),
+                        ("mass_properties", Null),
                     ]),
                 ),
                 (

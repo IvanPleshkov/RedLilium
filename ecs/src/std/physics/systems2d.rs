@@ -45,6 +45,11 @@ impl crate::System for StepPhysics2D {
         )>()
         .execute(
             |(mut physics, handles, mut transforms, parents, mut targets, mut velocities)| {
+                if !physics.mass_dirty.is_empty() {
+                    return Err(crate::SystemError::InvalidConfiguration {
+                        message: "physics mass_properties lost required collider geometry during deferred publication; correct descriptors and run body sync before stepping".into(),
+                    });
+                }
                 if physics.collision_events.requires_queue() && !events_available {
                     return Err(crate::SystemError::InvalidConfiguration {
                         message:
@@ -229,6 +234,7 @@ fn remove_body_components(
 
 use super::components2d::{Collider2D, ColliderBody2D, RigidBody2D};
 use super::world2d::Collider2DHandle;
+super::mass_support::mass_sync!(PhysicsWorld2D, RigidBody2D, Collider2D, ColliderBody2D);
 super::sync_support::collider_sync!(
     PhysicsWorld2D,
     RigidBody2D,
