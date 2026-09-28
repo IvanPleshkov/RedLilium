@@ -87,7 +87,6 @@ fn joint(
     body2: Entity,
     anchor1: &[f32],
     anchor2: &[f32],
-    axis: Option<&[f32]>,
 ) -> Result<(), SystemError> {
     if body1 == body2 {
         return Err(invalid(
@@ -97,11 +96,6 @@ fn joint(
     }
     if !anchor1.iter().chain(anchor2).all(|x| x.is_finite()) {
         return Err(invalid(entity, "joint anchors must be finite"));
-    }
-    if let Some(axis) = axis
-        && (!axis.iter().all(|x| x.is_finite()) || axis.iter().all(|x| *x == 0.0))
-    {
-        return Err(invalid(entity, "joint axis must be finite and nonzero"));
     }
     Ok(())
 }
@@ -165,23 +159,22 @@ mod dim2 {
     }
     impl ImpulseJoint2D {
         pub(in crate::std::physics) fn validate(&self, entity: Entity) -> Result<(), SystemError> {
-            let (anchor1, anchor2, axis) = match &self.joint_type {
-                JointType2D::Revolute { anchor1, anchor2 }
-                | JointType2D::Fixed { anchor1, anchor2 } => (anchor1, anchor2, None),
-                JointType2D::Prismatic {
-                    anchor1,
-                    anchor2,
-                    axis,
-                } => (anchor1, anchor2, Some(axis.as_slice())),
-            };
             joint(
                 entity,
                 self.body1,
                 self.body2,
-                anchor1.as_slice(),
-                anchor2.as_slice(),
-                axis,
+                self.local_frame1.translation.as_slice(),
+                self.local_frame2.translation.as_slice(),
+            )?;
+            self.local_frame1.validate(entity)?;
+            self.local_frame2.validate(entity)?;
+            super::super::joints::validate_settings(
+                self.axis().is_some(),
+                self.joint_type == JointType2D::Revolute,
+                self.limits,
+                self.motor,
             )
+            .map_err(|e| invalid(entity, &e.to_string()))
         }
     }
 }
@@ -252,28 +245,22 @@ mod dim3 {
     }
     impl ImpulseJoint3D {
         pub(in crate::std::physics) fn validate(&self, entity: Entity) -> Result<(), SystemError> {
-            let (anchor1, anchor2, axis) = match &self.joint_type {
-                JointType3D::Spherical { anchor1, anchor2 }
-                | JointType3D::Fixed { anchor1, anchor2 } => (anchor1, anchor2, None),
-                JointType3D::Revolute {
-                    anchor1,
-                    anchor2,
-                    axis,
-                }
-                | JointType3D::Prismatic {
-                    anchor1,
-                    anchor2,
-                    axis,
-                } => (anchor1, anchor2, Some(axis.as_slice())),
-            };
             joint(
                 entity,
                 self.body1,
                 self.body2,
-                anchor1.as_slice(),
-                anchor2.as_slice(),
-                axis,
+                self.local_frame1.translation.as_slice(),
+                self.local_frame2.translation.as_slice(),
+            )?;
+            self.local_frame1.validate(entity)?;
+            self.local_frame2.validate(entity)?;
+            super::super::joints::validate_settings(
+                self.axis().is_some(),
+                self.joint_type == JointType3D::Revolute,
+                self.limits,
+                self.motor,
             )
+            .map_err(|e| invalid(entity, &e.to_string()))
         }
     }
 }

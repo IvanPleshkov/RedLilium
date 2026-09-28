@@ -336,7 +336,7 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints2D {
                 let mut physics = world.resource_mut::<PhysicsWorld2D>();
                 for (entity, joint_desc) in &new_joints {
                     if let Some(handle) = physics.entity_to_joint.get(entity).copied() {
-                        if physics.applied_joints.get(&handle) == Some(joint_desc) {
+                        if physics.update_joint_parameters(handle, joint_desc) {
                             continue;
                         }
                         physics.entity_to_joint.remove(entity);
@@ -423,7 +423,7 @@ impl crate::System for SyncPhysicsJointsSystem2D {
                 for (idx, joint_desc) in joints.iter() {
                     if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
                         if let Some(handle) = physics.entity_to_joint.get(&entity).copied() {
-                            if physics.applied_joints.get(&handle) == Some(joint_desc) {
+                            if physics.update_joint_parameters(handle, joint_desc) {
                                 continue;
                             }
                             physics.entity_to_joint.remove(&entity);

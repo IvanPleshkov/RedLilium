@@ -379,65 +379,113 @@ impl Default for Collider2D {
 // Joint descriptor
 // ---------------------------------------------------------------------------
 
-/// 2D joint type descriptor.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Joint constraint kind. Limits and motors support revolute and prismatic only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JointType2D {
-    /// Hinge joint (rotation around Z axis). In 2D the rotation axis is implicit.
-    Revolute { anchor1: Vec2, anchor2: Vec2 },
-    /// Rigid attachment (no relative movement).
-    Fixed { anchor1: Vec2, anchor2: Vec2 },
-    /// Sliding joint along an axis.
-    Prismatic {
-        /// Finite nonzero direction; normalized when applied to Rapier.
-        axis: Vec2,
-        anchor1: Vec2,
-        anchor2: Vec2,
-    },
+    Revolute,
+    Fixed,
+    Prismatic,
 }
 
-/// Describes a 2D impulse joint between two rigid body entities.
-///
-/// Attach this component to a (possibly dedicated) entity to create a joint
-/// constraint. The `body1` and `body2` fields reference entities that must
-/// have [`RigidBody2D`] + [`Transform`](crate::Transform) components.
-///
-/// Entity references are automatically remapped during prefab instantiation
-/// via the `#[derive(Component)]` macro.
+/// Body-local joint frame, relative to the body origin (not its centre of mass).
+/// Local X is the slider axis and, in 3D, the hinge axis; 2D hinges rotate around Z.
+/// Matching frame orientations define zero angle.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct JointFrame2D {
+    pub translation: Vec2,
+    pub rotation: f32,
+}
+impl Default for JointFrame2D {
+    fn default() -> Self {
+        Self {
+            translation: Vec2::zeros(),
+            rotation: 0.0,
+        }
+    }
+}
+impl JointFrame2D {
+    fn to_rapier(self) -> Pose {
+        super::control2d::PhysicsPose2D {
+            translation: self.translation,
+            rotation: self.rotation,
+        }
+        .to_rapier()
+    }
+    pub(super) fn validate(&self, entity: crate::Entity) -> Result<(), crate::SystemError> {
+        super::control2d::PhysicsPose2D {
+            translation: self.translation,
+            rotation: self.rotation,
+        }
+        .validate(entity)
+    }
+    /// Builds an X-axis frame. Invalid axes produce an invalid frame rejected by sync.
+    pub fn from_axis(translation: Vec2, axis: Vec2) -> Self {
+        let n = (axis / axis.amax()).normalize();
+        let rotation = if n.iter().all(|v| v.is_finite()) {
+            n.y.atan2(n.x)
+        } else {
+            f32::NAN
+        };
+        Self {
+            translation,
+            rotation,
+        }
+    }
+}
+
+/// Editable joint configuration and motor targets. Sync applies parameter edits in place.
+/// Entity references are remapped during scene/prefab instantiation.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
 pub struct ImpulseJoint2D {
-    /// First body entity.
     pub body1: crate::Entity,
-    /// Second body entity.
     pub body2: crate::Entity,
-    /// Joint type and parameters.
     pub joint_type: JointType2D,
+    pub local_frame1: JointFrame2D,
+    pub local_frame2: JointFrame2D,
+    pub limits: Option<super::JointLimits>,
+    pub motor: Option<super::JointMotor>,
 }
-
 impl ImpulseJoint2D {
-    /// Creates a revolute (hinge) joint.
+    pub fn new(body1: crate::Entity, body2: crate::Entity, joint_type: JointType2D) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type,
+            local_frame1: Default::default(),
+            local_frame2: Default::default(),
+            limits: None,
+            motor: None,
+        }
+    }
     pub fn revolute(
         body1: crate::Entity,
         body2: crate::Entity,
         anchor1: Vec2,
         anchor2: Vec2,
     ) -> Self {
-        Self {
-            body1,
-            body2,
-            joint_type: JointType2D::Revolute { anchor1, anchor2 },
-        }
+        Self::new(body1, body2, JointType2D::Revolute).with_local_frames(
+            JointFrame2D {
+                translation: anchor1,
+                ..Default::default()
+            },
+            JointFrame2D {
+                translation: anchor2,
+                ..Default::default()
+            },
+        )
     }
-
-    /// Creates a fixed (rigid attachment) joint.
     pub fn fixed(body1: crate::Entity, body2: crate::Entity, anchor1: Vec2, anchor2: Vec2) -> Self {
-        Self {
-            body1,
-            body2,
-            joint_type: JointType2D::Fixed { anchor1, anchor2 },
-        }
+        Self::new(body1, body2, JointType2D::Fixed).with_local_frames(
+            JointFrame2D {
+                translation: anchor1,
+                ..Default::default()
+            },
+            JointFrame2D {
+                translation: anchor2,
+                ..Default::default()
+            },
+        )
     }
-
-    /// Creates a prismatic (slider) joint along the given axis.
     pub fn prismatic(
         body1: crate::Entity,
         body2: crate::Entity,
@@ -445,14 +493,85 @@ impl ImpulseJoint2D {
         anchor1: Vec2,
         anchor2: Vec2,
     ) -> Self {
-        Self {
-            body1,
-            body2,
-            joint_type: JointType2D::Prismatic {
-                axis,
-                anchor1,
-                anchor2,
-            },
+        Self::new(body1, body2, JointType2D::Prismatic).with_local_frames(
+            JointFrame2D::from_axis(anchor1, axis),
+            JointFrame2D::from_axis(anchor2, axis),
+        )
+    }
+    pub fn with_local_frames(mut self, frame1: JointFrame2D, frame2: JointFrame2D) -> Self {
+        self.local_frame1 = frame1;
+        self.local_frame2 = frame2;
+        self
+    }
+    pub fn with_limits(mut self, limits: Option<super::JointLimits>) -> Self {
+        self.limits = limits;
+        self
+    }
+    pub fn with_motor(mut self, motor: Option<super::JointMotor>) -> Self {
+        self.motor = motor;
+        self
+    }
+    /// Updates the ECS target, leaving the old value intact on error. Sync applies it.
+    pub fn set_motor_position_target(
+        &mut self,
+        position: f32,
+    ) -> Result<(), super::JointMotorError> {
+        let mut motor = self.motor.ok_or(super::JointMotorError::Disabled)?;
+        motor.set_position(position)?;
+        super::joints::validate_settings(
+            self.axis().is_some(),
+            self.joint_type == JointType2D::Revolute,
+            self.limits,
+            Some(motor),
+        )?;
+        self.motor = Some(motor);
+        Ok(())
+    }
+    /// Updates target velocity in either drive mode. Sync applies it.
+    pub fn set_motor_velocity_target(
+        &mut self,
+        velocity: f32,
+    ) -> Result<(), super::JointMotorError> {
+        let mut motor = self.motor.ok_or(super::JointMotorError::Disabled)?;
+        motor.set_velocity(velocity)?;
+        super::joints::validate_settings(
+            self.axis().is_some(),
+            self.joint_type == JointType2D::Revolute,
+            self.limits,
+            Some(motor),
+        )?;
+        self.motor = Some(motor);
+        Ok(())
+    }
+    pub(super) fn same_structure(&self, other: &Self) -> bool {
+        self.body1 == other.body1
+            && self.body2 == other.body2
+            && self.joint_type == other.joint_type
+            && self.local_frame1 == other.local_frame1
+            && self.local_frame2 == other.local_frame2
+    }
+    pub(super) fn axis(&self) -> Option<JointAxis> {
+        match self.joint_type {
+            JointType2D::Revolute => Some(JointAxis::AngX),
+            JointType2D::Prismatic => Some(JointAxis::LinX),
+            _ => None,
+        }
+    }
+    pub(crate) fn to_rapier_joint(&self) -> GenericJoint {
+        let mask = match self.joint_type {
+            JointType2D::Revolute => JointAxesMask::LOCKED_REVOLUTE_AXES,
+            JointType2D::Fixed => JointAxesMask::LOCKED_FIXED_AXES,
+            JointType2D::Prismatic => JointAxesMask::LOCKED_PRISMATIC_AXES,
+        };
+        let mut result = GenericJoint::new(mask);
+        result.local_frame1 = self.local_frame1.to_rapier();
+        result.local_frame2 = self.local_frame2.to_rapier();
+        self.apply_parameters(&mut result);
+        result
+    }
+    pub(super) fn apply_parameters(&self, joint: &mut GenericJoint) {
+        if let Some(axis) = self.axis() {
+            super::joints::dim2::apply(joint, axis, self.limits, self.motor);
         }
     }
 }
@@ -529,39 +648,6 @@ impl Collider2D {
                     .map_or(0.0, |s| s.min_force as Real),
             )
             .build()
-    }
-}
-
-// The descriptor is validated before conversion; rescaling handles very small
-// and very large finite directions without changing their orientation.
-fn joint_axis(axis: &redlilium_core::math::Vec2) -> Vector {
-    let n = (axis / axis.amax()).normalize();
-    Vector::new(n.x as Real, n.y as Real)
-}
-
-impl ImpulseJoint2D {
-    /// Convert this descriptor into a rapier `GenericJoint`.
-    pub(crate) fn to_rapier_joint(&self) -> GenericJoint {
-        use redlilium_core::math::Real;
-
-        match &self.joint_type {
-            JointType2D::Revolute { anchor1, anchor2 } => RevoluteJointBuilder::new()
-                .local_anchor1(Vector::new(anchor1.x as Real, anchor1.y as Real))
-                .local_anchor2(Vector::new(anchor2.x as Real, anchor2.y as Real))
-                .into(),
-            JointType2D::Fixed { anchor1, anchor2 } => FixedJointBuilder::new()
-                .local_anchor1(Vector::new(anchor1.x as Real, anchor1.y as Real))
-                .local_anchor2(Vector::new(anchor2.x as Real, anchor2.y as Real))
-                .into(),
-            JointType2D::Prismatic {
-                axis,
-                anchor1,
-                anchor2,
-            } => PrismaticJointBuilder::new(joint_axis(axis))
-                .local_anchor1(Vector::new(anchor1.x as Real, anchor1.y as Real))
-                .local_anchor2(Vector::new(anchor2.x as Real, anchor2.y as Real))
-                .into(),
-        }
     }
 }
 

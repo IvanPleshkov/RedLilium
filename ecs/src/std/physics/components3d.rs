@@ -415,74 +415,115 @@ impl Default for Collider3D {
 // Joint descriptor
 // ---------------------------------------------------------------------------
 
-/// 3D joint type descriptor.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Joint constraint kind. Limits and motors support revolute and prismatic only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JointType3D {
-    /// Ball-and-socket joint with anchor points on each body.
-    Spherical { anchor1: Vec3, anchor2: Vec3 },
-    /// Hinge joint around an axis.
-    Revolute {
-        /// Finite nonzero direction; normalized when applied to Rapier.
-        axis: Vec3,
-        anchor1: Vec3,
-        anchor2: Vec3,
-    },
-    /// Rigid attachment (no relative movement).
-    Fixed { anchor1: Vec3, anchor2: Vec3 },
-    /// Sliding joint along an axis.
-    Prismatic {
-        /// Finite nonzero direction; normalized when applied to Rapier.
-        axis: Vec3,
-        anchor1: Vec3,
-        anchor2: Vec3,
-    },
+    Spherical,
+    Revolute,
+    Fixed,
+    Prismatic,
 }
 
-/// Describes a 3D impulse joint between two rigid body entities.
-///
-/// Attach this component to a (possibly dedicated) entity to create a joint
-/// constraint. The `body1` and `body2` fields reference entities that must
-/// have [`RigidBody3D`] + [`Transform`](crate::Transform) components.
-///
-/// Entity references are automatically remapped during prefab instantiation
-/// via the `#[derive(Component)]` macro.
-///
-/// # Example
-///
-/// ```ignore
-/// let joint_entity = world.spawn();
-/// world.insert(joint_entity, ImpulseJoint3D::spherical(
-///     body_a, body_b,
-///     Vec3::new(1.0, 0.0, 0.0),
-///     Vec3::new(-1.0, 0.0, 0.0),
-/// ));
-/// ```
+/// Body-local joint frame, relative to the body origin (not its centre of mass).
+/// Local X is the slider axis and, in 3D, the hinge axis; 2D hinges rotate around Z.
+/// Matching frame orientations define zero angle.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct JointFrame3D {
+    pub translation: Vec3,
+    pub rotation: redlilium_core::math::Quat,
+}
+impl Default for JointFrame3D {
+    fn default() -> Self {
+        Self {
+            translation: Vec3::zeros(),
+            rotation: redlilium_core::math::Quat::identity(),
+        }
+    }
+}
+impl JointFrame3D {
+    fn to_rapier(self) -> Pose {
+        super::control3d::PhysicsPose3D {
+            translation: self.translation,
+            rotation: self.rotation,
+        }
+        .to_rapier()
+    }
+    pub(super) fn validate(&self, entity: crate::Entity) -> Result<(), crate::SystemError> {
+        super::control3d::PhysicsPose3D {
+            translation: self.translation,
+            rotation: self.rotation,
+        }
+        .validate(entity)
+    }
+    /// Builds an X-axis frame. Invalid axes produce an invalid frame rejected by sync.
+    pub fn from_axis(translation: Vec3, axis: Vec3) -> Self {
+        let n = (axis / axis.amax()).normalize();
+        let rotation = if n.iter().all(|v| v.is_finite()) {
+            // Deterministic roll, including an axis opposite to X.
+            let helper = if n.y.abs() < 0.9 {
+                Vec3::y()
+            } else {
+                Vec3::z()
+            };
+            let z = n.cross(&helper).normalize();
+            let y = z.cross(&n);
+            redlilium_core::math::nalgebra::UnitQuaternion::from_matrix(
+                &redlilium_core::math::nalgebra::Matrix3::from_columns(&[n, y, z]),
+            )
+            .into_inner()
+        } else {
+            let mut q = redlilium_core::math::Quat::identity();
+            q.coords.fill(f32::NAN);
+            q
+        };
+        Self {
+            translation,
+            rotation,
+        }
+    }
+}
+
+/// Editable joint configuration and motor targets. Sync applies parameter edits in place.
+/// Entity references are remapped during scene/prefab instantiation.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
 pub struct ImpulseJoint3D {
-    /// First body entity.
     pub body1: crate::Entity,
-    /// Second body entity.
     pub body2: crate::Entity,
-    /// Joint type and parameters.
     pub joint_type: JointType3D,
+    pub local_frame1: JointFrame3D,
+    pub local_frame2: JointFrame3D,
+    pub limits: Option<super::JointLimits>,
+    pub motor: Option<super::JointMotor>,
 }
-
 impl ImpulseJoint3D {
-    /// Creates a spherical (ball-and-socket) joint.
+    pub fn new(body1: crate::Entity, body2: crate::Entity, joint_type: JointType3D) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type,
+            local_frame1: Default::default(),
+            local_frame2: Default::default(),
+            limits: None,
+            motor: None,
+        }
+    }
     pub fn spherical(
         body1: crate::Entity,
         body2: crate::Entity,
         anchor1: Vec3,
         anchor2: Vec3,
     ) -> Self {
-        Self {
-            body1,
-            body2,
-            joint_type: JointType3D::Spherical { anchor1, anchor2 },
-        }
+        Self::new(body1, body2, JointType3D::Spherical).with_local_frames(
+            JointFrame3D {
+                translation: anchor1,
+                ..Default::default()
+            },
+            JointFrame3D {
+                translation: anchor2,
+                ..Default::default()
+            },
+        )
     }
-
-    /// Creates a revolute (hinge) joint around the given axis.
     pub fn revolute(
         body1: crate::Entity,
         body2: crate::Entity,
@@ -490,27 +531,23 @@ impl ImpulseJoint3D {
         anchor1: Vec3,
         anchor2: Vec3,
     ) -> Self {
-        Self {
-            body1,
-            body2,
-            joint_type: JointType3D::Revolute {
-                axis,
-                anchor1,
-                anchor2,
-            },
-        }
+        Self::new(body1, body2, JointType3D::Revolute).with_local_frames(
+            JointFrame3D::from_axis(anchor1, axis),
+            JointFrame3D::from_axis(anchor2, axis),
+        )
     }
-
-    /// Creates a fixed (rigid attachment) joint.
     pub fn fixed(body1: crate::Entity, body2: crate::Entity, anchor1: Vec3, anchor2: Vec3) -> Self {
-        Self {
-            body1,
-            body2,
-            joint_type: JointType3D::Fixed { anchor1, anchor2 },
-        }
+        Self::new(body1, body2, JointType3D::Fixed).with_local_frames(
+            JointFrame3D {
+                translation: anchor1,
+                ..Default::default()
+            },
+            JointFrame3D {
+                translation: anchor2,
+                ..Default::default()
+            },
+        )
     }
-
-    /// Creates a prismatic (slider) joint along the given axis.
     pub fn prismatic(
         body1: crate::Entity,
         body2: crate::Entity,
@@ -518,14 +555,86 @@ impl ImpulseJoint3D {
         anchor1: Vec3,
         anchor2: Vec3,
     ) -> Self {
-        Self {
-            body1,
-            body2,
-            joint_type: JointType3D::Prismatic {
-                axis,
-                anchor1,
-                anchor2,
-            },
+        Self::new(body1, body2, JointType3D::Prismatic).with_local_frames(
+            JointFrame3D::from_axis(anchor1, axis),
+            JointFrame3D::from_axis(anchor2, axis),
+        )
+    }
+    pub fn with_local_frames(mut self, frame1: JointFrame3D, frame2: JointFrame3D) -> Self {
+        self.local_frame1 = frame1;
+        self.local_frame2 = frame2;
+        self
+    }
+    pub fn with_limits(mut self, limits: Option<super::JointLimits>) -> Self {
+        self.limits = limits;
+        self
+    }
+    pub fn with_motor(mut self, motor: Option<super::JointMotor>) -> Self {
+        self.motor = motor;
+        self
+    }
+    /// Updates the ECS target, leaving the old value intact on error. Sync applies it.
+    pub fn set_motor_position_target(
+        &mut self,
+        position: f32,
+    ) -> Result<(), super::JointMotorError> {
+        let mut motor = self.motor.ok_or(super::JointMotorError::Disabled)?;
+        motor.set_position(position)?;
+        super::joints::validate_settings(
+            self.axis().is_some(),
+            self.joint_type == JointType3D::Revolute,
+            self.limits,
+            Some(motor),
+        )?;
+        self.motor = Some(motor);
+        Ok(())
+    }
+    /// Updates target velocity in either drive mode. Sync applies it.
+    pub fn set_motor_velocity_target(
+        &mut self,
+        velocity: f32,
+    ) -> Result<(), super::JointMotorError> {
+        let mut motor = self.motor.ok_or(super::JointMotorError::Disabled)?;
+        motor.set_velocity(velocity)?;
+        super::joints::validate_settings(
+            self.axis().is_some(),
+            self.joint_type == JointType3D::Revolute,
+            self.limits,
+            Some(motor),
+        )?;
+        self.motor = Some(motor);
+        Ok(())
+    }
+    pub(super) fn same_structure(&self, other: &Self) -> bool {
+        self.body1 == other.body1
+            && self.body2 == other.body2
+            && self.joint_type == other.joint_type
+            && self.local_frame1 == other.local_frame1
+            && self.local_frame2 == other.local_frame2
+    }
+    pub(super) fn axis(&self) -> Option<JointAxis> {
+        match self.joint_type {
+            JointType3D::Revolute => Some(JointAxis::AngX),
+            JointType3D::Prismatic => Some(JointAxis::LinX),
+            _ => None,
+        }
+    }
+    pub(crate) fn to_rapier_joint(&self) -> GenericJoint {
+        let mask = match self.joint_type {
+            JointType3D::Spherical => JointAxesMask::LOCKED_SPHERICAL_AXES,
+            JointType3D::Revolute => JointAxesMask::LOCKED_REVOLUTE_AXES,
+            JointType3D::Fixed => JointAxesMask::LOCKED_FIXED_AXES,
+            JointType3D::Prismatic => JointAxesMask::LOCKED_PRISMATIC_AXES,
+        };
+        let mut result = GenericJoint::new(mask);
+        result.local_frame1 = self.local_frame1.to_rapier();
+        result.local_frame2 = self.local_frame2.to_rapier();
+        self.apply_parameters(&mut result);
+        result
+    }
+    pub(super) fn apply_parameters(&self, joint: &mut GenericJoint) {
+        if let Some(axis) = self.axis() {
+            super::joints::dim3::apply(joint, axis, self.limits, self.motor);
         }
     }
 }
@@ -538,79 +647,6 @@ use super::rapier3d::prelude::*;
 use super::world3d::PhysicsWorld3D;
 #[cfg(test)]
 use super::world3d::RigidBody3DHandle;
-
-// The descriptor is validated before conversion; rescaling handles very small
-// and very large finite directions without changing their orientation.
-fn joint_axis(axis: &redlilium_core::math::Vec3) -> Vector {
-    let n = (axis / axis.amax()).normalize();
-    Vector::new(n.x as Real, n.y as Real, n.z as Real)
-}
-
-impl ImpulseJoint3D {
-    /// Convert this descriptor into a rapier `GenericJoint`.
-    pub(crate) fn to_rapier_joint(&self) -> GenericJoint {
-        use redlilium_core::math::Real;
-
-        match &self.joint_type {
-            JointType3D::Spherical { anchor1, anchor2 } => SphericalJointBuilder::new()
-                .local_anchor1(Vector::new(
-                    anchor1.x as Real,
-                    anchor1.y as Real,
-                    anchor1.z as Real,
-                ))
-                .local_anchor2(Vector::new(
-                    anchor2.x as Real,
-                    anchor2.y as Real,
-                    anchor2.z as Real,
-                ))
-                .into(),
-            JointType3D::Revolute {
-                axis,
-                anchor1,
-                anchor2,
-            } => RevoluteJointBuilder::new(joint_axis(axis))
-                .local_anchor1(Vector::new(
-                    anchor1.x as Real,
-                    anchor1.y as Real,
-                    anchor1.z as Real,
-                ))
-                .local_anchor2(Vector::new(
-                    anchor2.x as Real,
-                    anchor2.y as Real,
-                    anchor2.z as Real,
-                ))
-                .into(),
-            JointType3D::Fixed { anchor1, anchor2 } => FixedJointBuilder::new()
-                .local_anchor1(Vector::new(
-                    anchor1.x as Real,
-                    anchor1.y as Real,
-                    anchor1.z as Real,
-                ))
-                .local_anchor2(Vector::new(
-                    anchor2.x as Real,
-                    anchor2.y as Real,
-                    anchor2.z as Real,
-                ))
-                .into(),
-            JointType3D::Prismatic {
-                axis,
-                anchor1,
-                anchor2,
-            } => PrismaticJointBuilder::new(joint_axis(axis))
-                .local_anchor1(Vector::new(
-                    anchor1.x as Real,
-                    anchor1.y as Real,
-                    anchor1.z as Real,
-                ))
-                .local_anchor2(Vector::new(
-                    anchor2.x as Real,
-                    anchor2.y as Real,
-                    anchor2.z as Real,
-                ))
-                .into(),
-        }
-    }
-}
 
 impl RigidBody3D {
     /// Convert this descriptor + transform into a rapier `RigidBody`.

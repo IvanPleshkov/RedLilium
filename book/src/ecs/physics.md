@@ -111,10 +111,77 @@ properties by the end of body sync. Changed settings wake the body; unchanged
 settings do not wake it or overwrite its runtime velocity. Body-type changes
 also reset interpolation history.
 
-Changing a joint descriptor rebuilds that joint, including when endpoints
-change. Other bodies and joints remain intact. If an endpoint is unavailable,
+Changing joint endpoints, kind or local frames rebuilds that joint. Limits,
+motor mode, targets, gains and effort caps update the existing joint in place. Other bodies and joints remain intact. If an endpoint is unavailable,
 the old joint is removed and creation waits for valid endpoints. Physics-world
 caches retain the last applied descriptors to avoid rebuilding unchanged objects.
+
+### Joint frames, limits and motors
+
+`ImpulseJoint2D/3D` stores a `JointType2D/3D` kind, two `JointFrame2D/3D` local
+frames, and optional `JointLimits` and `JointMotor`. Frames are relative to each
+body's origin, independently of its centre of mass. Their matching orientations
+define zero angle. Local X is the slider axis and the 3D hinge axis; 2D hinges
+rotate around Z. Coordinates and velocities describe frame 2 relative to frame 1.
+Frames contain translation and rotation (radians in 2D, a normalized-on-use
+quaternion in 3D), without scale. Short anchor/axis constructors build frames;
+`with_local_frames` specifies each body's frame independently. `JointFrame*::from_axis`
+normalizes finite nonzero directions; invalid directions produce invalid frames
+that sync rejects.
+
+Revolute and prismatic joints support `.with_limits(Some(...))` and
+`.with_motor(Some(...))`. `None` disables the corresponding feature. Fixed and
+spherical joints reject these settings. Spherical cone/twist limits and orientation
+motors are not part of this single-axis API.
+
+```rust,ignore
+use redlilium_ecs::physics::{JointLimits, JointMotor, JointMotorModel};
+use redlilium_ecs::physics::components3d::{ImpulseJoint3D, JointFrame3D};
+
+let mut hinge = ImpulseJoint3D::revolute(body_a, body_b, axis, anchor_a, anchor_b)
+    .with_limits(Some(JointLimits { min: -1.0, max: 1.0 }))
+    .with_motor(Some(JointMotor::position(0.0, 30.0, 8.0)
+        .with_model(JointMotorModel::AccelerationBased)
+        .with_max_effort(Some(80.0))));
+// Edit the ECS descriptor before SyncPhysicsJoints*, not native joint storage.
+hinge.set_motor_position_target(0.7)?;
+hinge.set_motor_velocity_target(0.0)?;
+```
+
+Limits are inclusive: equal bounds lock the coordinate. Hinge angles and angular
+velocities use radians and radians/second; sliders use world length units and
+length/second. Hinge limits must fit inside `[-π, π]`, with width less than a full
+turn and no interval crossing the branch cut. Position targets use that same angular
+range, must lie inside configured limits, and do not count revolutions. A velocity
+motor can rotate continuously with limits disabled. Solver constraints allow small
+errors depending on timestep, iterations and load.
+
+Angular position motors use Rapier's shortest-rotation error. They do not plan a
+path around limits: with limits `[-3, 3]`, a target change from `+2.8` to `-2.8`
+pushes against the `+3` stop. To take the longer allowed path, first target `0`,
+then `-2.8` after reaching the intermediate target. Merely being inside the limits
+does not guarantee that a position target is reachable by the motor's chosen path.
+
+`JointDrive::Velocity { velocity, damping }` requires positive finite damping.
+`JointDrive::Position { position, velocity, stiffness, damping }` requires positive
+finite stiffness and nonnegative finite damping. The position constructor sets
+target velocity to zero. All targets must be finite. Position target setters reject
+a velocity drive; both setters reject disabled motors and preserve the descriptor
+on error. Direct field edits and builders are validated by sync before any native
+mutation in the batch.
+
+`AccelerationBased` is the default and makes gains less dependent on mass/inertia.
+`ForceBased` expresses physical stiffness and damping. Both respect `max_effort`:
+force for sliders, torque for hinges, `None` for no authored cap, and zero for no
+actuation. A position drive provides spring/damper behavior, including suspension.
+
+Configuration and current targets have a single owner: the ECS descriptor. They
+are serialized with the scene and exposed in the inspector. Parameter edits wake
+connected bodies; unchanged sync preserves sleep. Existing handles and unrelated
+constraint impulses survive parameter changes; changing a limit, drive mode,
+gains, model or cap resets the affected cached impulse. Target-only edits preserve
+it. Structural edits rebuild the joint. Run sync after gameplay target edits and
+before stepping physics.
 
 ### Collider ownership and local geometry
 

@@ -104,3 +104,6 @@ mod sync_support;
 mod mass;
 mod mass_support;
 pub use mass::{AngularInertia3D, MassSettings2D, MassSettings3D};
+
+mod joints;
+pub use joints::{JointDrive, JointLimits, JointMotor, JointMotorError, JointMotorModel};

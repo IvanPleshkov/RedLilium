@@ -110,11 +110,10 @@ macro_rules! descriptor_tests {
                 .into_iter()
                 .enumerate()
                 .map(|(i, joint_type)| {
-                    let joint = Joint {
-                        body1: bodies[0].0,
-                        body2: bodies[1].0,
-                        joint_type,
-                    };
+                    let joint = Joint::new(bodies[0].0, bodies[1].0, joint_type).with_local_frames(
+                        Frame { translation: Vector::repeat(0.2), ..Default::default() },
+                        Frame { translation: Vector::repeat(-0.3), ..Default::default() },
+                    );
                     w.spawn_with((Name::new(format!("joint{i}")), joint.clone()))
                         .unwrap();
                     joint
@@ -352,38 +351,17 @@ macro_rules! descriptor_tests {
                     "endpoints",
                 )];
                 for joint_type in joint_types() {
-                    let mut jt = joint_type.clone();
-                    anchors(&mut jt).0.x = f32::NAN;
-                    cases.push((
-                        Joint {
-                            joint_type: jt,
-                            ..valid.clone()
-                        },
-                        "anchors",
-                    ));
-                    let mut jt = joint_type;
-                    anchors(&mut jt).1.x = f32::INFINITY;
-                    cases.push((
-                        Joint {
-                            joint_type: jt,
-                            ..valid.clone()
-                        },
-                        "anchors",
-                    ));
+                    let mut bad = Joint::new(a, b, joint_type);
+                    bad.local_frame1.translation.x = f32::NAN;
+                    cases.push((bad, "anchors"));
+                    let mut bad = Joint::new(a, b, joint_type);
+                    bad.local_frame2.translation.x = f32::INFINITY;
+                    cases.push((bad, "anchors"));
                 }
                 for v in [0.0, f32::NAN, f32::INFINITY] {
-                    for mut jt in joint_types() {
-                        if let Some(axis) = axis(&mut jt) {
-                            *axis = Vector::repeat(v);
-                            cases.push((
-                                Joint {
-                                    joint_type: jt,
-                                    ..valid.clone()
-                                },
-                                "axis",
-                            ));
-                        }
-                    }
+                    let mut bad = valid.clone();
+                    bad.local_frame1 = Frame::from_axis(Vector::zeros(), Vector::repeat(v));
+                    cases.push((bad, "rotation"));
                 }
                 for (bad, field) in cases {
                     w.insert(j, bad.clone()).unwrap();
@@ -417,25 +395,15 @@ macro_rules! descriptor_tests {
                     let a = spawn(&mut w);
                     let b = spawn(&mut w);
                     assert!(sync(&mut w, regular, false).is_empty());
-                    for mut jt in joint_types() {
-                        if let Some(axis) = axis(&mut jt) {
-                            *axis = Vector::zeros();
-                            axis.y = -magnitude;
-                            let j = w
-                                .spawn_with((Joint {
-                                    body1: a,
-                                    body2: b,
-                                    joint_type: jt,
-                                },))
-                                .unwrap();
-                            assert!(sync(&mut w, regular, true).is_empty());
-                            let p = w.resource::<Physics>();
-                            let data = &p.impulse_joints().get(p.joint_for_entity(j).unwrap()).unwrap().data;
-                            let axis = data.local_frame1.rotation * RapierVector::X;
-                            assert!(axis.x.abs() < 1e-5, "{axis:?}");
-                            assert!((axis.y + 1.0).abs() < 1e-5, "{axis:?}");
-                        }
-                    }
+                    let mut direction = Vector::zeros();
+                    direction.y = -magnitude;
+                    let j = w.spawn_with((Joint::prismatic(a, b, direction, Vector::zeros(), Vector::zeros()),)).unwrap();
+                    assert!(sync(&mut w, regular, true).is_empty());
+                    let p = w.resource::<Physics>();
+                    let data = &p.impulse_joints().get(p.joint_for_entity(j).unwrap()).unwrap().data;
+                    let axis = data.local_frame1.rotation * RapierVector::X;
+                    assert!(axis.x.abs() < 1e-5, "{axis:?}");
+                    assert!((axis.y + 1.0).abs() < 1e-5, "{axis:?}");
                 }
             }
         }
@@ -479,7 +447,8 @@ mod two_d {
     use redlilium_ecs::physics::{
         components2d::{
             Collider2D as Collider, ColliderShape2D as Shape, ImpulseJoint2D as Joint,
-            JointType2D as JointType, RigidBody2D as Body, build_physics_world_2d as build,
+            JointFrame2D as Frame, JointType2D as JointType, RigidBody2D as Body,
+            build_physics_world_2d as build,
         },
         systems2d::{
             SyncPhysicsBodies2D as Sync, SyncPhysicsBodiesSystem2D as SyncRegular,
@@ -501,32 +470,7 @@ mod two_d {
         vec![]
     }
     fn joint_types() -> Vec<JointType> {
-        let anchor1 = Vector::new(0.2, 0.3);
-        let anchor2 = Vector::new(-0.4, 0.6);
-        vec![
-            JointType::Revolute { anchor1, anchor2 },
-            JointType::Fixed { anchor1, anchor2 },
-            JointType::Prismatic {
-                anchor1,
-                anchor2,
-                axis: Vector::new(2.0, 3.0),
-            },
-        ]
-    }
-    fn anchors(j: &mut JointType) -> (&mut Vector, &mut Vector) {
-        match j {
-            JointType::Revolute { anchor1, anchor2 }
-            | JointType::Fixed { anchor1, anchor2 }
-            | JointType::Prismatic {
-                anchor1, anchor2, ..
-            } => (anchor1, anchor2),
-        }
-    }
-    fn axis(j: &mut JointType) -> Option<&mut Vector> {
-        match j {
-            JointType::Prismatic { axis, .. } => Some(axis),
-            _ => None,
-        }
+        vec![JointType::Revolute, JointType::Fixed, JointType::Prismatic]
     }
     descriptor_tests!();
 }
@@ -541,7 +485,8 @@ mod three_d {
     use redlilium_ecs::physics::{
         components3d::{
             Collider3D as Collider, ColliderShape3D as Shape, ImpulseJoint3D as Joint,
-            JointType3D as JointType, RigidBody3D as Body, build_physics_world_3d as build,
+            JointFrame3D as Frame, JointType3D as JointType, RigidBody3D as Body,
+            build_physics_world_3d as build,
         },
         systems3d::{
             SyncPhysicsBodies3D as Sync, SyncPhysicsBodiesSystem3D as SyncRegular,
@@ -572,41 +517,12 @@ mod three_d {
             .collect()
     }
     fn joint_types() -> Vec<JointType> {
-        let anchor1 = Vector::new(0.2, 0.3, 0.4);
-        let anchor2 = Vector::new(-0.4, 0.6, -0.2);
-        let axis = Vector::new(2.0, 3.0, -4.0);
         vec![
-            JointType::Spherical { anchor1, anchor2 },
-            JointType::Revolute {
-                anchor1,
-                anchor2,
-                axis,
-            },
-            JointType::Fixed { anchor1, anchor2 },
-            JointType::Prismatic {
-                anchor1,
-                anchor2,
-                axis,
-            },
+            JointType::Revolute,
+            JointType::Fixed,
+            JointType::Prismatic,
+            JointType::Spherical,
         ]
-    }
-    fn anchors(j: &mut JointType) -> (&mut Vector, &mut Vector) {
-        match j {
-            JointType::Spherical { anchor1, anchor2 }
-            | JointType::Revolute {
-                anchor1, anchor2, ..
-            }
-            | JointType::Fixed { anchor1, anchor2 }
-            | JointType::Prismatic {
-                anchor1, anchor2, ..
-            } => (anchor1, anchor2),
-        }
-    }
-    fn axis(j: &mut JointType) -> Option<&mut Vector> {
-        match j {
-            JointType::Revolute { axis, .. } | JointType::Prismatic { axis, .. } => Some(axis),
-            _ => None,
-        }
     }
     descriptor_tests!();
 }
