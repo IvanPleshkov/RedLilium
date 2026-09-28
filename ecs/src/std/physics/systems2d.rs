@@ -39,14 +39,14 @@ impl crate::System for StepPhysics2D {
         };
         ctx.lock::<(
             crate::ResMut<PhysicsWorld2D>,
-            crate::Read<RigidBody2DHandle>,
             crate::Write<crate::Transform>,
             crate::Read<crate::Parent>,
             crate::Write<KinematicTarget2D>,
             crate::Write<KinematicVelocity2D>,
         )>()
         .execute(
-            |(mut physics, handles, mut transforms, parents, mut targets, mut velocities)| {
+            |(mut physics, mut transforms, parents, mut targets, mut velocities)| {
+                let physics = &mut *physics;
                 if !physics.mass_dirty.is_empty() {
                     return Err(crate::SystemError::InvalidConfiguration {
                         message: "physics mass_properties lost required collider geometry during deferred publication; correct descriptors and run body sync before stepping".into(),
@@ -65,15 +65,16 @@ impl crate::System for StepPhysics2D {
                     });
                 }
                 // Validate the whole batch before changing motion or advancing time.
-                for (idx, handle) in handles.iter() {
-                    let Some(entity) = ctx.raw_world().entity_at_index(idx) else {
+                for (&entity, &handle) in &physics.entity_to_body {
+                    if !ctx.is_alive(entity) || ctx.is_excluded_from_game(entity) {
                         continue;
-                    };
+                    }
+                    let idx = entity.index();
                     let Some(t) = transforms.get(idx) else {
                         continue;
                     };
                     super::validation::transform(entity, t, parents.get(idx).is_some())?;
-                    if let Some(body) = physics.bodies.get(handle.0) {
+                    if let Some(body) = physics.bodies.get(handle) {
                         if (body.body_type() == RigidBodyType::KinematicPositionBased)
                             && let Some(target) = targets.get(idx)
                         {
@@ -90,11 +91,15 @@ impl crate::System for StepPhysics2D {
                         }
                     }
                 }
-                for (idx, handle) in handles.iter() {
+                for (&entity, &handle) in &physics.entity_to_body {
+                    if !ctx.is_alive(entity) || ctx.is_excluded_from_game(entity) {
+                        continue;
+                    }
+                    let idx = entity.index();
                     let Some(t) = transforms.get(idx) else {
                         continue;
                     };
-                    let Some(body) = physics.bodies.get_mut(handle.0) else {
+                    let Some(body) = physics.bodies.get_mut(handle) else {
                         continue;
                     };
                     if body.is_fixed() {
@@ -149,8 +154,12 @@ impl crate::System for StepPhysics2D {
                     physics.integration_parameters.dt = dt as Real;
                 }
                 physics.step();
-                for (idx, handle) in handles.iter() {
-                    if let Some(body) = physics.bodies.get(handle.0)
+                for (&entity, &handle) in &physics.entity_to_body {
+                    if !ctx.is_alive(entity) || ctx.is_excluded_from_game(entity) {
+                        continue;
+                    }
+                    let idx = entity.index();
+                    if let Some(body) = physics.bodies.get(handle)
                         && (body.is_dynamic() || body.is_kinematic())
                         && let Some(mut transform) = transforms.get_mut(idx)
                     {
@@ -200,8 +209,8 @@ impl crate::System for StepPhysics2D {
 /// `prev`/`cur`.
 ///
 /// Bodies without the component are seeded with `prev == cur`, so a freshly
-/// spawned body renders at its spawn pose instead of lerping in from wherever
-/// the history would otherwise have started.
+/// spawned body renders at its first recorded pose. Native ownership mappings
+/// include bodies created by regular sync before ECS handles are published.
 pub struct RecordPhysicsPose2D;
 
 impl crate::System for RecordPhysicsPose2D {
@@ -212,22 +221,26 @@ impl crate::System for RecordPhysicsPose2D {
     ) -> Result<(), crate::system::SystemError> {
         let to_seed = ctx
             .lock::<(
-                crate::Read<RigidBody2DHandle>,
                 crate::ResMut<PhysicsWorld2D>,
                 crate::WriteAll<PhysicsInterpolation2D>,
             )>()
-            .execute(|(handles, mut physics, mut interps)| {
+            .execute(|(mut physics, mut interps)| {
+                let physics = &mut *physics;
                 redlilium_core::profile_scope!("ecs: record_physics_pose_2d");
                 let mut seed = Vec::new();
-                for (idx, handle) in handles.iter() {
-                    let Some(body) = physics.bodies.get(handle.0) else {
+                for (&entity, &handle) in &physics.entity_to_body {
+                    if !ctx.is_alive(entity) || ctx.is_excluded_from_game(entity) {
+                        continue;
+                    }
+                    let idx = entity.index();
+                    let Some(body) = physics.bodies.get(handle) else {
                         continue;
                     };
                     if body.is_fixed() {
                         continue;
                     }
                     let pose = super::control2d::PhysicsPose2D::from_rapier(body.position());
-                    let reset = physics.pose_resets.remove(&handle.0);
+                    let reset = physics.pose_resets.remove(&handle);
                     if let Some(mut interp) = interps.get_mut(idx) {
                         interp.prev_translation = if reset {
                             pose.translation
@@ -241,8 +254,8 @@ impl crate::System for RecordPhysicsPose2D {
                         };
                         interp.cur_translation = pose.translation;
                         interp.cur_rotation = pose.rotation;
-                    } else if let Some(entity) = ctx.raw_world().entity_at_index(idx) {
-                        seed.push((entity, handle.0, pose.translation, pose.rotation));
+                    } else {
+                        seed.push((entity, handle, pose.translation, pose.rotation));
                     }
                 }
                 seed
@@ -252,9 +265,9 @@ impl crate::System for RecordPhysicsPose2D {
             ctx.commands(move |world| {
                 for (entity, handle, translation, rotation) in to_seed {
                     if world.is_alive(entity)
-                        && world
-                            .get::<RigidBody2DHandle>(entity)
-                            .is_some_and(|h| h.0 == handle)
+                        && !world.is_excluded_from_game(entity)
+                        && world.resource::<PhysicsWorld2D>().body_for_entity(entity)
+                            == Some(handle)
                     {
                         let _ = world.insert(
                             entity,
@@ -594,6 +607,7 @@ impl crate::System for SyncPhysicsJointsSystem2D {
                         let jh =
                             physics.add_impulse_joint(body1_handle, body2_handle, rapier_joint);
                         physics.applied_joints.insert(jh, joint_desc.clone());
+                        physics.entity_to_joint.insert(entity, jh);
                         new_pairs.push((entity, jh));
                     }
                 }
@@ -609,6 +623,9 @@ impl crate::System for SyncPhysicsJointsSystem2D {
                     }
                 }
                 for (entity, handle) in new_entities {
+                    if world.resource::<PhysicsWorld2D>().joint_for_entity(entity) != Some(handle) {
+                        continue;
+                    }
                     let valid = world.is_alive(entity)
                         && !world.is_excluded_from_game(entity)
                         && world
@@ -620,12 +637,10 @@ impl crate::System for SyncPhysicsJointsSystem2D {
                             .contains(handle);
                     if valid {
                         let _ = world.insert(entity, ImpulseJoint2DHandle(handle));
-                        let mut physics = world.resource_mut::<PhysicsWorld2D>();
-                        physics.entity_to_joint.insert(entity, handle);
                     } else {
-                        world
-                            .resource_mut::<PhysicsWorld2D>()
-                            .remove_impulse_joint(handle, true);
+                        let mut physics = world.resource_mut::<PhysicsWorld2D>();
+                        physics.entity_to_joint.remove(&entity);
+                        physics.remove_impulse_joint(handle, true);
                     }
                 }
             });

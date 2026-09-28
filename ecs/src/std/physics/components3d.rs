@@ -699,8 +699,6 @@ impl RigidBody3D {
 impl Collider3D {
     /// Convert this descriptor into a rapier `Collider`.
     pub(crate) fn to_collider(&self) -> Collider {
-        use redlilium_core::math::Real;
-
         let shared = self.shape.to_shared_shape();
 
         ColliderBuilder::new(shared)

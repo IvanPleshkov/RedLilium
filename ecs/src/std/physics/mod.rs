@@ -9,6 +9,14 @@
 //! - `physics-2d` — 2D physics with `f64` precision
 //! - `physics-2d-f32` — 2D physics with `f32` precision
 //! - `physics` — both 3D and 2D (f64)
+//!
+//! Each dimension selects its precision independently; mixed f32/f64 worlds are
+//! supported. When both precision features of one dimension are enabled, f32 wins.
+//!
+//! Order body sync, joint sync, step, and pose recording explicitly in the schedule.
+//! Regular sync publishes native ownership immediately; these systems can share a
+//! runner call without command barriers. ECS handle components and newly seeded
+//! pose histories become visible when deferred commands are flushed.
 
 pub mod conversions;
 

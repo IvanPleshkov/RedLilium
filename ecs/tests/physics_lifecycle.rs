@@ -70,6 +70,147 @@ macro_rules! lifecycle_tests {
             run(world, &systems, multi);
         }
         #[test]
+        fn regular_sync_step_and_record_use_new_bodies_without_a_command_flush() {
+            for multi in [false, true] {
+                for position_based in [false, true] {
+                    let mut w = world();
+                    let mut physics = Physics::default();
+                    physics.gravity = Default::default();
+                    physics.integration_parameters.dt = 0.1;
+                    w.insert_resource(physics);
+                    let body = if position_based {
+                        Body::kinematic_position()
+                    } else {
+                        Body::kinematic_velocity()
+                    };
+                    let e = w
+                        .spawn_with((Transform::IDENTITY, body, Collider::ball(0.5)))
+                        .unwrap();
+                    if position_based {
+                        let mut pose = Pose::default();
+                        pose.translation.x = 0.2;
+                        w.insert(e, Target::from(pose)).unwrap();
+                    } else {
+                        let mut velocity = Velocity::default();
+                        velocity.linear.x = 2.0;
+                        w.insert(e, velocity).unwrap();
+                    }
+                    let mut s = SystemsContainer::new();
+                    s.add(SyncBodiesRegular);
+                    s.add(Step);
+                    s.add(Record);
+                    s.add_edge::<SyncBodiesRegular, Step>().unwrap();
+                    s.add_edge::<Step, Record>().unwrap();
+                    run(&mut w, &s, multi);
+                    assert!(
+                        (w.resource::<Physics>().pose(e).unwrap().translation.x - 0.2).abs() < 1e-5
+                    );
+                    assert!((w.get::<Transform>(e).unwrap().translation.x - 0.2).abs() < 1e-5);
+                    let history = w.get::<History>(e).unwrap();
+                    assert!((history.prev_translation.x - 0.2).abs() < 1e-5);
+                    assert!((history.cur_translation.x - 0.2).abs() < 1e-5);
+                    run(&mut w, &s, multi);
+                    let history = w.get::<History>(e).unwrap();
+                    let expected = if position_based { 0.2 } else { 0.4 };
+                    assert!((history.prev_translation.x - 0.2).abs() < 1e-5);
+                    assert!((history.cur_translation.x - expected).abs() < 1e-5);
+                }
+            }
+        }
+
+        #[test]
+        fn first_step_validates_new_kinematic_input_before_advancing_any_body() {
+            for multi in [false, true] {
+                let mut w = world();
+                w.insert_resource(Physics::default());
+                let dynamic = body(&mut w);
+                let mut velocity = Velocity::default();
+                velocity.linear.x = f32::NAN;
+                w.spawn_with((Transform::IDENTITY, Body::kinematic_velocity(), velocity))
+                    .unwrap();
+                let mut s = SystemsContainer::new();
+                s.add(SyncBodiesRegular);
+                s.add(Step);
+                s.add_edge::<SyncBodiesRegular, Step>().unwrap();
+                let runner = if multi {
+                    EcsRunner::multi_thread(2)
+                } else {
+                    EcsRunner::single_thread()
+                };
+                let errors = runner.run(&mut w, &s);
+                assert!(
+                    matches!(
+                        errors.as_slice(),
+                        [SystemError::InvalidConfiguration { .. }]
+                    ),
+                    "{errors:?}"
+                );
+                assert_eq!(
+                    w.resource::<Physics>().pose(dynamic).unwrap().translation.y,
+                    10.0
+                );
+            }
+        }
+
+        struct RepeatJointSync {
+            joint: Entity,
+            replacement_body: Option<Entity>,
+        }
+        impl System for RepeatJointSync {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                SyncJointsRegular.run(ctx)?;
+                ctx.lock::<(Res<Physics>,)>().execute(|(physics,)| {
+                    assert!(physics.joint_for_entity(self.joint).is_some());
+                });
+                if let Some(body) = self.replacement_body {
+                    ctx.lock::<(Write<Joint>,)>().execute(|(mut joints,)| {
+                        joints.get_mut(self.joint.index()).unwrap().body2 = body;
+                    });
+                }
+                SyncJointsRegular.run(ctx)
+            }
+        }
+
+        #[test]
+        fn repeated_joint_sync_before_publication_preserves_single_native_owner() {
+            for multi in [false, true] {
+                for rebuild in [false, true] {
+                    let mut w = world();
+                    w.insert_resource(Physics::default());
+                    let a = body(&mut w);
+                    let b = body(&mut w);
+                    let c = body(&mut w);
+                    let j = joint(&mut w, a, b);
+                    let mut s = SystemsContainer::new();
+                    s.add(SyncBodiesRegular);
+                    s.add(RepeatJointSync {
+                        joint: j,
+                        replacement_body: rebuild.then_some(c),
+                    });
+                    s.add_edge::<SyncBodiesRegular, RepeatJointSync>().unwrap();
+                    run(&mut w, &s, multi);
+                    {
+                        let physics = w.resource::<Physics>();
+                        assert_eq!(physics.impulse_joints().len(), 1);
+                        let handle = physics.joint_for_entity(j).unwrap();
+                        assert_eq!(w.get::<JointHandle>(j).unwrap().0, handle);
+                        assert_eq!(
+                            physics.impulse_joints().get(handle).unwrap().body2(),
+                            physics
+                                .body_for_entity(if rebuild { c } else { b })
+                                .unwrap()
+                        );
+                    }
+                    w.despawn(j);
+                    sync_joints(&mut w, true, multi);
+                    assert!(w.resource::<Physics>().impulse_joints().is_empty());
+                    assert!(w.resource::<Physics>().joint_for_entity(j).is_none());
+                }
+            }
+        }
+
+        #[test]
         fn removing_each_required_component_cleans_body_colliders_and_joint_and_allows_recreation()
         {
             let removals: [fn(&mut World, Entity); 2] = [
@@ -297,15 +438,18 @@ mod two_d {
     use super::*;
     use redlilium_ecs::physics::{
         components2d::{Collider2D as Collider, ImpulseJoint2D as Joint, RigidBody2D as Body},
+        control2d::{
+            KinematicTarget2D as Target, KinematicVelocity2D as Velocity, PhysicsPose2D as Pose,
+        },
         rapier2d::prelude::ColliderBuilder,
         systems2d::{
-            StepPhysics2D as Step, SyncPhysicsBodies2D as SyncBodies,
-            SyncPhysicsBodiesSystem2D as SyncBodiesRegular, SyncPhysicsJoints2D as SyncJoints,
-            SyncPhysicsJointsSystem2D as SyncJointsRegular,
+            RecordPhysicsPose2D as Record, StepPhysics2D as Step,
+            SyncPhysicsBodies2D as SyncBodies, SyncPhysicsBodiesSystem2D as SyncBodiesRegular,
+            SyncPhysicsJoints2D as SyncJoints, SyncPhysicsJointsSystem2D as SyncJointsRegular,
         },
         world2d::{
-            ImpulseJoint2DHandle as JointHandle, PhysicsWorld2D as Physics,
-            RigidBody2DHandle as BodyHandle,
+            ImpulseJoint2DHandle as JointHandle, PhysicsInterpolation2D as History,
+            PhysicsWorld2D as Physics, RigidBody2DHandle as BodyHandle,
         },
     };
     lifecycle_tests!();
@@ -342,14 +486,19 @@ mod three_d {
     use super::*;
     use redlilium_ecs::physics::{
         components3d::{Collider3D as Collider, ImpulseJoint3D as Joint, RigidBody3D as Body},
+        control3d::{
+            KinematicTarget3D as Target, KinematicVelocity3D as Velocity, PhysicsPose3D as Pose,
+        },
         rapier3d::prelude::ColliderBuilder,
         systems3d::{
-            InterpolatePhysics, RecordPhysicsPose, StepPhysics3D as Step,
-            SyncPhysicsBodies3D as SyncBodies, SyncPhysicsBodiesSystem3D as SyncBodiesRegular,
-            SyncPhysicsJoints3D as SyncJoints, SyncPhysicsJointsSystem3D as SyncJointsRegular,
+            InterpolatePhysics, RecordPhysicsPose, RecordPhysicsPose as Record,
+            StepPhysics3D as Step, SyncPhysicsBodies3D as SyncBodies,
+            SyncPhysicsBodiesSystem3D as SyncBodiesRegular, SyncPhysicsJoints3D as SyncJoints,
+            SyncPhysicsJointsSystem3D as SyncJointsRegular,
         },
         world3d::{
-            ImpulseJoint3DHandle as JointHandle, PhysicsInterpolation, PhysicsWorld3D as Physics,
+            ImpulseJoint3DHandle as JointHandle, PhysicsInterpolation,
+            PhysicsInterpolation as History, PhysicsWorld3D as Physics,
             RigidBody3DHandle as BodyHandle,
         },
     };

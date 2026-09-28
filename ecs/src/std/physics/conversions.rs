@@ -1,6 +1,6 @@
 //! Conversion helpers between f32 rendering types and physics-precision types.
 //!
-//! Also includes utilities for extracting physics collider data from [`CpuMesh`].
+//! Also includes utilities for extracting physics collider data from [`CpuMesh`](redlilium_core::mesh::CpuMesh).
 
 use redlilium_core::math::{Quat, Real, Vec2, Vec3, quat_from_xyzw, quat_to_array};
 
@@ -91,92 +91,90 @@ pub fn isometry2_from_na(iso: &redlilium_core::math::Isometry2) -> (Vec2, f32) {
     (pos, angle)
 }
 
-/// Extracts triangle mesh data (positions, triangle indices) from a [`CpuMesh`]
+/// Extracts triangle mesh data (positions, triangle indices) from a [`CpuMesh`](redlilium_core::mesh::CpuMesh)
 /// suitable for creating a trimesh collider.
 ///
-/// Returns `None` if the mesh has no position data or no index buffer.
+/// Supports indexed `TriangleList` meshes with per-vertex `Float3` positions.
+/// Returns `None` for missing/unsupported data, empty geometry, inconsistent
+/// buffer sizes or counts, out-of-range indices, or non-finite positions.
+/// Position attributes may have an offset and live in any vertex buffer slot.
 pub fn extract_trimesh_data(
     mesh: &redlilium_core::mesh::CpuMesh,
 ) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
-    use redlilium_core::mesh::{IndexFormat, VertexAttributeSemantic};
+    use redlilium_core::mesh::{
+        IndexFormat, PrimitiveTopology, VertexAttributeFormat, VertexAttributeSemantic,
+        VertexStepMode,
+    };
 
+    if mesh.topology() != PrimitiveTopology::TriangleList {
+        return None;
+    }
     let layout = mesh.layout();
-
-    // Find the position attribute
     let pos_attr = layout
         .attributes
         .iter()
         .find(|a| a.semantic == VertexAttributeSemantic::Position)?;
-
+    if pos_attr.format != VertexAttributeFormat::Float3 {
+        return None;
+    }
     let buffer_index = pos_attr.buffer_index as usize;
+    let buffer = layout.buffers.get(buffer_index)?;
     let vertex_data = mesh.vertex_buffer_data(buffer_index)?;
-    let stride = layout.buffers.get(buffer_index)?.stride as usize;
+    let stride = buffer.stride as usize;
     let offset = pos_attr.offset as usize;
-    let vertex_count = vertex_data.len().checked_div(stride).unwrap_or(0);
-
-    // Extract positions (assumed f32x3)
-    let mut vertices = Vec::with_capacity(vertex_count);
-    for i in 0..vertex_count {
-        let base = i * stride + offset;
-        if base + 12 > vertex_data.len() {
-            break;
-        }
-        let x = f32::from_le_bytes([
-            vertex_data[base],
-            vertex_data[base + 1],
-            vertex_data[base + 2],
-            vertex_data[base + 3],
-        ]);
-        let y = f32::from_le_bytes([
-            vertex_data[base + 4],
-            vertex_data[base + 5],
-            vertex_data[base + 6],
-            vertex_data[base + 7],
-        ]);
-        let z = f32::from_le_bytes([
-            vertex_data[base + 8],
-            vertex_data[base + 9],
-            vertex_data[base + 10],
-            vertex_data[base + 11],
-        ]);
-        vertices.push(Vec3::new(x, y, z));
+    let vertex_count = mesh.vertex_count() as usize;
+    if buffer.step_mode != VertexStepMode::Vertex
+        || stride == 0
+        || offset.checked_add(12)? > stride
+        || vertex_count == 0
+        || vertex_data.len() != vertex_count.checked_mul(stride)?
+    {
+        return None;
     }
 
-    // Extract triangle indices
-    let index_format = mesh.index_format()?;
     let indices_raw = mesh.index_data()?;
-    let mut triangles = Vec::new();
-
-    match index_format {
-        IndexFormat::Uint16 => {
-            let count = indices_raw.len() / 2;
-            let mut idx = Vec::with_capacity(count);
-            for i in 0..count {
-                let base = i * 2;
-                idx.push(u16::from_le_bytes([indices_raw[base], indices_raw[base + 1]]) as u32);
-            }
-            for tri in idx.chunks_exact(3) {
-                triangles.push([tri[0], tri[1], tri[2]]);
-            }
-        }
-        IndexFormat::Uint32 => {
-            let count = indices_raw.len() / 4;
-            let mut idx = Vec::with_capacity(count);
-            for i in 0..count {
-                let base = i * 4;
-                idx.push(u32::from_le_bytes([
-                    indices_raw[base],
-                    indices_raw[base + 1],
-                    indices_raw[base + 2],
-                    indices_raw[base + 3],
-                ]));
-            }
-            for tri in idx.chunks_exact(3) {
-                triangles.push([tri[0], tri[1], tri[2]]);
-            }
-        }
+    let index_format = mesh.index_format()?;
+    let index_size = match index_format {
+        IndexFormat::Uint16 => 2,
+        IndexFormat::Uint32 => 4,
+    };
+    let index_count = mesh.index_count() as usize;
+    if index_count == 0
+        || !index_count.is_multiple_of(3)
+        || indices_raw.len() != index_count.checked_mul(index_size)?
+    {
+        return None;
     }
 
+    let mut vertices = Vec::with_capacity(vertex_count);
+    for vertex in vertex_data.chunks_exact(stride) {
+        let position = &vertex[offset..offset + 12];
+        let p = Vec3::new(
+            f32::from_le_bytes(position[0..4].try_into().ok()?),
+            f32::from_le_bytes(position[4..8].try_into().ok()?),
+            f32::from_le_bytes(position[8..12].try_into().ok()?),
+        );
+        if !p.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        vertices.push(p);
+    }
+
+    // Decode straight into triangles, without a temporary flat index allocation.
+    let mut triangles = Vec::with_capacity(index_count / 3);
+    for triangle in indices_raw.chunks_exact(3 * index_size) {
+        let mut indices = [0; 3];
+        for (dst, src) in indices.iter_mut().zip(triangle.chunks_exact(index_size)) {
+            *dst = match index_format {
+                IndexFormat::Uint16 => u16::from_le_bytes(src.try_into().ok()?) as u32,
+                IndexFormat::Uint32 => u32::from_le_bytes(src.try_into().ok()?),
+            };
+            if *dst as usize >= vertex_count {
+                return None;
+            }
+        }
+        triangles.push(indices);
+    }
     Some((vertices, triangles))
 }
 
@@ -219,5 +217,173 @@ mod tests {
         let (pos2, angle2) = isometry2_from_na(&iso);
         assert!((pos - pos2).norm() < 1e-5);
         assert!((angle - angle2).abs() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+    use redlilium_core::mesh::{
+        CpuMesh, CpuMeshData, IndexFormat, PrimitiveTopology, VertexAttribute,
+        VertexAttributeFormat, VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
+    };
+    use std::sync::Arc;
+
+    fn triangle() -> CpuMesh {
+        CpuMesh::new(VertexLayout::position_only())
+            .with_vertex_data(
+                0,
+                [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect(),
+            )
+            .with_indices_u32(&[0, 1, 2])
+    }
+
+    #[test]
+    fn extracts_positions_with_offset_in_a_separate_buffer_and_both_index_formats() {
+        let layout = Arc::new(
+            VertexLayout::new()
+                .with_buffer(VertexBufferLayout::new(8))
+                .with_buffer(VertexBufferLayout::new(20))
+                .with_attribute(VertexAttribute::new(
+                    VertexAttributeSemantic::Position,
+                    VertexAttributeFormat::Float3,
+                    4,
+                    1,
+                )),
+        );
+        let vertices = [
+            99.0_f32, 0.0, 0.0, 0.0, 99.0, 99.0, 1.0, 0.0, 0.0, 99.0, 99.0, 0.0, 1.0, 0.0, 99.0,
+        ];
+        let mesh = CpuMesh::new(layout)
+            .with_vertex_data(0, vec![0; 24])
+            .with_vertex_data(1, vertices.into_iter().flat_map(f32::to_le_bytes).collect());
+        for mesh in [
+            mesh.clone().with_indices_u16(&[2, 0, 1]),
+            mesh.with_indices_u32(&[2, 0, 1]),
+        ] {
+            let (positions, triangles) = extract_trimesh_data(&mesh).unwrap();
+            assert_eq!(
+                positions,
+                vec![
+                    Vec3::zeros(),
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0)
+                ]
+            );
+            assert_eq!(triangles, vec![[2, 0, 1]]);
+        }
+    }
+
+    #[test]
+    fn rejects_non_triangle_topology_and_non_float3_positions() {
+        for topology in [
+            PrimitiveTopology::LineList,
+            PrimitiveTopology::TriangleStrip,
+        ] {
+            assert!(extract_trimesh_data(&triangle().with_topology(topology)).is_none());
+        }
+        let layout = Arc::new(
+            VertexLayout::new()
+                .with_buffer(VertexBufferLayout::new(8))
+                .with_attribute(VertexAttribute::new(
+                    VertexAttributeSemantic::Position,
+                    VertexAttributeFormat::Float2,
+                    0,
+                    0,
+                )),
+        );
+        let mesh = CpuMesh::new(layout)
+            .with_vertex_data(0, vec![0; 24])
+            .with_indices_u32(&[0, 1, 2]);
+        assert!(extract_trimesh_data(&mesh).is_none());
+    }
+
+    #[test]
+    fn rejects_truncated_mismatched_or_out_of_range_indices() {
+        for format in [IndexFormat::Uint16, IndexFormat::Uint32] {
+            let valid = match format {
+                IndexFormat::Uint16 => triangle().with_indices_u16(&[0, 1, 2]),
+                IndexFormat::Uint32 => triangle(),
+            };
+            let bytes = valid.index_data().unwrap();
+            for (data, count) in [
+                (bytes.to_vec(), 2),
+                (bytes.to_vec(), 6),
+                (bytes[..bytes.len() - 1].to_vec(), 3),
+                ([bytes, &[0]].concat(), 3),
+                (Vec::new(), 0),
+            ] {
+                assert!(
+                    extract_trimesh_data(&valid.clone().with_raw_index_data(data, format, count))
+                        .is_none()
+                );
+            }
+        }
+        assert!(extract_trimesh_data(&triangle().with_indices_u16(&[0, 1, 3])).is_none());
+        assert!(extract_trimesh_data(&triangle().with_indices_u32(&[0, 1, u32::MAX])).is_none());
+        let mut data = CpuMeshData::from_cpu_mesh(&triangle());
+        data.index_data = None;
+        assert!(extract_trimesh_data(&data.into_cpu_mesh(VertexLayout::position_only())).is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_vertex_storage_and_non_finite_positions() {
+        let valid = triangle();
+        let data = CpuMeshData::from_cpu_mesh(&valid);
+        let mut cases = Vec::new();
+        for count in [0, 2, 4] {
+            let mut d = data.clone();
+            d.vertex_count = count;
+            cases.push(d);
+        }
+        let mut d = data.clone();
+        d.vertex_buffers[0].pop();
+        cases.push(d);
+        let mut d = data.clone();
+        d.vertex_buffers[0].push(0);
+        cases.push(d);
+        let mut d = data.clone();
+        d.vertex_buffers.clear();
+        cases.push(d);
+        for value in [f32::NAN, f32::INFINITY] {
+            let mut d = data.clone();
+            d.vertex_buffers[0][..4].copy_from_slice(&value.to_le_bytes());
+            cases.push(d);
+        }
+        for data in cases {
+            assert!(extract_trimesh_data(&data.into_cpu_mesh(valid.layout().clone())).is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_position_layouts() {
+        let data = CpuMeshData::from_cpu_mesh(&triangle());
+        for (stride, offset, slot, instance) in [
+            (0, 0, 0, false),
+            (8, 0, 0, false),
+            (12, 4, 0, false),
+            (12, u32::MAX, 0, false),
+            (12, 0, 1, false),
+            (12, 0, 0, true),
+        ] {
+            let mut buffer = VertexBufferLayout::new(stride);
+            if instance {
+                buffer = buffer.with_instance_step();
+            }
+            let layout = Arc::new(VertexLayout::new().with_buffer(buffer).with_attribute(
+                VertexAttribute::new(
+                    VertexAttributeSemantic::Position,
+                    VertexAttributeFormat::Float3,
+                    offset,
+                    slot,
+                ),
+            ));
+            assert!(extract_trimesh_data(&data.clone().into_cpu_mesh(layout)).is_none());
+        }
+        let layout = Arc::new(VertexLayout::new().with_buffer(VertexBufferLayout::new(12)));
+        assert!(extract_trimesh_data(&data.into_cpu_mesh(layout)).is_none());
     }
 }

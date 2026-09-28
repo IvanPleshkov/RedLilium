@@ -611,8 +611,6 @@ use super::world2d::RigidBody2DHandle;
 impl RigidBody2D {
     /// Convert this descriptor + transform into a rapier 2D `RigidBody`.
     pub(crate) fn to_rigid_body(&self, transform: &crate::Transform) -> RigidBody {
-        use redlilium_core::math::Real;
-
         let t = &transform.translation;
         let translation = Vector::new(t.x as Real, t.y as Real);
 
@@ -629,7 +627,7 @@ impl RigidBody2D {
             .2;
         builder
             .translation(translation)
-            .rotation(rotation)
+            .rotation(rotation as Real)
             .linear_damping(self.linear_damping as Real)
             .angular_damping(self.angular_damping as Real)
             .gravity_scale(self.gravity_scale as Real)
@@ -642,8 +640,6 @@ impl RigidBody2D {
 impl Collider2D {
     /// Convert this descriptor into a rapier 2D `Collider`.
     pub(crate) fn to_collider(&self) -> Collider {
-        use redlilium_core::math::Real;
-
         let shared = self.shape.to_shared_shape();
 
         ColliderBuilder::new(shared)

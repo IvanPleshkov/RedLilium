@@ -137,6 +137,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Test physics precision combinations
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for features in "physics" "physics-2d-f32 physics-3d-f32" "physics-2d-f32 physics-3d" "physics-2d physics-3d-f32"; do
+            cargo test -p redlilium-ecs --features "$features serialize-ron serialize-bincode"
+          done
+
       - name: Run test script (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
