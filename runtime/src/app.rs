@@ -81,9 +81,9 @@ impl App {
         world.insert_resource(frame_ring);
         let window_input = world.insert_resource(WindowInput::default());
 
-        // Dual-clock time management: RealTime always advances; GameTime's
-        // scale/freeze is host-driven (the host simply doesn't call
-        // `run_frame` to freeze a play session — see `redlilium_ecs::std::time`).
+        // RealTime advances while GameTime scales fixed gameplay and physics.
+        // The host can stop calling `run_frame` to freeze the entire play world
+        // — see `redlilium_ecs::std::time`.
         world.insert_resource(RealTime::default());
         world.insert_resource(GameTime::default());
 

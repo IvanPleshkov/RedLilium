@@ -79,12 +79,68 @@ The `Time` resource is automatically inserted and updated by the schedule runner
 ```rust
 ctx.lock::<(Res<Time>,)>()
     .execute(|(time,)| {
-        let dt: f32 = time.delta_f32();       // frame delta as f32
-        let dt: f64 = time.delta();            // frame delta as f64
-        let elapsed: f64 = time.elapsed();     // total elapsed time
-        let fixed_dt: f64 = time.fixed_delta(); // fixed timestep value
+        let dt: f32 = time.delta_f32();        // fixed game step in FixedUpdate,
+        let dt: f64 = time.delta();            // real frame delta otherwise
+        let elapsed: f64 = time.elapsed();     // total real elapsed time
+        let fixed_dt: f64 = time.fixed_delta(); // constant step in game seconds
     });
 ```
+
+### Gameplay time scale
+
+`GameTime::set_scale` controls both the game clock and the stock `FixedUpdate`
+schedule. The runtime inserts `GameTime` and `RealTime` at boot. A headless or
+custom host opts in by inserting them before calling `Schedules::run_frame`:
+
+```rust
+world.insert_resource(GameTime::default());
+world.insert_resource(RealTime::default());
+world.resource_mut::<GameTime>().set_scale(0.25);
+```
+
+The fixed accumulator receives scaled game time, while the fixed timestep stays
+constant in game seconds. With a 1/128-second fixed step and 64 render frames per
+real second, scales 1, 0.25, and 0 execute 128, 32, and 0 steps respectively.
+`StepPhysics2D` / `StepPhysics3D` in `FixedUpdate` and their stock interpolation
+systems follow this clock automatically. `Time::fixed_alpha()` uses the same
+scaled remainder; at scale zero it holds the current interpolated pose.
+Restoring normal speed preserves that remainder and never catches up the real
+time omitted by slow-motion or pause. The existing `max_fixed_steps` limit still
+drops excess simulation debt during a long stall or fast-forward; `GameTime`
+itself reports the full scaled frame duration, including dropped debt.
+
+Choose the clock by the work being timed:
+
+| Work | Clock |
+|------|-------|
+| Fixed thrust, physics, bot timers, hitstun, contact rearming | `Time::delta()` or `Time::fixed_delta()` inside `FixedUpdate` |
+| Variable-step gameplay in `Update` | `GameTime::delta()` |
+| Slow-motion duration, real-time UI | `RealTime::delta()` / `RealTime::elapsed()` in `Update` |
+| Frame timing and input collection | Unscaled `Time::frame_delta()` |
+
+`GameTime::delta()` is always the scaled **frame** delta, including inside fixed
+systems. Do not apply it once per fixed step or multiply the fixed delta by the
+scale again. `Time::delta()` outside `FixedUpdate`, `Time::elapsed()`, and
+`Time::smoothed_frame_delta()` retain their unscaled behavior. `PreUpdate`,
+`Update`, and `PostUpdate` keep running at scale zero; the host can keep rendering
+and collecting input. Worlds without `GameTime` retain normal-speed simulation.
+Calling a fixed schedule manually does not perform clock accumulation.
+
+The scale is sampled **after `PreUpdate` and state transitions**, when both
+clocks advance. Changes in those phases affect this frame. A hit accepted in
+`FixedUpdate` can call `set_scale`, but the change takes effect next frame; all
+remaining fixed steps this frame use the already sampled delta. Changes in
+`Update` and `PostUpdate` likewise affect the next frame. `RealTime` in
+`PreUpdate` still describes the previous frame; use `Time::frame_delta()` there
+if a timer must update the scale before this frame's sample.
+
+For a combat slow-motion envelope, record accepted hits in fixed gameplay and
+advance the envelope in `Update` using `RealTime`. For example, hold 0.25× for
+0.30 real seconds and smoothly return to 1× over 0.15 seconds. Define retriggers
+in game code (restart or extend the envelope), and on reset clear the envelope
+and call `set_scale(1.0)`. `GameTime::reset()` only zeroes its elapsed/delta clock;
+it intentionally preserves the scale and does not reset the fixed accumulator.
+Scales must be finite and non-negative; reverse simulation is unsupported.
 
 ## Events
 

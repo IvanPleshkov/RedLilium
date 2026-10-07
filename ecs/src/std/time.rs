@@ -4,19 +4,22 @@
 //! profiling, and editor-side logic.
 //!
 //! **GameTime** supports slow-motion / fast-forward via
-//! [`set_scale`](GameTime::set_scale) and is consumed by game logic.
+//! [`set_scale`](GameTime::set_scale) and drives the fixed simulation clock.
 //!
 //! Both clocks are advanced by `Schedules::run_frame` every time it is
 //! called, each with its own scale (`RealTime` implicitly 1.0, `GameTime` via
-//! [`GameTime::scale`]). There is no scheduler-level pause: a paused play
-//! session is simply a host that stops calling `run_frame` on that world's
-//! `Schedules`. Neither clock touches the world's change-detection tick —
-//! they are plain time resources.
+//! [`GameTime::scale`]). Scale zero freezes fixed simulation and its render
+//! interpolation while input, per-frame schedules, and real-time UI continue.
+//! A host may instead stop calling `run_frame` to freeze the entire world
+//! (for example, an editor play session). Neither clock touches the world's
+//! change-detection tick — they are plain time resources.
 
 /// Real (wall-clock) time that advances every ticked frame.
 ///
-/// Use this for editor UI, profiling, and background work. Every frame, call
-/// [`advance`](RealTime::advance) before running game systems.
+/// Use this for UI, profiling, and slow-motion envelopes that must expire even
+/// at game scale zero. When present, [`crate::Schedules::run_frame`] advances
+/// this resource after `PreUpdate` and state transitions, before `FixedUpdate`.
+/// `Update` and `PostUpdate` therefore see the current frame's real time.
 #[derive(Debug, Clone, Copy)]
 pub struct RealTime {
     elapsed: f64,
@@ -62,12 +65,20 @@ impl Default for RealTime {
 /// 0.0 to freeze while still ticking, etc.). Freezing gameplay time entirely
 /// is the host's call: either set the scale to 0, or — for an editor play
 /// session — simply stop calling `run_frame` on that world.
+///
+/// The same scaled frame delta feeds [`crate::FixedUpdate`]. Its timestep
+/// ([`crate::Time::fixed_delta`]) remains constant in game seconds: at 0.25×,
+/// four times fewer steps execute. [`crate::Time::fixed_alpha`] follows that
+/// clock too. Use `Time::delta()` in fixed gameplay systems, `GameTime::delta()`
+/// in variable-step gameplay, and [`RealTime`] for unscaled UI and timers.
+/// `GameTime::delta()` is a frame delta even inside `FixedUpdate`; do not use
+/// it as the per-step delta.
 #[derive(Debug, Clone, Copy)]
 pub struct GameTime {
     elapsed: f64,
     delta: f64,
     /// Time multiplier applied by `run_frame` while the game simulates
-    /// (1.0 = normal, 0.5 = half-speed). Pause overrides it to 0.
+    /// (1.0 = normal, 0.5 = half-speed, 0.0 = frozen).
     scale: f64,
     /// Kahan compensation term: carries the low-order bits lost when a small
     /// scaled delta is added to a large `elapsed`, so long slow-mo sessions
@@ -127,8 +138,21 @@ impl GameTime {
     }
 
     /// Set the time multiplier for slow-mo / fast-forward (1.0 = normal).
-    /// Applied by `run_frame` on every call.
+    ///
+    /// [`crate::Schedules::run_frame`] samples it after `PreUpdate` and state
+    /// transitions. Changes there affect this frame; changes in `FixedUpdate`,
+    /// `Update`, or `PostUpdate` affect the next frame. All fixed steps within
+    /// one frame use that single sample. Restoring 1.0 never catches up time
+    /// skipped while slowed or frozen, and preserves the fractional fixed step.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scale` is negative or non-finite. Reverse time is unsupported.
     pub fn set_scale(&mut self, scale: f64) {
+        assert!(
+            scale.is_finite() && scale >= 0.0,
+            "Game time scale must be finite and non-negative"
+        );
         self.scale = scale;
     }
 
@@ -240,6 +264,19 @@ mod tests {
         gt.reset();
         assert_eq!(gt.elapsed(), 0.0);
         assert_eq!(gt.scale(), 0.5, "reset must keep the configured scale");
+    }
+
+    #[test]
+    fn game_time_rejects_invalid_scale_without_changing_configuration() {
+        for scale in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut time = GameTime::new();
+            time.set_scale(0.25);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                time.set_scale(scale);
+            }));
+            assert!(result.is_err());
+            assert_eq!(time.scale(), 0.25);
+        }
     }
 
     #[test]

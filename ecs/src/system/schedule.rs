@@ -89,7 +89,9 @@ impl ScheduleLabel for Startup {}
 pub struct PreUpdate;
 impl ScheduleLabel for PreUpdate {}
 
-/// Runs at a fixed timestep (default 1/60s). May execute 0..N times per frame.
+/// Runs at a fixed timestep in game seconds (default 1/60s).
+/// May execute 0..N times per frame, according to [`crate::GameTime::scale`].
+/// Without a [`crate::GameTime`] resource, runs at normal speed.
 pub struct FixedUpdate;
 impl ScheduleLabel for FixedUpdate {}
 
@@ -158,6 +160,10 @@ pub struct RawFrameDelta(pub f64);
 /// During [`FixedUpdate`] execution, [`delta()`](Time::delta) returns the
 /// fixed timestep value. During all other schedules, it returns the real
 /// frame delta.
+///
+/// [`crate::GameTime`] controls the frequency of fixed steps, not their size.
+/// Use its frame delta for variable-step gameplay, and [`crate::RealTime`]
+/// for unscaled timers (for example, ending slow-motion while gameplay is frozen).
 pub struct Time {
     /// Effective delta — frame delta during Update, fixed delta during FixedUpdate.
     delta: f64,
@@ -219,7 +225,8 @@ impl Time {
         self.elapsed as f32
     }
 
-    /// Returns the configured fixed timestep interval.
+    /// Returns the configured fixed timestep interval in game seconds.
+    /// This stays constant when [`crate::GameTime::scale`] changes.
     pub fn fixed_delta(&self) -> f64 {
         self.fixed_delta
     }
@@ -239,6 +246,8 @@ impl Time {
     /// simulated, in `[0, 1)`. This is the blend factor for interpolating
     /// rendered poses between the two most recent fixed steps, so rendering
     /// stays smooth when the render rate and the fixed physics rate disagree.
+    /// Accumulates game time, so slow-motion also slows interpolation and
+    /// a zero game time scale preserves the current blend fraction.
     pub fn fixed_alpha(&self) -> f64 {
         self.fixed_alpha
     }
@@ -380,7 +389,9 @@ impl Schedules {
 
     /// Sets the fixed timestep interval for [`FixedUpdate`].
     ///
-    /// Default is 1/60 seconds. The accumulator is reset when changed.
+    /// Default is 1/60 game seconds. The accumulator is reset when changed.
+    /// For slow-motion, change [`crate::GameTime::set_scale`] instead so the
+    /// simulation step and accumulated fractional step remain unchanged.
     pub fn set_fixed_timestep(&mut self, dt: f64) {
         assert!(dt > 0.0, "Fixed timestep must be positive");
         self.fixed_timestep = dt;
@@ -440,9 +451,19 @@ impl Schedules {
     ///    per frame)
     /// 3. Run [`PreUpdate`] (state transitions happen here)
     /// 4. Check state transitions → run `OnExit` / `OnEnter` schedules
+    ///    and advance [`crate::RealTime`] / [`crate::GameTime`] if present
     /// 5. Run [`FixedUpdate`] (accumulator loop)
     /// 6. Run [`Update`]
     /// 7. Run [`PostUpdate`]
+    ///
+    /// The game scale is sampled once after `PreUpdate` and state transitions.
+    /// Their scale changes affect this frame; changes in `FixedUpdate`,
+    /// `Update`, or `PostUpdate` affect the next frame. Fixed steps consume
+    /// scaled game time with a constant game delta. At scale zero no fixed
+    /// steps run, while the per-frame schedules keep running. Without a
+    /// `GameTime` resource, the fixed clock uses the unscaled frame delta.
+    /// Excess game-time debt is dropped at the configured catch-up limit;
+    /// time omitted by slow-motion or pause is never banked for later.
     ///
     /// Panics in FixedUpdate or Update are caught by the runner and logged;
     /// they no longer pause anything here — a host that wants to freeze on
@@ -492,22 +513,25 @@ impl Schedules {
 
         // 4b. Advance the dual clocks, after PreUpdate so any state transition
         //     this frame takes effect immediately. `RealTime` always advances.
-        //     `GameTime` advances every ticked frame with its own scale —
-        //     freezing is the host simply not calling `run_frame` (e.g. a
-        //     paused editor play-session).
+        //     Sample GameTime once for both the clock and fixed simulation.
+        //     Changes made during FixedUpdate take effect next frame, never
+        //     partway through this frame's catch-up loop.
         if world.has_resource::<crate::RealTime>() {
             world.resource_mut::<crate::RealTime>().advance(delta_time);
         }
-        if world.has_resource::<crate::GameTime>() {
+        let game_delta = if world.has_resource::<crate::GameTime>() {
             let mut game_time = world.resource_mut::<crate::GameTime>();
             let scale = game_time.scale();
             game_time.tick(delta_time, scale);
-        }
+            game_time.delta()
+        } else {
+            delta_time
+        };
 
         // 5. FixedUpdate accumulator. Debt is clamped so a long stall runs at
         //    most `max_fixed_steps` catch-up iterations instead of spiraling
         //    (each over-budget frame adding more debt than it retires).
-        self.fixed_accumulator += delta_time;
+        self.fixed_accumulator += game_delta;
         let max_debt = self.fixed_timestep * self.max_fixed_steps as f64;
         if self.fixed_accumulator > max_debt {
             self.fixed_accumulator = max_debt;
@@ -973,10 +997,9 @@ mod tests {
         schedules.run_frame(&mut world, &runner, 0.016);
     }
 
-    /// FixedUpdate always runs — there is no more "game active" gate. A
-    /// paused/stopped play session simply doesn't call `run_frame` at all.
+    /// Worlds without GameTime retain the unscaled fixed schedule.
     #[test]
-    fn fixed_update_always_runs() {
+    fn fixed_update_without_game_time_runs_at_normal_speed() {
         let counter = Arc::new(AtomicU32::new(0));
         let mut world = World::new();
         let mut schedules = Schedules::new();
@@ -994,8 +1017,7 @@ mod tests {
     }
 
     /// `run_frame` drives both clocks unconditionally: `RealTime` always
-    /// advances, and `GameTime` advances every ticked frame at its own
-    /// scale — freezing is the host simply not calling `run_frame`.
+    /// advances, and `GameTime` advances every ticked frame at its own scale.
     #[test]
     fn game_time_and_real_time_advance_unconditionally() {
         let mut world = World::new();

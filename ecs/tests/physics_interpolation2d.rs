@@ -146,6 +146,116 @@ fn catch_up_steps_keep_the_last_two_poses_without_render_feedback() {
     );
     close(w.get::<Transform>(e).unwrap().translation.x, 0.045);
 }
+
+fn scaled_physics_schedules() -> Schedules {
+    let mut schedules = Schedules::new();
+    schedules.set_fixed_timestep(1.0 / 128.0);
+    let fixed = schedules.get_mut::<FixedUpdate>();
+    fixed.add(StepPhysics2D);
+    fixed.add(RecordPhysicsPose2D);
+    fixed
+        .add_edge::<StepPhysics2D, RecordPhysicsPose2D>()
+        .unwrap();
+    schedules.get_mut::<PostUpdate>().add(InterpolatePhysics2D);
+    schedules
+}
+
+#[test]
+fn free_body_and_interpolation_follow_game_time_at_different_render_rates() {
+    for fps in [32, 64, 128, 256] {
+        for scale in [0.0, 0.25, 1.0, 2.0] {
+            let (mut w, e) = setup(RigidBody2D::dynamic());
+            velocity(&mut w, e, 8.0);
+            // Seed both presentation poses before the first simulation step.
+            run(&mut w, RecordPhysicsPose2D);
+            let mut game = GameTime::default();
+            game.set_scale(scale);
+            w.insert_resource(game);
+            w.insert_resource(RealTime::default());
+            let mut schedules = scaled_physics_schedules();
+            let runner = EcsRunner::single_thread();
+            for frame in 1..=fps {
+                schedules.run_frame(&mut w, &runner, 1.0 / fps as f64);
+                let game_elapsed = frame as f64 / fps as f64 * scale;
+                let step_count = (game_elapsed * 128.0).floor();
+                let alpha = game_elapsed * 128.0 - step_count;
+                let simulated_x = step_count / 128.0 * 8.0;
+                let rendered_x = ((game_elapsed - 1.0 / 128.0) * 8.0).max(0.0);
+                close(
+                    w.resource::<PhysicsWorld2D>()
+                        .pose(e)
+                        .unwrap()
+                        .translation
+                        .x,
+                    simulated_x as f32,
+                );
+                close(
+                    w.get::<Transform>(e).unwrap().translation.x,
+                    rendered_x as f32,
+                );
+                assert_eq!(w.resource::<Time>().fixed_alpha(), alpha);
+            }
+            assert_eq!(w.resource::<RealTime>().elapsed(), 1.0);
+            assert_eq!(w.resource::<GameTime>().elapsed(), scale);
+            close(
+                w.resource::<PhysicsWorld2D>()
+                    .pose(e)
+                    .unwrap()
+                    .translation
+                    .x,
+                (8.0 * scale) as f32,
+            );
+        }
+    }
+}
+
+#[test]
+fn pause_holds_rendered_pose_and_resumes_without_jump_or_catch_up() {
+    let (mut w, e) = setup(RigidBody2D::dynamic());
+    velocity(&mut w, e, 8.0);
+    run(&mut w, RecordPhysicsPose2D);
+    w.insert_resource(GameTime::default());
+    let mut schedules = scaled_physics_schedules();
+    let runner = EcsRunner::single_thread();
+    schedules.run_frame(&mut w, &runner, 2.5 / 128.0);
+    close(
+        w.get::<Transform>(e).unwrap().translation.x,
+        1.5 / 128.0 * 8.0,
+    );
+
+    w.resource_mut::<GameTime>().set_scale(0.0);
+    for _ in 0..64 {
+        schedules.run_frame(&mut w, &runner, 1.0 / 64.0);
+        close(
+            w.get::<Transform>(e).unwrap().translation.x,
+            1.5 / 128.0 * 8.0,
+        );
+        close(
+            w.resource::<PhysicsWorld2D>()
+                .pose(e)
+                .unwrap()
+                .translation
+                .x,
+            2.0 / 128.0 * 8.0,
+        );
+        assert_eq!(w.resource::<Time>().fixed_alpha(), 0.5);
+    }
+    w.resource_mut::<GameTime>().set_scale(1.0);
+    schedules.run_frame(&mut w, &runner, 1.0 / 128.0);
+    close(
+        w.get::<Transform>(e).unwrap().translation.x,
+        2.5 / 128.0 * 8.0,
+    );
+    close(
+        w.resource::<PhysicsWorld2D>()
+            .pose(e)
+            .unwrap()
+            .translation
+            .x,
+        3.0 / 128.0 * 8.0,
+    );
+    assert_eq!(w.resource::<Time>().fixed_alpha(), 0.5);
+}
 #[test]
 fn teleports_reset_history_for_dynamic_and_kinematic_bodies() {
     for body in [
