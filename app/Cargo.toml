@@ -40,6 +40,10 @@ pollster = { workspace = true }
 clap = { workspace = true }
 # Full graphics backend on native (adds Vulkan + runtime Slang compilation).
 redlilium-graphics = { path = "../graphics" }
+gilrs = "0.11.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
@@ -50,6 +54,8 @@ web-sys = { workspace = true, features = [
     "Document",
     "Element",
     "HtmlCanvasElement",
+    "Navigator", "Gamepad", "GamepadButton", "GamepadMappingType", "GamepadEvent",
+    "PointerEvent", "EventTarget", "CssStyleDeclaration", "HtmlElement",
 ] }
 console_log = { workspace = true }
 console_error_panic_hook = { workspace = true }

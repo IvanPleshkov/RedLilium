@@ -5,6 +5,7 @@ use std::sync::Arc;
 use redlilium_ecs::sync::RwLock;
 
 use redlilium_app::{AppContext, AppHandler, DrawContext, input::map_winit_key};
+use redlilium_core::input::{GamepadEvent, InputCancelReason, InputOwner, TouchInput, TouchPhase};
 use redlilium_ecs::{
     Camera, CameraOutput, CameraTarget, EcsRunner, MainViewport, OutputFormat, Render,
     RenderSchedule, ScenePass, WindowInput, World,
@@ -130,7 +131,14 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
 
     fn on_resize(&mut self, ctx: &mut AppContext) {
         if let Some(state) = self.state.as_mut() {
+            state.egui.cancel_pointers();
+            state.egui.on_scale_factor_changed(ctx.scale_factor());
             state.egui.on_resize(ctx.width(), ctx.height());
+            state.window_input.write().set_viewport(
+                ctx.width() as f32,
+                ctx.height() as f32,
+                ctx.scale_factor(),
+            );
         }
     }
 
@@ -140,8 +148,13 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         };
         {
             let mut input = state.window_input.write();
-            input.window_width = ctx.width() as f32;
-            input.window_height = ctx.height() as f32;
+            let size = ctx.window().inner_size();
+            if input.scale_factor != ctx.scale_factor() {
+                state.egui.cancel_pointers();
+                state.egui.on_scale_factor_changed(ctx.scale_factor());
+                state.egui.on_resize(size.width, size.height);
+            }
+            input.set_viewport(size.width as f32, size.height as f32, ctx.scale_factor());
         }
 
         // Open the UI frame before the game schedules so systems can draw
@@ -167,6 +180,9 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         // paced one that motion must use (see redlilium-app's `pacing`).
         world.insert_resource(redlilium_ecs::RawFrameDelta(ctx.raw_delta_time() as f64));
         schedules.run_frame(world, &state.runner, ctx.delta_time() as f64);
+        // Input belongs to the CPU frame, including frames whose draw is
+        // skipped while the GPU is busy. Durable subscriptions are untouched.
+        state.window_input.write().begin_frame();
 
         // Game-requested exit (#100). On wasm a browser tab has no process to
         // exit, so the request is ignored there.
@@ -246,7 +262,6 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             let mut input = state.window_input.write();
             input.ui_wants_input =
                 state.egui.wants_pointer_input || state.egui.wants_keyboard_input;
-            input.begin_frame();
         }
         ctx.render(graph)
     }
@@ -255,6 +270,13 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+        if event.repeat
+            && let winit::keyboard::PhysicalKey::Code(code) = event.physical_key
+            && let Some(key) = map_winit_key(code)
+            && !state.window_input.read().is_key_pressed(key)
+        {
+            return;
+        }
         let ui_wants = state.egui.on_key(event);
         if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key
             && let Some(key) = map_winit_key(code)
@@ -290,7 +312,13 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             _ => return,
         };
         let mut input = state.window_input.write();
-        input.on_mouse_button(index, pressed);
+        let position = input.cursor_position.map(f64::from);
+        let owner = if state.egui.captures_pointer_at(position) {
+            InputOwner::Ui
+        } else {
+            InputOwner::Game
+        };
+        input.on_mouse_button_owned(index, pressed, owner);
         input.ui_wants_input = ui_wants;
     }
 
@@ -302,6 +330,62 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             let mut input = state.window_input.write();
             input.on_scroll(delta_x, delta_y);
             input.ui_wants_input = ui_wants;
+        }
+    }
+
+    fn on_touch(&mut self, _ctx: &mut AppContext, touch: TouchInput) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let mut input = state.window_input.write();
+        let owner = if touch.phase == TouchPhase::Started {
+            if state.egui.captures_pointer_at(touch.position) {
+                InputOwner::Ui
+            } else {
+                InputOwner::Game
+            }
+        } else {
+            let Some(contact) = input.touches().get(&touch.id) else {
+                return;
+            };
+            contact.owner
+        };
+        input.on_touch(touch, owner);
+        if owner == InputOwner::Ui {
+            state.egui.on_touch(touch);
+        }
+    }
+
+    fn on_gamepad(&mut self, _ctx: &mut AppContext, event: GamepadEvent) {
+        if let Some(state) = self.state.as_mut() {
+            state.window_input.write().on_gamepad(event);
+        }
+    }
+
+    fn on_focus_changed(&mut self, _ctx: &mut AppContext, focused: bool) {
+        if let Some(state) = self.state.as_mut() {
+            state.window_input.write().on_focus_changed(focused);
+            state.egui.on_focus_changed(focused);
+        }
+    }
+
+    fn on_pointer_cancelled(&mut self, ctx: &mut AppContext, reason: InputCancelReason) {
+        if let Some(state) = self.state.as_mut() {
+            if reason == InputCancelReason::ViewportChanged {
+                let size = ctx.window().inner_size();
+                let mut input = state.window_input.write();
+                if !input.set_viewport(size.width as f32, size.height as f32, ctx.scale_factor()) {
+                    // The host invalidates contact routing even for a repeated
+                    // resize notification with unchanged dimensions.
+                    input.cancel_pointers(reason);
+                }
+                state.egui.cancel_pointers();
+                state.egui.on_scale_factor_changed(ctx.scale_factor());
+                state.egui.on_resize(size.width, size.height);
+                return;
+            }
+            state.window_input.write().cancel_mouse(reason);
+            state.egui.cancel_mouse();
         }
     }
 

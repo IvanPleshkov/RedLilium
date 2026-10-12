@@ -6,6 +6,67 @@
 use redlilium_core::input::KeyCode;
 use winit::keyboard;
 
+pub(crate) mod gamepads;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod web;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows;
+
+/// Normalizes platform IDs to connection/contact-lifetime identities.
+#[derive(Default)]
+pub(crate) struct TouchTracker {
+    next: u64,
+    active:
+        std::collections::HashMap<(winit::event::DeviceId, u64), redlilium_core::input::TouchInput>,
+}
+impl TouchTracker {
+    pub fn update(
+        &mut self,
+        touch: winit::event::Touch,
+    ) -> Option<redlilium_core::input::TouchInput> {
+        use redlilium_core::input::{TouchId, TouchInput, TouchPhase};
+        let key = (touch.device_id, touch.id);
+        let phase = match touch.phase {
+            winit::event::TouchPhase::Started => TouchPhase::Started,
+            winit::event::TouchPhase::Moved => TouchPhase::Moved,
+            winit::event::TouchPhase::Ended => TouchPhase::Ended,
+            winit::event::TouchPhase::Cancelled => TouchPhase::Cancelled,
+        };
+        if phase == TouchPhase::Started {
+            if self.active.contains_key(&key) {
+                return None;
+            }
+            self.next += 1;
+            self.active.insert(
+                key,
+                TouchInput {
+                    id: TouchId(self.next),
+                    phase,
+                    position: [touch.location.x, touch.location.y],
+                },
+            );
+        }
+        let input = self.active.get_mut(&key)?;
+        input.phase = phase;
+        input.position = [touch.location.x, touch.location.y];
+        let input = *input;
+        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.active.remove(&key);
+        }
+        Some(input)
+    }
+    pub fn clear(&mut self) {
+        self.active.clear();
+    }
+    #[cfg(any(target_arch = "wasm32", target_os = "windows", test))]
+    pub fn capture_lost(&mut self, raw_id: u64) -> Option<redlilium_core::input::TouchInput> {
+        let key = self.active.keys().find(|(_, id)| *id == raw_id).copied()?;
+        let mut input = self.active.remove(&key)?;
+        input.phase = redlilium_core::input::TouchPhase::Cancelled;
+        Some(input)
+    }
+}
+
 /// Convert a winit [`keyboard::KeyCode`] to an engine [`KeyCode`], if a
 /// mapping exists.
 pub fn map_winit_key(key: keyboard::KeyCode) -> Option<KeyCode> {
@@ -108,4 +169,60 @@ pub fn map_winit_key(key: keyboard::KeyCode) -> Option<KeyCode> {
 
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::{
+        dpi::PhysicalPosition,
+        event::{DeviceId, Touch, TouchPhase},
+    };
+
+    fn event(id: u64, phase: TouchPhase) -> Touch {
+        Touch {
+            device_id: DeviceId::dummy(),
+            phase,
+            location: PhysicalPosition::new(-20.0, 900.0),
+            force: None,
+            id,
+        }
+    }
+
+    #[test]
+    fn winit_contacts_keep_identity_until_end_and_ignore_late_events() {
+        let mut tracker = TouchTracker::default();
+        let first = tracker.update(event(7, TouchPhase::Started)).unwrap();
+        let second = tracker.update(event(8, TouchPhase::Started)).unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.position, [-20.0, 900.0]);
+        assert_eq!(
+            tracker.update(event(7, TouchPhase::Moved)).unwrap().id,
+            first.id
+        );
+        assert_eq!(
+            tracker.update(event(8, TouchPhase::Ended)).unwrap().id,
+            second.id
+        );
+        assert!(tracker.update(event(8, TouchPhase::Moved)).is_none());
+        let replacement = tracker.update(event(8, TouchPhase::Started)).unwrap();
+        assert_ne!(replacement.id, second.id);
+        let cancelled = tracker.capture_lost(8).unwrap();
+        assert_eq!(cancelled.id, replacement.id);
+        assert_eq!(
+            cancelled.phase,
+            redlilium_core::input::TouchPhase::Cancelled
+        );
+        assert!(tracker.update(event(8, TouchPhase::Ended)).is_none());
+        assert_eq!(
+            tracker.update(event(7, TouchPhase::Moved)).unwrap().id,
+            first.id
+        );
+        tracker.clear();
+        assert!(tracker.update(event(7, TouchPhase::Moved)).is_none());
+        assert_ne!(
+            tracker.update(event(7, TouchPhase::Started)).unwrap().id,
+            first.id
+        );
+    }
 }

@@ -617,8 +617,9 @@ impl FramePipeline {
     /// - Before hot-reloading shaders
     /// - Any time you need to ensure GPU is completely idle
     ///
-    /// For swapchain resize, prefer [`wait_current_slot`](Self::wait_current_slot)
-    /// which is faster (waits for 1 frame instead of all frames).
+    /// Swapchain resize also requires every slot to finish, since they share
+    /// the surface. On an event-loop thread that cannot block (WASM), use
+    /// [`try_recycle_all_graphs`](Self::try_recycle_all_graphs) and retry later.
     ///
     /// # Example
     ///
@@ -663,8 +664,8 @@ impl FramePipeline {
     ///
     /// This releases all `Arc` references (e.g. swapchain texture views) held
     /// by graphs that were kept alive for GPU safety. **Must only be called
-    /// after [`wait_idle`](Self::wait_idle)** — the fence wait guarantees the
-    /// GPU is done with these resources.
+    /// after [`wait_idle`](Self::wait_idle) or a successful non-blocking
+    /// [`is_idle`](Self::is_idle) check** — every submission must be complete.
     ///
     /// # When to Call
     ///
@@ -686,6 +687,25 @@ impl FramePipeline {
                 self.graph_pool.push(graph);
             }
         }
+    }
+
+    /// Recycle all submitted graphs only when all GPU work has completed.
+    ///
+    /// Non-blocking counterpart to `wait_idle` + `recycle_all_graphs`, for
+    /// surface reconfiguration on browser event loops. Returns `false` without
+    /// changing frame state or releasing resources if any submission or frame
+    /// schedule is still active, including a dropped schedule awaiting collection.
+    /// Stop submitting new frames and retry on a later event-loop tick. GPU
+    /// completion callbacks must be allowed to run between attempts.
+    ///
+    /// On success, processes readbacks and releases graph-held references to
+    /// old surface textures across every slot, just like `recycle_all_graphs`.
+    pub fn try_recycle_all_graphs(&mut self) -> bool {
+        if !self.is_idle() {
+            return false;
+        }
+        self.recycle_all_graphs();
+        true
     }
 
     /// Wait for all in-flight GPU work with a timeout.
@@ -1012,6 +1032,88 @@ mod tests {
     fn test_is_idle_initial() {
         let pipeline = make_test_pipeline(2);
         assert!(pipeline.is_idle());
+    }
+
+    fn graph_holding_buffer(
+        pipeline: &FramePipeline,
+    ) -> (RenderGraph, std::sync::Weak<crate::Buffer>) {
+        let buffer = pipeline
+            .device
+            .create_buffer(&crate::BufferDescriptor::new(16, BufferUsage::COPY_DST))
+            .unwrap();
+        let weak = Arc::downgrade(&buffer);
+        let mut graph = RenderGraph::new();
+        let mut pass = crate::TransferPass::new("resize lifetime probe".into());
+        pass.set_transfer_config(crate::TransferConfig::new().with_operation(
+            crate::TransferOperation::write_buffer(buffer, 0, Arc::from([0u8; 16].as_slice())),
+        ));
+        graph.add_transfer_pass(pass);
+        (graph, weak)
+    }
+
+    #[test]
+    fn nonblocking_recycle_preserves_all_slots_until_every_submission_completes() {
+        let mut pipeline = make_test_pipeline(3);
+        let mut resources = Vec::new();
+        for slot in 0..3 {
+            let (graph, weak) = graph_holding_buffer(&pipeline);
+            resources.push(weak);
+            pipeline.slot_graphs[slot].push(graph);
+            // One unfinished submit followed by an already completed one.
+            // Checking only the last fence or only the current slot is unsafe.
+            pipeline.frame_fences[slot] = vec![Fence::new_unsignaled(), Fence::new_signaled()];
+        }
+        for slot in 0..3 {
+            assert!(!pipeline.try_recycle_all_graphs());
+            assert!(resources.iter().all(|weak| weak.upgrade().is_some()));
+            assert_eq!(pipeline.current_slot(), 0);
+            assert_eq!(pipeline.frame_count(), 0);
+            pipeline.frame_fences[slot][0].signal();
+        }
+        assert!(pipeline.try_recycle_all_graphs());
+        assert!(resources.iter().all(|weak| weak.upgrade().is_none()));
+        assert!(pipeline.try_recycle_all_graphs());
+        let schedule = pipeline.try_begin_frame().unwrap().unwrap();
+        pipeline.end_frame(schedule);
+    }
+
+    #[test]
+    fn nonblocking_recycle_tracks_active_and_dropped_schedules() {
+        let mut pipeline = make_test_pipeline(2);
+        pipeline
+            .create_ring_buffers(256, BufferUsage::UNIFORM, "resize ring")
+            .unwrap();
+        let (graph, weak) = graph_holding_buffer(&pipeline);
+        let mut schedule = pipeline.begin_frame().unwrap();
+        let fence = Fence::new_unsignaled();
+        schedule.submit(graph).unwrap();
+
+        assert!(!pipeline.try_recycle_all_graphs());
+        assert_eq!(pipeline.current_slot(), 0);
+        drop(schedule); // Error/early return in on_draw, before end_frame.
+        // The dummy backend completes submits immediately. Replace completion
+        // with a controlled fence to model the browser's delayed callback.
+        pipeline.owner.returned.lock().as_mut().unwrap().fences = vec![fence.clone()];
+        assert!(!pipeline.try_recycle_all_graphs());
+        assert!(weak.upgrade().is_some());
+        assert_eq!(pipeline.current_slot(), 0);
+
+        fence.signal();
+        assert!(pipeline.try_recycle_all_graphs());
+        assert!(weak.upgrade().is_none());
+        assert_eq!(pipeline.current_slot(), 1);
+        let schedule = pipeline.try_begin_frame().unwrap().unwrap();
+        assert!(schedule.has_ring_buffer());
+        pipeline.end_frame(schedule);
+    }
+
+    #[test]
+    fn nonblocking_recycle_rejects_active_schedule_even_after_gpu_completion() {
+        let mut pipeline = make_test_pipeline(2);
+        let schedule = pipeline.begin_frame().unwrap();
+        assert!(!pipeline.try_recycle_all_graphs());
+        pipeline.end_frame(schedule);
+        assert!(pipeline.try_recycle_all_graphs());
     }
 
     #[test]

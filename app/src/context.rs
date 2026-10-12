@@ -46,8 +46,10 @@ pub struct AppContext {
     pub(crate) hdr_active: bool,
     /// Resize manager for debounced window resize handling.
     pub(crate) resize_manager: ResizeManager,
-    /// Set when acquire/present reported the surface as outdated; the app
-    /// reconfigures the surface before the next frame and clears it.
+    /// A resize or acquire/present failure requires surface reconfiguration.
+    /// Kept set while GPU work drains (non-blocking on WASM) or configure
+    /// fails; cleared only after a successful reconfigure. Update/input keep
+    /// running, but no new frame is acquired or submitted while this is set.
     pub(crate) surface_outdated: bool,
 }
 

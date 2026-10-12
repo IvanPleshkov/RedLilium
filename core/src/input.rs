@@ -3,6 +3,9 @@
 //! Provides a [`KeyCode`] enum that identifies physical keyboard keys
 //! without depending on any windowing crate.
 
+mod devices;
+pub use devices::*;
+
 /// Physical keyboard key identifier.
 ///
 /// Matches common physical key positions (US QWERTY layout names).

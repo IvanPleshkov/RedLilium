@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use egui::{Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
+use redlilium_core::input::{TouchId, TouchInput, TouchPhase};
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
@@ -24,6 +25,9 @@ pub struct EguiInputState {
     pub pixels_per_point: f32,
     /// Events collected this frame.
     pub events: Vec<egui::Event>,
+    focused: bool,
+    touches: std::collections::BTreeMap<TouchId, TouchInput>,
+    primary_touch: Option<TouchId>,
     /// Files being hovered over the window.
     hovered_files: Vec<egui::HoveredFile>,
     /// Files dropped onto the window this frame.
@@ -49,6 +53,9 @@ impl EguiInputState {
             ),
             pixels_per_point,
             events: Vec::new(),
+            focused: true,
+            touches: Default::default(),
+            primary_touch: None,
             hovered_files: Vec::new(),
             dropped_files: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -77,6 +84,9 @@ impl EguiInputState {
 
     /// Handle mouse move event.
     pub fn on_mouse_move(&mut self, x: f64, y: f64) {
+        if !self.focused {
+            return;
+        }
         let pos = Pos2::new(
             x as f32 / self.pixels_per_point,
             y as f32 / self.pixels_per_point,
@@ -87,6 +97,9 @@ impl EguiInputState {
 
     /// Handle mouse button event.
     pub fn on_mouse_button(&mut self, button: MouseButton, pressed: bool) {
+        if !self.focused {
+            return;
+        }
         let egui_button = match button {
             MouseButton::Left => Some(PointerButton::Primary),
             MouseButton::Right => Some(PointerButton::Secondary),
@@ -108,6 +121,9 @@ impl EguiInputState {
 
     /// Handle mouse scroll event.
     pub fn on_mouse_scroll(&mut self, delta: MouseScrollDelta) {
+        if !self.focused {
+            return;
+        }
         let delta = match delta {
             MouseScrollDelta::LineDelta(x, y) => {
                 // Line delta is typically in "lines", convert to points
@@ -129,6 +145,9 @@ impl EguiInputState {
 
     /// Handle keyboard modifiers change.
     pub fn on_modifiers_changed(&mut self, state: ModifiersState) {
+        if !self.focused {
+            return;
+        }
         self.modifiers = Modifiers {
             alt: state.alt_key(),
             ctrl: state.control_key(),
@@ -144,6 +163,9 @@ impl EguiInputState {
 
     /// Handle key event.
     pub fn on_key(&mut self, physical_key: PhysicalKey, pressed: bool) {
+        if !self.focused {
+            return;
+        }
         if let PhysicalKey::Code(keycode) = physical_key
             && let Some(key) = translate_keycode(keycode)
         {
@@ -183,6 +205,9 @@ impl EguiInputState {
 
     /// Handle text input.
     pub fn on_text_input(&mut self, text: &str) {
+        if !self.focused {
+            return;
+        }
         // Filter out control characters
         let filtered: String = text
             .chars()
@@ -191,6 +216,111 @@ impl EguiInputState {
         if !filtered.is_empty() {
             self.events.push(egui::Event::Text(filtered));
         }
+    }
+
+    /// Forward UI-owned contacts. Only the first contact acts as the pointer;
+    /// lifting it never promotes an already-held second finger.
+    /// Returns true when the host must cancel egui's pointer state.
+    pub fn on_touch(&mut self, touch: TouchInput) -> bool {
+        if !self.focused {
+            return false;
+        }
+        if touch.phase == TouchPhase::Started {
+            if self.touches.contains_key(&touch.id) {
+                return false;
+            }
+            if self.touches.is_empty() {
+                self.primary_touch = Some(touch.id);
+            }
+        } else if !self.touches.contains_key(&touch.id) {
+            return false;
+        }
+        self.touches.insert(touch.id, touch);
+        let pos = Pos2::new(
+            touch.position[0] as f32 / self.pixels_per_point,
+            touch.position[1] as f32 / self.pixels_per_point,
+        );
+        self.events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(touch.id.0),
+            pos,
+            force: None,
+            phase: match touch.phase {
+                TouchPhase::Started => egui::TouchPhase::Start,
+                TouchPhase::Moved => egui::TouchPhase::Move,
+                TouchPhase::Ended => egui::TouchPhase::End,
+                TouchPhase::Cancelled => egui::TouchPhase::Cancel,
+            },
+        });
+        let primary = self.primary_touch == Some(touch.id);
+        if primary {
+            self.mouse_pos = pos;
+            match touch.phase {
+                TouchPhase::Started | TouchPhase::Moved => {
+                    self.events.push(egui::Event::PointerMoved(pos));
+                    if touch.phase == TouchPhase::Started {
+                        self.on_mouse_button(MouseButton::Left, true);
+                    }
+                }
+                TouchPhase::Ended => {
+                    self.on_mouse_button(MouseButton::Left, false);
+                    self.events.push(egui::Event::PointerGone);
+                }
+                TouchPhase::Cancelled => self.cancel_pointer_events(),
+            }
+        }
+        if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.touches.remove(&touch.id);
+            if primary {
+                self.primary_touch = None;
+            }
+        }
+        primary && touch.phase == TouchPhase::Cancelled
+    }
+
+    fn cancel_pointer_events(&mut self) {
+        // Cancellation is not a release/click. Remove unconsumed pointer
+        // events too, so down+cancel before a UI pass cannot start a drag.
+        self.events.retain(|event| {
+            !matches!(
+                event,
+                egui::Event::PointerButton { .. }
+                    | egui::Event::PointerMoved(_)
+                    | egui::Event::PointerGone
+            )
+        });
+        self.events.push(egui::Event::PointerGone);
+    }
+
+    pub fn cancel_pointers(&mut self) {
+        for mut touch in self.touches.values().copied().collect::<Vec<_>>() {
+            touch.phase = TouchPhase::Cancelled;
+            self.on_touch(touch);
+        }
+        self.cancel_pointer_events();
+    }
+
+    pub fn cancel_mouse(&mut self) -> bool {
+        if self.primary_touch.is_some() {
+            return false;
+        }
+        self.cancel_pointer_events();
+        true
+    }
+
+    pub fn on_focus_changed(&mut self, focused: bool) {
+        if !focused {
+            self.cancel_pointers();
+            self.modifiers = Modifiers::default();
+            self.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::MouseWheel { .. }
+                )
+            });
+        }
+        self.focused = focused;
+        self.events.push(egui::Event::WindowFocused(focused));
     }
 
     /// Handle a file being hovered over the window.
@@ -240,7 +370,7 @@ impl EguiInputState {
             events,
             hovered_files: std::mem::take(&mut self.hovered_files),
             dropped_files: std::mem::take(&mut self.dropped_files),
-            focused: true,
+            focused: self.focused,
             ..Default::default()
         }
     }

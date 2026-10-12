@@ -78,6 +78,15 @@ where
     frames_since_monitor_probe: u32,
     running: bool,
     initialized: bool,
+    gamepads: crate::input::gamepads::GamepadBackend,
+    touches: crate::input::TouchTracker,
+    input_focused: bool,
+    input_visible: bool,
+    input_active: bool,
+    #[cfg(target_arch = "wasm32")]
+    web_input: Option<crate::input::web::WebInputBridge>,
+    #[cfg(target_os = "windows")]
+    windows_input: Option<crate::input::windows::WindowsInputBridge>,
 }
 
 /// How often to re-read the monitor's refresh rate, in frames — often enough to
@@ -110,6 +119,15 @@ where
             frames_since_monitor_probe: MONITOR_PROBE_INTERVAL,
             running: true,
             initialized: false,
+            gamepads: crate::input::gamepads::GamepadBackend::new(),
+            touches: crate::input::TouchTracker::default(),
+            input_focused: true,
+            input_visible: true,
+            input_active: true,
+            #[cfg(target_arch = "wasm32")]
+            web_input: None,
+            #[cfg(target_os = "windows")]
+            windows_input: None,
         }
     }
 
@@ -145,6 +163,7 @@ where
         redlilium_graphics::init();
         crate::init();
 
+        let mut app = Self::new(handler, args);
         #[cfg(target_os = "windows")]
         let event_loop = EventLoop::builder()
             .with_any_thread(true)
@@ -154,7 +173,6 @@ where
         #[cfg(not(target_os = "windows"))]
         let event_loop = EventLoop::new().expect("Failed to create event loop");
 
-        let mut app = Self::new(handler, args);
         event_loop.run_app(&mut app).expect("Event loop error");
     }
 
@@ -362,11 +380,6 @@ where
         let first_frame = self.context.as_ref().is_some_and(|c| c.frame_number == 0);
         if first_frame {
             self.apply_resize(width, height);
-            // Sync resize manager's internal size so it doesn't re-apply later
-            if let Some(ctx) = &mut self.context {
-                ctx.resize_manager.on_resize_event(width, height);
-                ctx.resize_manager.force_resize();
-            }
             return;
         }
 
@@ -393,7 +406,7 @@ where
         self.apply_resize(width, height);
     }
 
-    /// Reconfigure the swapchain and notify the handler of a resize.
+    /// Request a reconfigure, retaining it across ticks if the GPU is busy.
     fn apply_resize(&mut self, width: u32, height: u32) {
         {
             let ctx = match &mut self.context {
@@ -405,29 +418,19 @@ where
                 return;
             }
 
-            ctx.width = width;
-            ctx.height = height;
+            ctx.surface_outdated = true;
         }
 
-        if !self.reconfigure_surface() {
-            return;
-        }
-
-        // Notify handler
-        if let Some(ctx) = &mut self.context {
-            self.handler.on_resize(ctx);
-        }
+        self.reconfigure_surface();
     }
 
-    /// Reconfigure the surface with the current context dimensions.
+    /// Reconfigure the surface to the latest window size when safe.
     ///
     /// Used both for resize events and for `SurfaceOutdated` reports from
     /// acquire/present (where the size may be unchanged but the swapchain no
-    /// longer matches the surface). Returns `false` only if the surface was
-    /// not touched at all (no context, or in-flight work could not be
-    /// drained); a failed `configure` still returns `true` so callers behave
-    /// as after any other reconfigure — a failing surface reports outdated on
-    /// the next acquire and is retried there.
+    /// longer matches the surface). Dimensions and the handler's size-dependent
+    /// resources change only after successful configuration. Busy/minimized/
+    /// failed attempts stay pending and are retried from the next redraw.
     fn reconfigure_surface(&mut self) -> bool {
         let ctx = match &mut self.context {
             Some(c) => c,
@@ -440,39 +443,34 @@ where
         // silently clamps the swapchain to the real window extent while the
         // frame is still recorded at the stale size — an out-of-bounds render
         // area into the smaller swapchain image (device-lost on NVIDIA).
-        if let Some(size) = self.window.as_ref().map(|w| w.inner_size()) {
-            if size.width == 0 || size.height == 0 {
-                // Minimized — nothing sane to configure; the restore's resize
-                // event retries.
-                return false;
-            }
-            ctx.width = size.width;
-            ctx.height = size.height;
+        let size = ctx.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            // Minimized — keep the request pending until the window is restored.
+            return false;
         }
 
         // Wait for ALL in-flight frames before reconfiguring the surface.
         // The surface is shared across all frame slots, so any slot with
         // pending GPU work could still reference the old swapchain textures.
         // On failure the GPU may still be using them — skip the reconfigure
-        // entirely (the next resize event or outdated report retries) rather
+        // entirely (the next redraw retries) rather
         // than recycling graphs the GPU still reads.
         //
-        // wasm: `wait_idle` blocks on a fence whose completion callback can only
-        // fire from the event loop we're on — a guaranteed hang. WebGPU has no
-        // persistent back-buffer set (each frame's texture comes from
-        // `getCurrentTexture` and is released after present), and destroying a
-        // resource the GPU still reads is safe by construction there, so
-        // reconfiguring without draining is fine. The per-slot fence in
-        // `try_begin_frame` still gates re-recording a pooled graph. (#33)
+        // wasm: completion callbacks need the browser event loop. Poll once,
+        // retain all graphs when busy, and yield without acquiring/submitting
+        // another frame. The next rAF retries, so the queue can actually drain.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Err(e) = ctx.pipeline.wait_idle() {
-            log::error!("wait_idle failed during resize, skipping surface reconfigure: {e}");
+        {
+            if let Err(e) = ctx.pipeline.wait_idle() {
+                log::error!("wait_idle failed during resize, skipping surface reconfigure: {e}");
+                return false;
+            }
+            ctx.pipeline.recycle_all_graphs();
+        }
+        #[cfg(target_arch = "wasm32")]
+        if !ctx.pipeline.try_recycle_all_graphs() {
             return false;
         }
-
-        // Recycle all submitted graphs to release Arc<TextureView> references
-        // to the old swapchain back buffers.
-        ctx.pipeline.recycle_all_graphs();
 
         // Reconfigure surface with the same format
         let present_mode = if self.args.vsync() {
@@ -481,19 +479,118 @@ where
             PresentMode::Immediate
         };
 
-        let config = SurfaceConfiguration::new(ctx.width, ctx.height)
+        let config = SurfaceConfiguration::new(size.width, size.height)
             .with_format(ctx.surface_format)
             .with_present_mode(present_mode);
 
-        ctx.surface_outdated = false;
         if let Err(e) = ctx.surface.configure(&ctx.device, &config) {
             log::error!("Failed to reconfigure surface: {}", e);
+            return false;
+        }
+
+        let size_changed = (ctx.width, ctx.height) != (size.width, size.height);
+        ctx.width = size.width;
+        ctx.height = size.height;
+        ctx.surface_outdated = false;
+        // Reconcile the debounce manager too: an outdated report may have
+        // bypassed it, or newer resize events arrived while GPU work drained.
+        ctx.resize_manager.cancel_pending();
+        ctx.resize_manager.on_resize_event(size.width, size.height);
+        ctx.resize_manager.force_resize();
+        if size_changed {
+            self.handler.on_resize(ctx);
         }
         true
     }
 
+    fn notify_input_focus(&mut self) {
+        let active = self.input_focused && self.input_visible;
+        if active == self.input_active {
+            return;
+        }
+        self.input_active = active;
+        if !active {
+            self.touches.clear();
+        }
+        if let Some(ctx) = &mut self.context {
+            if active {
+                // Drain transitions accumulated while the host was inactive
+                // before reopening input. The next real frame publishes the
+                // fresh held state, rather than replaying background taps.
+                for event in self.gamepads.poll() {
+                    self.handler.on_gamepad(ctx, event);
+                }
+            }
+            self.handler.on_focus_changed(ctx, active);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn pump_web_input(&mut self) {
+        use crate::input::web::WebInputEvent;
+        let events = self
+            .web_input
+            .as_ref()
+            .map(|bridge| bridge.drain())
+            .unwrap_or_default();
+        for event in events {
+            let Some(ctx) = &mut self.context else {
+                continue;
+            };
+            match event {
+                WebInputEvent::CaptureLost { id, touch: true } => {
+                    if let Some(input) = self.touches.capture_lost(id) {
+                        self.handler.on_touch(ctx, input);
+                    }
+                }
+                WebInputEvent::CaptureLost { touch: false, .. } => self
+                    .handler
+                    .on_pointer_cancelled(ctx, redlilium_core::input::InputCancelReason::Platform),
+                WebInputEvent::GamepadDisconnected(index) => {
+                    if let Some(event) = self.gamepads.disconnected(index) {
+                        self.handler.on_gamepad(ctx, event);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn pump_windows_input(&mut self) {
+        use crate::input::windows::Cancellation;
+        let events = self
+            .windows_input
+            .as_ref()
+            .map(|bridge| bridge.drain())
+            .unwrap_or_default();
+        for event in events {
+            let Some(ctx) = &mut self.context else {
+                continue;
+            };
+            match event {
+                Cancellation::Mouse => self
+                    .handler
+                    .on_pointer_cancelled(ctx, redlilium_core::input::InputCancelReason::Platform),
+                Cancellation::Touch(id) => {
+                    if let Some(input) = self.touches.capture_lost(id) {
+                        self.handler.on_touch(ctx, input);
+                    }
+                }
+            }
+        }
+    }
+
     /// Render a frame.
     fn render_frame(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.pump_web_input();
+        #[cfg(target_os = "windows")]
+        self.pump_windows_input();
+        if let Some(ctx) = &mut self.context {
+            for event in self.gamepads.poll() {
+                self.handler.on_gamepad(ctx, event);
+            }
+        }
         // Apply any pending debounced resize before rendering
         self.apply_pending_resize();
 
@@ -503,13 +600,7 @@ where
         // what the last applied resize recorded (mid-storm) — the handler
         // must hear about that change or it keeps rendering at the old size.
         if self.context.as_ref().is_some_and(|c| c.surface_outdated) {
-            let before = self.context.as_ref().map(|c| (c.width, c.height));
-            if self.reconfigure_surface()
-                && before != self.context.as_ref().map(|c| (c.width, c.height))
-                && let Some(ctx) = &mut self.context
-            {
-                self.handler.on_resize(ctx);
-            }
+            self.reconfigure_surface();
         }
 
         let now = Instant::now();
@@ -588,6 +679,14 @@ where
             return;
         }
         self.last_phase_ms[0] = phase_start.elapsed().as_secs_f32() * 1000.0;
+
+        // Keep time, gameplay, and input handling alive while resize waits for
+        // the GPU. Do not acquire a canvas texture or submit more work: those
+        // submissions would delay draining, and an unpresented texture can
+        // clear the browser canvas. RedrawRequested schedules another rAF.
+        if ctx.surface_outdated {
+            return;
+        }
 
         // Acquire the swapchain texture and begin the frame. The order differs by
         // platform. On native, acquire first so a `SurfaceOutdated` is caught
@@ -777,13 +876,24 @@ where
                          to the page"
                     );
                 }
-                window_attributes.with_canvas(canvas)
+                if let Some(canvas) = &canvas {
+                    self.web_input = Some(crate::input::web::WebInputBridge::new(canvas));
+                }
+                window_attributes
+                    .with_canvas(canvas)
+                    .with_prevent_default(true)
             };
 
             match event_loop.create_window(window_attributes) {
                 Ok(window) => {
                     log::info!("Window created");
                     self.window = Some(Arc::new(window));
+                    #[cfg(target_os = "windows")]
+                    {
+                        self.windows_input = crate::input::windows::WindowsInputBridge::new(
+                            self.window.as_ref().unwrap().clone(),
+                        );
+                    }
 
                     if !self.init_graphics() {
                         log::error!("Failed to initialize graphics");
@@ -794,6 +904,7 @@ where
                     // Initialize handler
                     if let Some(ctx) = &mut self.context {
                         self.handler.on_init(ctx);
+                        self.handler.on_focus_changed(ctx, self.input_active);
                     }
                     self.initialized = true;
                 }
@@ -806,7 +917,35 @@ where
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        #[cfg(target_arch = "wasm32")]
+        self.pump_web_input();
+        #[cfg(target_os = "windows")]
+        self.pump_windows_input();
         match event {
+            WindowEvent::Focused(focused) => {
+                self.input_focused = focused;
+                self.notify_input_focus();
+            }
+            WindowEvent::Occluded(hidden) => {
+                self.input_visible = !hidden;
+                self.notify_input_focus();
+            }
+            WindowEvent::Touch(touch) => {
+                if self.input_active
+                    && let Some(input) = self.touches.update(touch)
+                    && let Some(ctx) = &mut self.context
+                {
+                    self.handler.on_touch(ctx, input);
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(ctx) = &mut self.context {
+                    self.handler.on_pointer_cancelled(
+                        ctx,
+                        redlilium_core::input::InputCancelReason::PointerLeft,
+                    );
+                }
+            }
             WindowEvent::CloseRequested => {
                 log::info!("Close requested");
 
@@ -841,12 +980,24 @@ where
             }
 
             WindowEvent::Resized(size) => {
+                self.touches.clear();
+                if let Some(ctx) = &mut self.context {
+                    self.handler.on_pointer_cancelled(
+                        ctx,
+                        redlilium_core::input::InputCancelReason::ViewportChanged,
+                    );
+                }
                 self.handle_resize_event(size.width, size.height);
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(ctx) = &mut self.context {
                     ctx.scale_factor = scale_factor;
+                    self.touches.clear();
+                    self.handler.on_pointer_cancelled(
+                        ctx,
+                        redlilium_core::input::InputCancelReason::ViewportChanged,
+                    );
                     log::info!("Scale factor changed to {}", scale_factor);
                 }
             }
@@ -863,7 +1014,16 @@ where
                 }
             }
 
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                // A focus restore may synthesize presses for keys already
+                // held outside our window. Require a new physical press.
+                if !self.input_active || (is_synthetic && event.state.is_pressed()) {
+                    return;
+                }
                 if let Some(ctx) = &mut self.context {
                     self.handler.on_key(ctx, &event);
                 }

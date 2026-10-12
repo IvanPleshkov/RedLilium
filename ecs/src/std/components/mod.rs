@@ -20,4 +20,8 @@ pub use light::{DirectionalLight, PointLight, SpotLight};
 pub use name::Name;
 pub use transform::{GlobalTransform, Transform};
 pub use visibility::Visibility;
-pub use window_input::WindowInput;
+pub use window_input::{
+    GamepadAxis, GamepadButton, GamepadButtonState, GamepadEvent, GamepadId, GamepadMapping,
+    GamepadState, InputCancelReason, InputEvent, InputEventReader, InputOwner, TouchContact,
+    TouchId, TouchInput, TouchPhase, WindowInput,
+};

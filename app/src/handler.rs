@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::context::{AppContext, DrawContext};
+use redlilium_core::input::{GamepadEvent, InputCancelReason, TouchInput};
 use redlilium_graphics::FrameSchedule;
 use winit::event::{KeyEvent, MouseButton};
 use winit::keyboard::ModifiersState;
@@ -84,6 +85,19 @@ pub trait AppHandler {
 
     /// Called when modifier keys (Ctrl, Shift, Alt, Cmd) change state.
     fn on_modifiers_changed(&mut self, _ctx: &mut AppContext, _modifiers: ModifiersState) {}
+
+    /// Touch positions are physical pixels relative to the window/canvas.
+    /// IDs remain stable until Ended/Cancelled; multiple fingers are independent.
+    fn on_touch(&mut self, _ctx: &mut AppContext, _input: TouchInput) {}
+
+    /// Called before on_update, in real time, independently of gameplay scale.
+    fn on_gamepad(&mut self, _ctx: &mut AppContext, _event: GamepadEvent) {}
+
+    /// Effective input focus: false also when the window/page becomes hidden.
+    fn on_focus_changed(&mut self, _ctx: &mut AppContext, _focused: bool) {}
+
+    /// Pointer cancellation, including capture loss and leaving the window.
+    fn on_pointer_cancelled(&mut self, _ctx: &mut AppContext, _reason: InputCancelReason) {}
 
     /// Called when a file is dropped onto the window.
     fn on_file_dropped(&mut self, _ctx: &mut AppContext, _path: PathBuf) {}
