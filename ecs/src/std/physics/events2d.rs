@@ -11,3 +11,12 @@ super::force_support::contact_force_events!(
     ContactForceEvent2D,
     ContactForceSample2D
 );
+
+/// Immutable result of one physics step, available through PhysicsWorld.
+/// Consumers use the step number instead of persistent frame-event cursors.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PhysicsStepEvents2D {
+    pub step: u64,
+    pub collisions: Vec<CollisionEvent2D>,
+    pub contact_forces: Vec<ContactForceEvent2D>,
+}

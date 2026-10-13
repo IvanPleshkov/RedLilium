@@ -135,8 +135,8 @@ pub use system::{
 };
 pub use system::{ExecutorBusy, ParConfig, ParallelExecutor};
 pub use system::{
-    FixedUpdate, PostUpdate, PreUpdate, RawFrameDelta, Render, ScheduleId, ScheduleLabel,
-    Schedules, Startup, Time, Update,
+    FixedClockCheckpoint, FixedTime, FixedUpdate, PostUpdate, PreUpdate, RawFrameDelta, Render,
+    ScheduleId, ScheduleLabel, Schedules, Startup, Time, Update,
 };
 pub use system::{
     ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,

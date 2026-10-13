@@ -144,6 +144,11 @@ impl BodyMotion3D<'_> {
 /// });
 /// ```
 pub struct PhysicsWorld3D {
+    checkpoint_identity: std::sync::Arc<()>,
+    /// FrameQueues preserves legacy Events publication. TickOnly requires no
+    /// frame queue and is intended for replayable simulation systems.
+    pub event_delivery: super::PhysicsEventDelivery,
+    last_step_events: super::events3d::PhysicsStepEvents3D,
     pub(super) collision_events: super::events3d::EventState,
     pub(super) teleports: HashMap<
         crate::Entity,
@@ -185,6 +190,9 @@ pub struct PhysicsWorld3D {
 impl Default for PhysicsWorld3D {
     fn default() -> Self {
         Self {
+            checkpoint_identity: std::sync::Arc::new(()),
+            event_delivery: Default::default(),
+            last_step_events: Default::default(),
             collision_events: Default::default(),
             teleports: HashMap::new(),
             pose_resets: Default::default(),
@@ -292,6 +300,20 @@ impl PhysicsWorld3D {
             &self.body_to_entity,
             &self.collider_to_entity,
         );
+        self.last_step_events.step = self.collision_events.step;
+        self.last_step_events
+            .collisions
+            .clone_from(&self.collision_events.pending);
+        self.last_step_events
+            .contact_forces
+            .clone_from(&self.collision_events.forces.pending);
+    }
+
+    /// Events of the last completed physics step. Replaced on each step;
+    /// readable by multiple systems without cursors. Checkpoint restore rewinds
+    /// this batch together with contact tracking. Frame queues are cleared.
+    pub fn last_step_events(&self) -> &super::events3d::PhysicsStepEvents3D {
+        &self.last_step_events
     }
 
     /// Inserts a standalone static collider (e.g. terrain) with no ECS owner.
@@ -570,3 +592,24 @@ mod tests {
 }
 
 super::mass_support::mass_world!(PhysicsWorld3D);
+
+super::checkpoint_support::physics_checkpoint!(
+    PhysicsWorld3D,
+    PhysicsCheckpoint3D,
+    PhysicsBindings3D,
+    crate::physics::components3d,
+    crate::physics::control3d,
+    crate::physics::events3d,
+    RigidBody3D,
+    Collider3D,
+    ColliderBody3D,
+    ImpulseJoint3D,
+    RigidBody3DHandle,
+    Collider3DHandle,
+    ImpulseJoint3DHandle,
+    PhysicsInterpolation,
+    KinematicTarget3D,
+    KinematicVelocity3D,
+    CollisionEvent3D,
+    ContactForceEvent3D
+);

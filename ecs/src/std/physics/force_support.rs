@@ -52,6 +52,11 @@ macro_rules! contact_force_events {
 
         #[derive(Default)]
         struct ForceCollector(std::sync::Mutex<std::collections::HashMap<PairKey, ForceSum>>);
+        impl Clone for ForceCollector {
+            fn clone(&self) -> Self {
+                Self(std::sync::Mutex::new(self.0.lock().unwrap().clone()))
+            }
+        }
         impl ForceCollector {
             fn collect(&self, bodies: &RigidBodySet, pair: &ContactPair) {
                 let pair_key = key(pair.collider1, pair.collider2);
@@ -95,7 +100,7 @@ macro_rules! contact_force_events {
             }
         }
 
-        #[derive(Default)]
+        #[derive(Default, Clone)]
         pub(super) struct ForceState {
             thresholds: std::collections::HashMap<ColliderHandle, f64>,
             pub(super) pending: Vec<$event>,

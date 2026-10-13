@@ -21,8 +21,9 @@ use redlilium_core::math::nalgebra::UnitQuaternion;
 /// Reads native ownership mappings, so regular sync may run immediately before
 /// this system without a deferred-command flush. Transforms receive stepped poses.
 /// Publishes collision transitions and contact-force events after the step when each Events queue
-/// is registered. Enabled tracking without that queue returns InvalidConfiguration
-/// before simulation advances. See [`super::events3d::CollisionEvent3D`].
+/// is registered in `PhysicsEventDelivery::FrameQueues` mode. Enabled tracking
+/// without that queue returns InvalidConfiguration before simulation advances.
+/// `TickOnly` mode instead retains `PhysicsWorld::last_step_events` and needs no queue. See [`super::events3d::CollisionEvent3D`].
 pub struct StepPhysics3D;
 
 impl crate::System for StepPhysics3D {
@@ -57,14 +58,14 @@ impl crate::System for StepPhysics3D {
                         message: "physics mass_properties lost required collider geometry during deferred publication; correct descriptors and run body sync before stepping".into(),
                     });
                 }
-                if physics.collision_events.requires_queue() && !events_available {
+                if physics.event_delivery == super::PhysicsEventDelivery::FrameQueues && physics.collision_events.requires_queue() && !events_available {
                     return Err(crate::SystemError::InvalidConfiguration {
                         message:
                             "collision tracking requires world.add_event::<CollisionEvent3D>()"
                                 .into(),
                     });
                 }
-                if physics.collision_events.forces.requires_queue() && !force_events_available {
+                if physics.event_delivery == super::PhysicsEventDelivery::FrameQueues && physics.collision_events.forces.requires_queue() && !force_events_available {
                     return Err(crate::SystemError::InvalidConfiguration {
                         message: "contact force tracking requires world.add_event::<ContactForceEvent3D>()".into(),
                     });
@@ -185,7 +186,14 @@ impl crate::System for StepPhysics3D {
                 Ok(())
             },
         )?;
-        if events_available {
+        let publish = ctx.raw_world().resource::<PhysicsWorld3D>().event_delivery
+            == super::PhysicsEventDelivery::FrameQueues;
+        if !publish {
+            let mut physics = ctx.raw_world().resource_mut::<PhysicsWorld3D>();
+            physics.collision_events.pending.clear();
+            physics.collision_events.forces.pending.clear();
+        }
+        if publish && events_available {
             ctx.lock::<(
                 crate::ResMut<PhysicsWorld3D>,
                 crate::ResMut<crate::Events<CollisionEvent3D>>,
@@ -196,7 +204,7 @@ impl crate::System for StepPhysics3D {
                 }
             });
         }
-        if force_events_available {
+        if publish && force_events_available {
             ctx.lock::<(
                 crate::ResMut<PhysicsWorld3D>,
                 crate::ResMut<crate::Events<ContactForceEvent3D>>,

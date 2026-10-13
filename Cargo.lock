@@ -4413,7 +4413,9 @@ dependencies = [
  "serde",
  "smallvec",
  "tokio",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-time",
 ]
 
 [[package]]

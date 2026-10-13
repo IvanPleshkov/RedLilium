@@ -24,8 +24,8 @@ pub use function::{
 };
 pub use par_for_each::ParConfig;
 pub use schedule::{
-    FixedUpdate, PostUpdate, PreUpdate, RawFrameDelta, Render, ScheduleId, ScheduleLabel,
-    Schedules, Startup, Time, Update,
+    FixedClockCheckpoint, FixedTime, FixedUpdate, PostUpdate, PreUpdate, RawFrameDelta, Render,
+    ScheduleId, ScheduleLabel, Schedules, Startup, Time, Update,
 };
 pub use state::{ApplyStateTransition, NextState, State, StateTransition, States, init_state};
 pub use traits::{

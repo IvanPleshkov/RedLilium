@@ -288,6 +288,36 @@ fn hash_state<S: Hash>(state: &S) -> u64 {
 // Schedules
 // ---------------------------------------------------------------------------
 
+/// Simulation time, advanced once per attempted fixed tick. Independent of
+/// render frames, real time and gameplay time scale. Use this clock in replayable systems.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FixedTime {
+    tick: u64,
+    elapsed: f64,
+    delta: f64,
+}
+impl FixedTime {
+    pub fn tick(&self) -> u64 {
+        self.tick
+    }
+    pub fn elapsed(&self) -> f64 {
+        self.elapsed
+    }
+    pub fn delta(&self) -> f64 {
+        self.delta
+    }
+}
+
+/// In-memory simulation clock checkpoint. Does not capture systems, resources,
+/// frame clocks, event cursors or the render-frame accumulator.
+#[derive(Clone)]
+pub struct FixedClockCheckpoint {
+    owner: std::sync::Arc<()>,
+    world: std::sync::Weak<()>,
+    time: FixedTime,
+    timestep: f64,
+}
+
 /// Multi-schedule orchestrator for the ECS.
 ///
 /// Manages named [`SystemsContainer`]s, state-driven schedule triggers,
@@ -309,6 +339,9 @@ pub struct Schedules {
     fixed_accumulator: f64,
     max_fixed_steps: u32,
     startup_done: bool,
+    fixed_time: FixedTime,
+    fixed_identity: std::sync::Arc<()>,
+    fixed_world: Option<std::sync::Weak<()>>,
 }
 
 impl Schedules {
@@ -328,6 +361,9 @@ impl Schedules {
             fixed_accumulator: 0.0,
             max_fixed_steps: Self::DEFAULT_MAX_FIXED_STEPS,
             startup_done: false,
+            fixed_time: FixedTime::default(),
+            fixed_identity: std::sync::Arc::new(()),
+            fixed_world: None,
         }
     }
 
@@ -471,6 +507,17 @@ impl Schedules {
     pub fn run_frame(&mut self, world: &mut World, runner: &EcsRunner, delta_time: f64) {
         use log::error;
 
+        assert!(
+            self.fixed_world
+                .as_ref()
+                .is_none_or(|id| id.ptr_eq(&std::sync::Arc::downgrade(world.identity()))),
+            "Schedules is bound to another World"
+        );
+        self.fixed_world = Some(std::sync::Arc::downgrade(world.identity()));
+        if !world.has_resource::<FixedTime>() {
+            world.insert_resource(self.fixed_time);
+        }
+
         // 1. Update Time resource
         if !world.has_resource::<Time>() {
             world.insert_resource(Time::new(self.fixed_timestep));
@@ -536,20 +583,13 @@ impl Schedules {
         if self.fixed_accumulator > max_debt {
             self.fixed_accumulator = max_debt;
         }
-        if let Some(schedule) = self.schedules.get(&ScheduleId::of::<FixedUpdate>()) {
-            while self.fixed_accumulator >= self.fixed_timestep {
-                // Set effective delta to fixed timestep
-                world.resource_mut::<Time>().delta = self.fixed_timestep;
-                let errors = runner.run(world, schedule);
+        while self.fixed_accumulator >= self.fixed_timestep {
+            if let Err(errors) = self.run_fixed_tick(world, runner) {
                 for err in errors {
                     error!("System error in FixedUpdate: {}", err);
                 }
-                self.fixed_accumulator -= self.fixed_timestep;
             }
-        } else {
-            // No FixedUpdate schedule registered — just drain accumulator
-            // to prevent unbounded growth.
-            self.fixed_accumulator %= self.fixed_timestep;
+            self.fixed_accumulator -= self.fixed_timestep;
         }
 
         // Publish the leftover accumulator as a [0, 1) blend factor for
@@ -587,9 +627,118 @@ impl Schedules {
         world.advance_tick();
     }
 
+    /// Execute one fixed tick, including the runner's command/observer flush.
+    /// Does not collect input, advance frame clocks/events/triggers, consume the
+    /// frame accumulator, or execute frame/state-transition schedules.
+    /// Errors can follow partial system mutations: restore game/physics/clock
+    /// checkpoints before retrying. System-local state and Changed/Added filters
+    /// are not rewound; replayable systems must keep authoritative state explicit.
+    pub fn run_fixed_tick(
+        &mut self,
+        world: &mut World,
+        runner: &EcsRunner,
+    ) -> Result<FixedTime, Vec<crate::SystemError>> {
+        if self
+            .fixed_world
+            .as_ref()
+            .is_some_and(|id| !id.ptr_eq(&std::sync::Arc::downgrade(world.identity())))
+        {
+            return Err(vec![crate::SystemError::InvalidConfiguration {
+                message: "fixed clock belongs to another World".into(),
+            }]);
+        }
+        self.fixed_world = Some(std::sync::Arc::downgrade(world.identity()));
+        if !world.has_resource::<Time>() {
+            world.insert_resource(Time::new(self.fixed_timestep));
+        }
+        let previous_delta = world.resource::<Time>().delta;
+        {
+            let mut time = world.resource_mut::<Time>();
+            time.delta = self.fixed_timestep;
+            time.fixed_delta = self.fixed_timestep;
+        }
+        self.fixed_time.tick += 1;
+        self.fixed_time.elapsed += self.fixed_timestep;
+        self.fixed_time.delta = self.fixed_timestep;
+        if world.has_resource::<FixedTime>() {
+            *world.resource_mut::<FixedTime>() = self.fixed_time;
+        } else {
+            world.insert_resource(self.fixed_time);
+        }
+        let errors = self
+            .schedules
+            .get(&ScheduleId::of::<FixedUpdate>())
+            .map(|schedule| runner.run(world, schedule))
+            .unwrap_or_default();
+        world.resource_mut::<Time>().delta = previous_delta;
+        world.advance_tick();
+        if errors.is_empty() {
+            Ok(self.fixed_time)
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Capture between complete ticks, together with game and physics state.
+    pub fn capture_fixed_clock(
+        &self,
+        world: &World,
+    ) -> Result<FixedClockCheckpoint, crate::SystemError> {
+        let id = std::sync::Arc::downgrade(world.identity());
+        if self
+            .fixed_world
+            .as_ref()
+            .is_some_and(|bound| !bound.ptr_eq(&id))
+        {
+            return Err(crate::SystemError::InvalidConfiguration {
+                message: "fixed clock belongs to another World".into(),
+            });
+        }
+        Ok(FixedClockCheckpoint {
+            owner: self.fixed_identity.clone(),
+            world: id,
+            time: self.fixed_time,
+            timestep: self.fixed_timestep,
+        })
+    }
+
+    /// Rewind only simulation time. Live frame accumulator/alpha and real clocks
+    /// stay in place while historical ticks are replayed. Does not restore game
+    /// state, frame Events/cursors, triggers or system-local mutable state.
+    pub fn restore_fixed_clock(
+        &mut self,
+        world: &mut World,
+        checkpoint: &FixedClockCheckpoint,
+    ) -> Result<(), crate::SystemError> {
+        if !std::sync::Arc::ptr_eq(&self.fixed_identity, &checkpoint.owner)
+            || !checkpoint
+                .world
+                .ptr_eq(&std::sync::Arc::downgrade(world.identity()))
+            || self
+                .fixed_world
+                .as_ref()
+                .is_some_and(|id| !id.ptr_eq(&checkpoint.world))
+            || self.fixed_timestep != checkpoint.timestep
+        {
+            return Err(crate::SystemError::InvalidConfiguration {
+                message: "incompatible fixed clock checkpoint (schedule, world or timestep)".into(),
+            });
+        }
+        self.fixed_world = Some(checkpoint.world.clone());
+        self.fixed_time = checkpoint.time;
+        if world.has_resource::<FixedTime>() {
+            *world.resource_mut::<FixedTime>() = self.fixed_time;
+        } else {
+            world.insert_resource(self.fixed_time);
+        }
+        Ok(())
+    }
+
     /// Runs a specific schedule by label.
     ///
     /// Does nothing if no systems have been added to this schedule.
+    /// This is a raw schedule invocation: for a simulation tick with clock
+    /// advancement and an error result use [`Self::run_fixed_tick`].
     pub fn run_schedule<L: ScheduleLabel>(&self, world: &mut World, runner: &EcsRunner) {
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<L>()) {
             runner.run(world, schedule);

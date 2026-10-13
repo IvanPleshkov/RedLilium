@@ -123,6 +123,11 @@ impl BodyMotion2D<'_> {
 /// Entity/handle lookup is available through [`Self::body_for_entity`],
 /// [`Self::entity_for_body`] and [`Self::joint_for_entity`].
 pub struct PhysicsWorld2D {
+    checkpoint_identity: std::sync::Arc<()>,
+    /// FrameQueues preserves legacy Events publication. TickOnly requires no
+    /// frame queue and is intended for replayable simulation systems.
+    pub event_delivery: super::PhysicsEventDelivery,
+    last_step_events: super::events2d::PhysicsStepEvents2D,
     pub(super) collision_events: super::events2d::EventState,
     pub(super) teleports: HashMap<
         crate::Entity,
@@ -164,6 +169,9 @@ pub struct PhysicsWorld2D {
 impl Default for PhysicsWorld2D {
     fn default() -> Self {
         Self {
+            checkpoint_identity: std::sync::Arc::new(()),
+            event_delivery: Default::default(),
+            last_step_events: Default::default(),
             collision_events: Default::default(),
             teleports: HashMap::new(),
             pose_resets: Default::default(),
@@ -271,6 +279,20 @@ impl PhysicsWorld2D {
             &self.body_to_entity,
             &self.collider_to_entity,
         );
+        self.last_step_events.step = self.collision_events.step;
+        self.last_step_events
+            .collisions
+            .clone_from(&self.collision_events.pending);
+        self.last_step_events
+            .contact_forces
+            .clone_from(&self.collision_events.forces.pending);
+    }
+
+    /// Events of the last completed physics step. Replaced on each step;
+    /// readable by multiple systems without cursors. Checkpoint restore rewinds
+    /// this batch together with contact tracking. Frame queues are cleared.
+    pub fn last_step_events(&self) -> &super::events2d::PhysicsStepEvents2D {
+        &self.last_step_events
     }
 
     /// Inserts a standalone static collider (e.g. terrain) with no ECS owner.
@@ -504,3 +526,24 @@ mod tests {
 }
 
 super::mass_support::mass_world!(PhysicsWorld2D);
+
+super::checkpoint_support::physics_checkpoint!(
+    PhysicsWorld2D,
+    PhysicsCheckpoint2D,
+    PhysicsBindings2D,
+    crate::physics::components2d,
+    crate::physics::control2d,
+    crate::physics::events2d,
+    RigidBody2D,
+    Collider2D,
+    ColliderBody2D,
+    ImpulseJoint2D,
+    RigidBody2DHandle,
+    Collider2DHandle,
+    ImpulseJoint2DHandle,
+    PhysicsInterpolation2D,
+    KinematicTarget2D,
+    KinematicVelocity2D,
+    CollisionEvent2D,
+    ContactForceEvent2D
+);

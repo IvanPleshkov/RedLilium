@@ -66,10 +66,20 @@ redlilium-graphics = { path = "../graphics", optional = true }
 wasm-bindgen-futures = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
 env_logger = { workspace = true }
 serde = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen = { workspace = true }
+web-time = { workspace = true }
 
 [[bench]]
 name = "ecs_benchmarks"
 harness = false
+
+[[example]]
+name = "physics_checkpoint_probe"
+required-features = ["physics"]

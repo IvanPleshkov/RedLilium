@@ -15,9 +15,11 @@ macro_rules! collision_events {
             pub is_sensor: bool,
         }
 
-        /// One observed pair transition, published by StepPhysics through Events<T>.
+        /// One observed pair transition, retained in the tick batch and optionally
+        /// published by StepPhysics through Events<T>.
         /// Participants have a stable canonical order, with no initiator/receiver role.
         /// The step counter starts at 1 and belongs to this PhysicsWorld instance.
+        /// Restoring a checkpoint rewinds it; games deduplicate replay side effects.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct $event {
             pub step: u64,
@@ -53,6 +55,14 @@ macro_rules! collision_events {
         // Rapier's handler is Send + Sync and receives &self, including in parallel builds.
         #[derive(Default)]
         struct Collector(std::sync::Mutex<Vec<RapierEvent>>, ForceCollector);
+        impl Clone for Collector {
+            fn clone(&self) -> Self {
+                Self(
+                    std::sync::Mutex::new(self.0.lock().unwrap().clone()),
+                    self.1.clone(),
+                )
+            }
+        }
         impl EventHandler for Collector {
             // PhysicsWorld keeps its required soft-body set empty.
             fn handle_soft_body_tear_event(&self, _: &SoftBodySet, _: &SoftBodyTearEvent) {}
@@ -78,9 +88,9 @@ macro_rules! collision_events {
             }
         }
 
-        #[derive(Default)]
+        #[derive(Default, Clone)]
         pub(super) struct EventState {
-            step: u64,
+            pub(super) step: u64,
             pub(super) forces: ForceState,
             enabled: std::collections::HashSet<ColliderHandle>,
             dirty: std::collections::HashSet<ColliderHandle>,

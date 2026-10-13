@@ -684,3 +684,34 @@ impl World {
         self.entities.clear_flags(entity.index(), bits);
     }
 }
+
+impl World {
+    /// Restore a complete engine-owned runtime cache after external preflight.
+    /// Deliberately bypasses lifecycle hooks/observers/required components:
+    /// this is derived-state restoration, not a gameplay insertion/removal.
+    /// Callers must validate registration and entity identity before any writes.
+    #[allow(dead_code)] // Used by optional standard-library integrations.
+    pub(crate) fn restore_runtime_components<T: Send + Sync + 'static>(
+        &mut self,
+        values: Vec<(Entity, T)>,
+    ) {
+        let tick = self.current_tick();
+        let storage = self
+            .components
+            .get_mut(&std::any::TypeId::of::<T>())
+            .expect("prevalidated registration")
+            .get_mut();
+        let retained: std::collections::HashSet<_> =
+            values.iter().map(|(e, _)| e.index()).collect();
+        let old: Vec<_> = storage.typed::<T>().iter().map(|(i, _)| i).collect();
+        for index in old {
+            storage.typed_mut::<T>().remove(index);
+            if !retained.contains(&index) {
+                storage.record_removal(index, tick);
+            }
+        }
+        for (entity, value) in values {
+            storage.typed_mut::<T>().insert(entity.index(), value, tick);
+        }
+    }
+}

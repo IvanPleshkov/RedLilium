@@ -1052,3 +1052,9 @@ objects or requesting teleports, run `StepPhysics*` before querying their new
 positions. A query never applies pending commands, updates the search structure,
 or advances simulation. It does not promise a coherent old snapshot if the
 collider data has been edited since that broad phase was updated.
+
+## Live checkpoints and rollback
+
+Both dimensions expose opaque physics-resource checkpoints and a restricted ECS
+binding context. See [live physics checkpoints and fixed replay](physics-checkpoints.md)
+for identity/descriptor contracts, tick events, scheduler replay and verification.

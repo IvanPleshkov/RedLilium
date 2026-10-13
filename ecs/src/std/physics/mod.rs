@@ -118,3 +118,6 @@ pub use joints::{JointDrive, JointLimits, JointMotor, JointMotorError, JointMoto
 
 mod material;
 pub use material::CoefficientCombineRule;
+
+mod checkpoint_support;
+pub use checkpoint_support::{PhysicsCheckpointError, PhysicsEventDelivery};

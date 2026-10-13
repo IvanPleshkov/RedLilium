@@ -17,3 +17,4 @@
 - [State Machine](./ecs/state_machine.md)
 - [Prefabs and Scene Spawning](./ecs/prefabs.md)
 - [Physics Integration](./ecs/physics.md)
+  - [Physics Checkpoints](ecs/physics-checkpoints.md)
