@@ -9,6 +9,8 @@ use winit::keyboard;
 pub(crate) mod gamepads;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web;
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_pointer;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 

@@ -2,17 +2,15 @@
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{JsCast, closure::Closure};
 
-pub enum WebInputEvent {
-    CaptureLost { id: u64, touch: bool },
-    GamepadDisconnected(u32),
-}
+pub(crate) use super::web_pointer::WebInputEvent;
+use super::web_pointer::WebPointerQueue;
 type Listener = (
     web_sys::EventTarget,
     &'static str,
     Closure<dyn FnMut(web_sys::Event)>,
 );
 pub struct WebInputBridge {
-    pending: Rc<RefCell<Vec<WebInputEvent>>>,
+    pending: Rc<RefCell<WebPointerQueue>>,
     listeners: Vec<Listener>,
 }
 impl WebInputBridge {
@@ -26,8 +24,10 @@ impl WebInputBridge {
         };
         let target: web_sys::EventTarget = canvas.clone().into();
         let captured = canvas.clone();
+        let queue = this.pending.clone();
         this.listen(target.clone(), "pointerdown", move |event| {
             if let Some(event) = event.dyn_ref::<web_sys::PointerEvent>() {
+                queue.borrow_mut().down(event.pointer_id() as u64);
                 if event.pointer_type() == "touch" {
                     event.prevent_default();
                     let _ = captured.focus();
@@ -35,15 +35,29 @@ impl WebInputBridge {
                 }
             }
         });
-        let queue = this.pending.clone();
-        this.listen(target, "lostpointercapture", move |event| {
-            if let Some(event) = event.dyn_ref::<web_sys::PointerEvent>() {
-                queue.borrow_mut().push(WebInputEvent::CaptureLost {
-                    id: event.pointer_id() as u64,
-                    touch: event.pointer_type() == "touch",
-                });
-            }
-        });
+        for name in [
+            "pointerup",
+            "pointercancel",
+            "lostpointercapture",
+            "pointermove",
+        ] {
+            let queue = this.pending.clone();
+            this.listen(target.clone(), name, move |event| {
+                if let Some(event) = event.dyn_ref::<web_sys::PointerEvent>() {
+                    let id = event.pointer_id() as u64;
+                    let touch = event.pointer_type() == "touch";
+                    let mut queue = queue.borrow_mut();
+                    match name {
+                        "pointerup" => queue.up(id),
+                        "pointercancel" => queue.cancel(id, touch),
+                        "lostpointercapture" => queue.capture_lost(id, touch),
+                        // winit forwards chorded transitions as MouseInput.
+                        "pointermove" if event.button() != -1 => queue.observe_transition(),
+                        _ => {}
+                    }
+                }
+            });
+        }
         if let Some(window) = web_sys::window() {
             let queue = this.pending.clone();
             this.listen(window.into(), "gamepaddisconnected", move |event| {
@@ -66,21 +80,31 @@ impl WebInputBridge {
     ) {
         let callback = Closure::wrap(Box::new(callback) as Box<dyn FnMut(web_sys::Event)>);
         if target
-            .add_event_listener_with_callback(name, callback.as_ref().unchecked_ref())
+            .add_event_listener_with_callback_and_bool(
+                name,
+                callback.as_ref().unchecked_ref(),
+                true,
+            )
             .is_ok()
         {
             self.listeners.push((target, name, callback));
         }
     }
+    pub fn delivered_transition(&self) {
+        self.pending.borrow_mut().delivered_transition();
+    }
     pub fn drain(&self) -> Vec<WebInputEvent> {
-        std::mem::take(&mut *self.pending.borrow_mut())
+        self.pending.borrow_mut().drain_ready()
     }
 }
 impl Drop for WebInputBridge {
     fn drop(&mut self) {
         for (target, name, callback) in &self.listeners {
-            let _ =
-                target.remove_event_listener_with_callback(name, callback.as_ref().unchecked_ref());
+            let _ = target.remove_event_listener_with_callback_and_bool(
+                name,
+                callback.as_ref().unchecked_ref(),
+                true,
+            );
         }
     }
 }

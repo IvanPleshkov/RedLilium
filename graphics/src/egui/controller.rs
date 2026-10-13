@@ -140,6 +140,69 @@ mod input_tests {
     }
 
     #[test]
+    fn mouse_release_clicks_once_including_between_frames() {
+        for short in [false, true] {
+            let (mut controller, ui) = setup();
+            let point = ui.read().button.center();
+            controller.on_mouse_move(point.x as f64 * 2.0, point.y as f64 * 2.0);
+            controller.on_mouse_button(MouseButton::Left, true);
+            if !short {
+                controller.begin_frame(0.1);
+                controller.discard_frame();
+                assert!(controller.context().input(|i| i.pointer.primary_down()));
+            }
+            controller.on_mouse_button(MouseButton::Left, false);
+            controller.begin_frame(0.2);
+            controller.discard_frame();
+            assert_eq!(ui.read().clicks, 1);
+            assert!(!controller.context().input(|i| i.pointer.any_down()));
+            controller.begin_frame(0.3);
+            controller.discard_frame();
+            assert_eq!(ui.read().clicks, 1);
+        }
+    }
+
+    #[test]
+    fn mouse_cancellation_and_late_release_do_not_click() {
+        for short in [false, true] {
+            for reason in 0..4 {
+                let (mut controller, ui) = setup();
+                let point = ui.read().button.center();
+                controller.on_mouse_move(point.x as f64 * 2.0, point.y as f64 * 2.0);
+                controller.on_mouse_button(MouseButton::Left, true);
+                if !short {
+                    controller.begin_frame(0.1);
+                    controller.discard_frame();
+                }
+                match reason {
+                    0 => controller.cancel_mouse(), // Capture loss / pointercancel.
+                    1 => {
+                        controller.on_focus_changed(false);
+                        controller.on_focus_changed(true);
+                    }
+                    2 => controller.cancel_pointers(), // Viewport invalidation.
+                    _ => {
+                        controller.on_mouse_move(-20.0, 900.0);
+                        controller.cancel_mouse();
+                    }
+                }
+                controller.on_mouse_button(MouseButton::Left, false);
+                controller.begin_frame(0.2);
+                controller.discard_frame();
+                assert_eq!(ui.read().clicks, 0, "short={short} reason={reason}");
+                assert!(!controller.context().input(|i| i.pointer.any_down()));
+                // Cancellation must not poison the next valid gesture.
+                controller.on_mouse_move(point.x as f64 * 2.0, point.y as f64 * 2.0);
+                controller.on_mouse_button(MouseButton::Left, true);
+                controller.on_mouse_button(MouseButton::Left, false);
+                controller.begin_frame(0.3);
+                controller.discard_frame();
+                assert_eq!(ui.read().clicks, 1);
+            }
+        }
+    }
+
+    #[test]
     fn secondary_finger_never_takes_over_primary_pointer() {
         let (mut controller, ui) = setup();
         let point = ui.read().button.center();

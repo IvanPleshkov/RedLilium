@@ -538,12 +538,12 @@ where
                 continue;
             };
             match event {
-                WebInputEvent::CaptureLost { id, touch: true } => {
+                WebInputEvent::PointerCancelled { id, touch: true } => {
                     if let Some(input) = self.touches.capture_lost(id) {
                         self.handler.on_touch(ctx, input);
                     }
                 }
-                WebInputEvent::CaptureLost { touch: false, .. } => self
+                WebInputEvent::PointerCancelled { touch: false, .. } => self
                     .handler
                     .on_pointer_cancelled(ctx, redlilium_core::input::InputCancelReason::Platform),
                 WebInputEvent::GamepadDisconnected(index) => {
@@ -918,6 +918,17 @@ where
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         #[cfg(target_arch = "wasm32")]
+        let pointer_transition = matches!(
+            &event,
+            WindowEvent::MouseInput { .. }
+                | WindowEvent::Touch(winit::event::Touch {
+                    phase: winit::event::TouchPhase::Started
+                        | winit::event::TouchPhase::Ended
+                        | winit::event::TouchPhase::Cancelled,
+                    ..
+                })
+        );
+        #[cfg(target_arch = "wasm32")]
         self.pump_web_input();
         #[cfg(target_os = "windows")]
         self.pump_windows_input();
@@ -1077,6 +1088,13 @@ where
             }
 
             _ => {}
+        }
+        #[cfg(target_arch = "wasm32")]
+        if pointer_transition {
+            if let Some(bridge) = &self.web_input {
+                bridge.delivered_transition();
+            }
+            self.pump_web_input();
         }
     }
 

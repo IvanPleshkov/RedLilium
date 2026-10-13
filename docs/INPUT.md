@@ -112,7 +112,13 @@ the owner on MouseButton events. Ownership is latched at press. The legacy
 
 The web host sets `touch-action: none` on its canvas, prevents default pointer
 gestures, and captures touch pointers. Off-canvas movement/release therefore
-continues the contact; lost capture and OS `pointercancel` cancel it. A canvas
+continues the contact. `pointerup` ends the gesture normally; the browser's
+following automatic `lostpointercapture` does not cancel it or erase its release.
+Capture loss during an active gesture and OS `pointercancel` cancel without
+synthesizing a click. This applies to mouse/pen as well as touch. DOM listeners
+track gesture lifetimes and order supplemental cancellations after preceding
+winit button/contact transitions, including when those transitions are buffered.
+Button/contact input itself continues to come from winit. A canvas
 cursor exit cancels mouse drags but preserves captured touch contacts. Native
 touch uses winit's platform contact routing. Promoted touch mouse input is
 suppressed by the browser/winit; on Windows the host's window subclass filters
@@ -142,7 +148,9 @@ incoming held values remain neutral. `cancel_all(reason)` and
 `cargo test -p redlilium-ecs --test input_devices` exercises public injection,
 analog circles, two devices, disconnect, focus, ownership, cancellation and
 independent readers at 32/64/256 FPS and 0×/0.25×/1× game time. App unit tests
-cover winit contact IDs; graphics egui tests cover DPI hit testing, real tap
-versus cancellation, and non-promotion of the second finger. macOS, Windows
+cover winit contact IDs and DOM/winit cancellation ordering (completed gestures,
+active capture loss, mouse cancellation, multiple contacts and chorded buttons).
+Graphics egui tests cover DPI hit testing, mouse clicks within/across frames,
+late releases after cancellation, real taps and non-promotion of the second finger. macOS, Windows
 and wasm32 runtime targets are compile-checked. These automated checks do not claim
 physical controller/touchscreen or all-platform driver validation.
