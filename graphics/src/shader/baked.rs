@@ -13,6 +13,11 @@
 //! reported loudly with the shader's name via [`name_for_key`] — never a silent
 //! wrong/stale shader.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock, RwLock},
+};
+
 use crate::materials::{
     BindingLayout, BindingLayoutEntry, BindingType, ShaderStage, ShaderStageFlags, UpdateRate,
 };
@@ -69,7 +74,7 @@ pub fn shader_key(source: &str, entry_point: &str, defines: &[(&str, &str)]) -> 
     fnv1a(&buf)
 }
 
-/// Look up baked WGSL for `(source, entry_point, defines)`. `None` means the
+/// Look up built-in baked WGSL for `(source, entry_point, defines)`. `None` means the
 /// permutation was never baked — the caller must fail loudly (see
 /// [`name_for_key`]); on wasm there is no Slang fallback.
 pub fn lookup(source: &str, entry_point: &str, defines: &[(&str, &str)]) -> Option<&'static str> {
@@ -78,6 +83,16 @@ pub fn lookup(source: &str, entry_point: &str, defines: &[(&str, &str)]) -> Opti
         .binary_search_by_key(&key, |(k, _)| *k)
         .ok()
         .map(|i| baked_generated::BAKED_WGSL[i].1)
+}
+
+/// Resolve an application artifact or built-in WGSL. Unlike [`lookup`], this
+/// includes process-lifetime registrations and returns shared owned storage.
+pub fn resolve(source: &str, entry_point: &str, defines: &[(&str, &str)]) -> Option<Arc<str>> {
+    let key = shader_key(source, entry_point, defines);
+    if let Some(code) = application_bakes().read().unwrap().wgsl.get(&key) {
+        return Some(code.clone());
+    }
+    lookup(source, entry_point, defines).map(Arc::from)
 }
 
 /// Look up baked SPIR-V for `(source, entry_point, defines)` — the artifact
@@ -188,6 +203,9 @@ pub struct BakedGroup {
 /// both native and wasm so they can't drift). `None` means the set was never
 /// baked; the caller must fail loudly (there is no runtime Slang on wasm).
 pub fn lookup_reflection(key: u64) -> Option<(Vec<BindingLayout>, Vec<Option<UpdateRate>>)> {
+    if let Some(layouts) = application_bakes().read().unwrap().reflection.get(&key) {
+        return Some(layouts.clone());
+    }
     let groups = baked_generated::BAKED_REFLECTION
         .binary_search_by_key(&key, |(k, _)| *k)
         .ok()
@@ -304,5 +322,164 @@ mod tests {
                 "baked SPIR-V {key:#018x} has no BAKED_NAMES entry"
             );
         }
+    }
+}
+
+#[derive(Default)]
+struct ApplicationBakes {
+    wgsl: HashMap<u64, Arc<str>>,
+    reflection: HashMap<u64, (Vec<BindingLayout>, Vec<Option<UpdateRate>>)>,
+}
+fn application_bakes() -> &'static RwLock<ApplicationBakes> {
+    static BAKES: OnceLock<RwLock<ApplicationBakes>> = OnceLock::new();
+    BAKES.get_or_init(Default::default)
+}
+
+/// Register a game's offline-compiled shader set without modifying the engine's
+/// bake table. `sources` are Slang sources with their effective variant defines;
+/// `wgsl` has the matching per-stage compiler outputs. Layouts/rates are the
+/// pre-reclassification result of SlangCompiler::reflect_all_bindings.
+///
+/// Register at startup before material resolution. Entries are immutable and
+/// process-lifetime; identical registration is idempotent, conflicting artifacts
+/// fail atomically. Hot reload uses new source/define keys. This validates WGSL,
+/// not its semantic equivalence to the original Slang (the offline baker owns it).
+pub fn register_shader_set(
+    sources: &[crate::ShaderSource],
+    wgsl: &[String],
+    layouts: Vec<BindingLayout>,
+    rates: Vec<Option<UpdateRate>>,
+) -> Result<(), crate::GraphicsError> {
+    use crate::{GraphicsError, ShaderSourceLanguage};
+    let fail = |s: &str| GraphicsError::InvalidParameter(s.into());
+    if sources.is_empty()
+        || sources.len() != wgsl.len()
+        || layouts.len() != rates.len()
+        || sources
+            .iter()
+            .any(|s| s.language != ShaderSourceLanguage::Slang)
+    {
+        return Err(fail(
+            "invalid offline shader set: stages/artifacts/layouts/rates do not match",
+        ));
+    }
+    for layout in &layouts {
+        crate::validation::binding_layout(layout)?;
+    }
+    let text: Vec<_> = sources
+        .iter()
+        .map(|s| std::str::from_utf8(&s.source))
+        .collect::<Result<_, _>>()
+        .map_err(|_| fail("shader source is not UTF-8"))?;
+    let defs: Vec<Vec<_>> = sources
+        .iter()
+        .map(|s| {
+            s.defines
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect()
+        })
+        .collect();
+    let set: Vec<_> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (text[i], s.entry_point.as_str(), s.stage, defs[i].as_slice()))
+        .collect();
+    let key = shader_set_key(&set);
+    let mut stages = HashMap::new();
+    for (i, source) in sources.iter().enumerate() {
+        super::interface::ShaderInterface::inspect_wgsl(
+            &wgsl[i],
+            &source.entry_point,
+            source.stage,
+        )?;
+        let key = shader_key(text[i], &source.entry_point, &defs[i]);
+        let code = Arc::<str>::from(wgsl[i].as_str());
+        if stages
+            .insert(key, code.clone())
+            .is_some_and(|old| old != code)
+        {
+            return Err(fail("conflicting stages within offline shader set"));
+        }
+    }
+    let mut bakes = application_bakes().write().unwrap();
+    for (key, code) in &stages {
+        if bakes.wgsl.get(key).is_some_and(|old| old != code)
+            || baked_generated::BAKED_WGSL
+                .binary_search_by_key(key, |(k, _)| *k)
+                .ok()
+                .is_some_and(|i| baked_generated::BAKED_WGSL[i].1 != code.as_ref())
+        {
+            return Err(fail(
+                "conflicting offline WGSL for an existing source/entry/defines key",
+            ));
+        }
+    }
+    if baked_generated::BAKED_REFLECTION
+        .binary_search_by_key(&key, |(k, _)| *k)
+        .is_ok()
+    {
+        return Err(fail(
+            "application shader sets cannot replace built-in reflection",
+        ));
+    }
+    if bakes
+        .reflection
+        .get(&key)
+        .is_some_and(|old| old != &(layouts.clone(), rates.clone()))
+    {
+        return Err(fail(
+            "conflicting offline binding reflection for an existing shader set",
+        ));
+    }
+    bakes.wgsl.extend(stages);
+    bakes.reflection.insert(key, (layouts, rates));
+    Ok(())
+}
+
+#[cfg(test)]
+mod application_tests {
+    use super::*;
+    use crate::ShaderSource;
+    fn source(name: &str) -> ShaderSource {
+        ShaderSource::slang(ShaderStage::Vertex, name, "main", vec![])
+    }
+    const CODE: &str = "@vertex fn main() -> @builtin(position) vec4f { return vec4f(0,0,0,1); }";
+    #[test]
+    fn application_registration_is_idempotent_immutable_and_atomic() {
+        let s = source("application bake registry test");
+        register_shader_set(std::slice::from_ref(&s), &[CODE.into()], vec![], vec![]).unwrap();
+        register_shader_set(std::slice::from_ref(&s), &[CODE.into()], vec![], vec![]).unwrap();
+        assert!(
+            register_shader_set(
+                std::slice::from_ref(&s),
+                &[CODE.replace("0,0,0,1", "1,0,0,1")],
+                vec![],
+                vec![]
+            )
+            .is_err()
+        );
+        let fresh = source("application bake atomic test");
+        assert!(
+            register_shader_set(
+                &[fresh, s],
+                &[CODE.into(), "invalid WGSL".into()],
+                vec![],
+                vec![]
+            )
+            .is_err()
+        );
+        assert!(resolve("application bake atomic test", "main", &[]).is_none());
+        let fresh = source("application bake duplicate test");
+        assert!(
+            register_shader_set(
+                &[fresh.clone(), fresh],
+                &[CODE.into(), CODE.replace("0,0,0,1", "1,0,0,1")],
+                vec![],
+                vec![]
+            )
+            .is_err()
+        );
+        assert!(resolve("application bake duplicate test", "main", &[]).is_none());
     }
 }

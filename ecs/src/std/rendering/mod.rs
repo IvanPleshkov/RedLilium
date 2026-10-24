@@ -35,6 +35,8 @@ mod asset_inspect;
 mod asset_ref_field;
 pub mod components;
 pub mod deferred;
+pub mod gbuffer;
+pub use gbuffer::GBufferContract;
 #[cfg(feature = "rendering")]
 pub mod loaders;
 pub(crate) mod material_inspector;

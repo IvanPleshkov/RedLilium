@@ -1,3 +1,6 @@
+// Single-level render targets / preconvolved irradiance use explicit LOD 0.
+// Sampling after per-pixel rejection/early returns must not require quad
+// derivatives (WebGPU uniform-control-flow validation).
 // Motion blur — reconstruction (#149; McGuire 2012 + Guertin 2014).
 //
 // Gathers each pixel's smear along its tile's dominant motion (NeighborMax).
@@ -71,13 +74,13 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
 
 // Per-pixel screen velocity in pixels (shutter applied), matching TileMax.
 float2 velocity_px(float2 uv) {
-    float2 v_ndc = gbuffer_velocity.Sample(nearest_sampler, uv).xy;
+    float2 v_ndc = gbuffer_velocity.SampleLevel(nearest_sampler, uv, 0.0).xy;
     return v_ndc * float2(0.5, -0.5) * resolution * shutter;
 }
 
 // Linear depth proxy: distance to camera; background sits at the far sentinel.
 float view_depth(float2 uv) {
-    if (gbuffer_albedo.Sample(nearest_sampler, uv).a < 1.0 / 128.0) {
+    if (gbuffer_albedo.SampleLevel(nearest_sampler, uv, 0.0).a < 1.0 / 128.0) {
         return FAR_DEPTH;
     }
     float3 world = reconstruct_world(inv_view_proj, uv, load_texel_r(depth_texture, uv));
@@ -107,9 +110,9 @@ float ign(float2 p) {
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
     float2 uv = input.uv;
-    float3 center_color = color.Sample(linear_sampler, uv).rgb;
+    float3 center_color = color.SampleLevel(linear_sampler, uv, 0.0).rgb;
 
-    float2 v_max = neighbor_max.Sample(nearest_sampler, uv).xy;
+    float2 v_max = neighbor_max.SampleLevel(nearest_sampler, uv, 0.0).xy;
     float v_max_len = length(v_max);
 
     // Nothing in this neighbourhood moves enough to blur.
@@ -135,7 +138,7 @@ float4 fs_main(VsOutput input) : SV_Target {
         float dist = length(offset);
         float2 s_uv = uv + offset * inv_resolution;
 
-        float3 s_color = color.Sample(linear_sampler, s_uv).rgb;
+        float3 s_color = color.SampleLevel(linear_sampler, s_uv, 0.0).rgb;
         float2 s_vel = velocity_px(s_uv);
         float s_vel_len = max(length(s_vel), 0.5);
         float s_depth = view_depth(s_uv);

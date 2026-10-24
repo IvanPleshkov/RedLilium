@@ -18,6 +18,7 @@ use crate::Entity;
 pub struct TemporalState {
     /// Global frame index — drives the Halton jitter sequence.
     frame: u64,
+    history_generation: u64,
     /// Unjittered view-projection per camera, previous frame.
     prev_view_proj: HashMap<Entity, [[f32; 4]; 4]>,
     /// Unjittered view-projection per camera, being filled this frame.
@@ -29,6 +30,24 @@ pub struct TemporalState {
 }
 
 impl TemporalState {
+    /// Invalidate all cameras' temporal history and all previous transform maps.
+    /// Call before the Render schedule after a cut, teleport or topology change.
+    /// The next deferred frame bypasses TAA history and motion blur. Exposure is
+    /// unaffected. Games must also reset their own previous deformation data to
+    /// the current vertices; the engine does not own those buffers.
+    pub fn reset_history(&mut self) {
+        self.history_generation = self.history_generation.wrapping_add(1);
+        self.prev_view_proj.clear();
+        self.curr_view_proj.clear();
+        self.prev_models.clear();
+        self.curr_models.clear();
+    }
+
+    /// Invalidation token for custom temporal render pipelines.
+    pub fn history_generation(&self) -> u64 {
+        self.history_generation
+    }
+
     /// Advance to the next frame: current maps become the previous ones.
     /// Entities/cameras absent last frame simply miss — consumers fall back
     /// to "previous = current" (zero velocity), so a fresh spawn never
@@ -116,6 +135,28 @@ mod tests {
             assert_eq!((x, y), (nx, ny), "period 8");
         }
         assert_eq!(seen.len(), 8, "distinct sub-pixel positions");
+    }
+
+    #[test]
+    fn reset_clears_both_generations_without_rewinding_frame() {
+        let mut state = TemporalState::default();
+        let entity = Entity::new(1, 0);
+        let m = [[1.0; 4]; 4];
+        state.record_model(entity, m);
+        state.record_view_proj(entity, m);
+        state.begin_frame();
+        state.record_model(entity, m);
+        state.record_view_proj(entity, m);
+        state.reset_history();
+        assert_eq!(state.frame(), 1);
+        assert_eq!(state.history_generation(), 1);
+        assert_eq!(state.prev_model(entity), None);
+        assert_eq!(state.prev_view_proj(entity), None);
+        state.begin_frame();
+        assert_eq!(state.prev_model(entity), None);
+        assert_eq!(state.prev_view_proj(entity), None);
+        state.reset_history();
+        assert_eq!(state.history_generation(), 2);
     }
 
     /// A fresh frame rotates current into previous; missing history reads

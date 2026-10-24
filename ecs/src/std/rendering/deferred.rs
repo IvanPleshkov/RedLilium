@@ -209,14 +209,7 @@ pub const MB_OUTPUT: &str = "mb_output";
 /// only when one is downstream (else the pattern is static — no flicker).
 const GOLDEN_ANGLE: f32 = 2.399_963_2;
 
-/// G-buffer attachment formats, in attachment order (must match
-/// `deferred_gbuffer.slang`'s `FsOutput`).
-const GBUFFER_FORMATS: [TextureFormat; 4] = [
-    TextureFormat::Rgba8UnormSrgb,
-    TextureFormat::Rgba16Float,
-    TextureFormat::R8Unorm,
-    TextureFormat::Rg16Float,
-];
+pub use super::gbuffer::GBUFFER_FORMATS;
 
 /// Uniform-array capacities of the resolve pass — must match the
 /// `MAX_*_LIGHTS` constants in `deferred_resolve.slang`. Lights beyond the
@@ -730,6 +723,7 @@ struct CameraResources {
     /// (re)creation (resize/format change); the first TAA frame then takes
     /// the current frame wholesale instead of blending with garbage.
     history_primed: bool,
+    history_generation: Option<u64>,
     /// `Arc::as_ptr` of the G-buffer albedo the binding groups reference —
     /// resize re-derives the G-buffer (and `scene_color` with it),
     /// invalidating these materials.
@@ -1758,6 +1752,7 @@ impl CameraResources {
             auto_enabled: auto_exposure.is_some(),
             auto_exposure,
             history_primed: false,
+            history_generation: None,
             albedo_ptr: Arc::as_ptr(gbuffer[0]) as usize,
             depth_ptr: Arc::as_ptr(camera_depth) as usize,
             env_ptr: env.map(|e| Arc::as_ptr(e) as usize),
@@ -2144,6 +2139,18 @@ impl CameraRenderPipeline for DeferredPipeline {
             return None;
         };
 
+        let generation = if world.has_resource::<super::TemporalState>() {
+            world
+                .resource::<super::TemporalState>()
+                .history_generation()
+        } else {
+            0
+        };
+        let history_reset = camera_resources.history_generation != Some(generation);
+        if history_reset {
+            camera_resources.history_primed = false;
+        }
+
         // One-time uploads (IBL mips, fullscreen vertex buffer) ride the
         // first recorded frame's graph.
         if !shared.pending_uploads.is_empty() {
@@ -2247,7 +2254,9 @@ impl CameraRenderPipeline for DeferredPipeline {
         // tight ceiling guards the one blow-up direction (dt anomalously small).
         // Applied to the MB shutter only — GBUFFER_VELOCITY and the TAA/velocity
         // contract (#147) stay untouched.
-        let mb_shutter_ratio = if mb_on && world.has_resource::<crate::Time>() {
+        let mb_shutter_ratio = if history_reset {
+            0.0
+        } else if mb_on && world.has_resource::<crate::Time>() {
             let time = world.resource::<crate::Time>();
             (time.smoothed_frame_delta() / time.frame_delta().max(1e-6)).clamp(0.15, 2.0) as f32
         } else {
@@ -2473,18 +2482,14 @@ impl CameraRenderPipeline for DeferredPipeline {
                 ctx.scene,
                 &ring_buffer,
                 &mut pipelines,
-                // Only pbr-model materials belong in the G-buffer: a
-                // single-output shader would be accepted by the MRT pipeline
-                // (writing only target 0) and land with garbage normals.
+                // Registration declares semantics; pipeline specialization validates
+                // the actual output ABI, uniforms and binding rates.
                 &DrawArgs::mrt(
                     camera_offset,
                     GBUFFER_FORMATS.to_vec(),
                     view.target.depth.format(),
                 )
-                .with_shader_allowlist(vec![
-                    redlilium_assets::Guid::stable("shaders/deferred_gbuffer.slang"),
-                    redlilium_assets::Guid::stable("shaders/deferred_gbuffer_textured.slang"),
-                ]),
+                .with_deferred_contract(),
             );
         }
         let gbuffer_handle = graph.add_graphics_pass(gbuffer_pass);
@@ -2955,6 +2960,7 @@ impl CameraRenderPipeline for DeferredPipeline {
             graph.add_dependency(display_handle, auto_handle);
         }
 
+        camera_resources.history_generation = Some(generation);
         Some(display_handle)
     }
 }

@@ -18,6 +18,8 @@
 mod bake;
 mod dist;
 mod ibl;
+#[cfg(feature = "slang")]
+mod material_bake;
 mod textures;
 
 fn main() {
@@ -26,6 +28,8 @@ fn main() {
         "dist" => dist::run(),
         "bake-ibl" => ibl::run(),
         "bake-textures" => textures::run(),
+        #[cfg(feature = "slang")]
+        "bake-material" => material_bake::run(),
         "bake-shaders" => {
             #[cfg(feature = "slang")]
             bake::run();
@@ -42,7 +46,7 @@ fn main() {
         other => {
             eprintln!(
                 "unknown task {other:?}; available: dist [--target desktop|web], \
-                 bake-shaders [--check], bake-ibl, bake-textures"
+                 bake-shaders [--check], bake-material INPUT.slang OUTPUT.rs [NAME=VALUE ...] (requires --features slang), bake-ibl, bake-textures"
             );
             std::process::exit(2);
         }

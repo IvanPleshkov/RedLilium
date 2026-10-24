@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Deferred material acceptance probe</title>
+<pre id="probe-output">Running WebGPU pixel assertions…</pre>
+<script type="module">
+import init, { run_browser } from './pkg/deferred_material_probe.js';
+const output = document.getElementById('probe-output');
+try {
+    await init();
+    output.textContent = await run_browser();
+} catch (error) {
+    output.textContent = `FAIL: ${error}`;
+    console.error(error);
+}
+</script>

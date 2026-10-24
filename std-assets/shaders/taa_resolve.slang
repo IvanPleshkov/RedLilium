@@ -1,3 +1,6 @@
+// Single-level render targets / preconvolved irradiance use explicit LOD 0.
+// Sampling after per-pixel rejection/early returns must not require quad
+// derivatives (WebGPU uniform-control-flow validation).
 // Temporal anti-aliasing resolve (#148) — accumulates the jittered
 // scene-referred frames into a converged, anti-aliased image.
 //
@@ -202,11 +205,11 @@ float3 sample_history_catmull_rom(float2 uv, float2 texel, float2 resolution) {
     float2 tc12 = (tex_pos1 + offset12) * texel;
 
     float3 result = float3(0.0);
-    result += history.Sample(linear_sampler, float2(tc12.x, tc0.y)).rgb * (w12.x * w0.y);
-    result += history.Sample(linear_sampler, float2(tc0.x, tc12.y)).rgb * (w0.x * w12.y);
-    result += history.Sample(linear_sampler, float2(tc12.x, tc12.y)).rgb * (w12.x * w12.y);
-    result += history.Sample(linear_sampler, float2(tc3.x, tc12.y)).rgb * (w3.x * w12.y);
-    result += history.Sample(linear_sampler, float2(tc12.x, tc3.y)).rgb * (w12.x * w3.y);
+    result += history.SampleLevel(linear_sampler, float2(tc12.x, tc0.y), 0.0).rgb * (w12.x * w0.y);
+    result += history.SampleLevel(linear_sampler, float2(tc0.x, tc12.y), 0.0).rgb * (w0.x * w12.y);
+    result += history.SampleLevel(linear_sampler, float2(tc12.x, tc12.y), 0.0).rgb * (w12.x * w12.y);
+    result += history.SampleLevel(linear_sampler, float2(tc3.x, tc12.y), 0.0).rgb * (w3.x * w12.y);
+    result += history.SampleLevel(linear_sampler, float2(tc12.x, tc3.y), 0.0).rgb * (w12.x * w3.y);
     return result;
 }
 
@@ -228,7 +231,7 @@ static const float TAA_DEPTH_REJECT_HI = 0.25;
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
     float2 texel = params.zw;
-    float3 current = scene_color.Sample(nearest_sampler, input.uv).rgb;
+    float3 current = scene_color.SampleLevel(nearest_sampler, input.uv, 0.0).rgb;
 
     // Reprojected history coordinate: geometry pixels carry their own NDC
     // motion; background reprojects the view ray through the camera pair.
@@ -240,7 +243,7 @@ float4 fs_main(VsOutput input) : SV_Target {
     // end so next frame can read the *previous* depth here and detect
     // disocclusion. Sky sits at the far sentinel.
     float depth;
-    bool background = gbuffer_albedo.Sample(nearest_sampler, input.uv).a < 1.0 / 128.0;
+    bool background = gbuffer_albedo.SampleLevel(nearest_sampler, input.uv, 0.0).a < 1.0 / 128.0;
     if (background) {
         // Sky has no object motion, so its camera reprojection (far-plane ray
         // through the camera pair) *is* the history reprojection.
@@ -249,7 +252,7 @@ float4 fs_main(VsOutput input) : SV_Target {
         cam_uv = prev_uv;
         depth = TAA_FAR_DEPTH;
     } else {
-        float2 velocity = gbuffer_velocity.Sample(nearest_sampler, input.uv).xy;
+        float2 velocity = gbuffer_velocity.SampleLevel(nearest_sampler, input.uv, 0.0).xy;
         prev_uv = reproject_prev_uv(input.uv, velocity);
         // Camera-only reprojection of this pixel's world position — unlike
         // `velocity` (which folds in the object's own motion) it depends solely
@@ -274,7 +277,7 @@ float4 fs_main(VsOutput input) : SV_Target {
         [unroll]
         for (int dx = -1; dx <= 1; dx++) {
             float3 s = rgb_to_ycocg(
-                scene_color.Sample(nearest_sampler, input.uv + float2(dx, dy) * texel).rgb);
+                scene_color.SampleLevel(nearest_sampler, input.uv + float2(dx, dy) * texel, 0.0).rgb);
             mean += s;
             mean_sq += s * s;
         }
@@ -322,7 +325,7 @@ float4 fs_main(VsOutput input) : SV_Target {
     // Gated by `saturate(motion_px)`: with no reprojected motion there is no
     // disocclusion, and a static silhouette whose bilinear depth tap straddles
     // an edge must keep its temporal AA rather than re-alias.
-    float prev_depth = history.Sample(linear_sampler, prev_uv).a;
+    float prev_depth = history.SampleLevel(linear_sampler, prev_uv, 0.0).a;
     float depth_diff = abs(depth - prev_depth) / max(depth, 1e-3);
     float motion_px = length((input.uv - prev_uv) / texel);
     float reject =

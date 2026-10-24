@@ -420,7 +420,7 @@ impl PipelineManager {
                 // are baked as SPIR-V (Slang's output verbatim), because
                 // Slang's WGSL target refuses to load a module with
                 // mesh-shading entry points. Try WGSL first, then SPIR-V.
-                if let Some(wgsl) = crate::shader::baked::lookup(source_str, entry_point, &defines)
+                if let Some(wgsl) = crate::shader::baked::resolve(source_str, entry_point, &defines)
                 {
                     let spv = self.compile_wgsl_to_spirv(wgsl.as_bytes(), stage, entry_point)?;
                     (spv, entry_point.to_string())

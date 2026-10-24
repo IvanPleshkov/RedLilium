@@ -275,6 +275,29 @@ pub struct ShadingRegistry {
 }
 
 impl ShadingRegistry {
+    /// Register an application-owned material schema. Existing ids are immutable;
+    /// register before loading material assets. Deferred compatibility is a
+    /// separate opt-in on `PipelineCache::register_deferred_shader`.
+    pub fn register(&mut self, model: ShadingModel) -> Result<(), AssetError> {
+        if model.id.is_empty() || self.models.contains_key(&model.id) {
+            return Err(AssetError::Decode(format!(
+                "empty or duplicate shading model id '{}'",
+                model.id
+            )));
+        }
+        let mut names = std::collections::HashSet::new();
+        for prop in &model.schema {
+            if prop.name.is_empty() || !names.insert(&prop.name) {
+                return Err(AssetError::Decode(format!(
+                    "empty or duplicate property in '{}'",
+                    model.id
+                )));
+            }
+        }
+        self.models.insert(model.id.clone(), model);
+        Ok(())
+    }
+
     /// Build the registry with the built-in engine shading models.
     pub fn with_builtins() -> Self {
         let mut models = HashMap::new();

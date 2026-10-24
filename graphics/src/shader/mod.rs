@@ -15,3 +15,6 @@ pub use variants::{
     MAX_VARIANTS_PER_SHADER, ShaderVariantSpace, VariantAxis, VariantAxisKind, VariantError,
     VariantKey, VariantSelection, VariantSelector, VariantValue,
 };
+
+/// Portable shader interface validation.
+pub mod interface;

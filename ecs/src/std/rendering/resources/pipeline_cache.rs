@@ -22,6 +22,7 @@ use redlilium_graphics::{
     ShaderStage, TextureFormat, VariantKey,
 };
 
+use crate::std::rendering::gbuffer::{GBUFFER_FORMATS, GBufferContract};
 use crate::std::rendering::loaders::Shader;
 
 /// Cache key: the shader asset, its variant selection (#6, Decision 5), the
@@ -40,6 +41,7 @@ struct PipelineKey {
     /// (zero color attachments, #129).
     colors: Vec<TextureFormat>,
     depth: Option<TextureFormat>,
+    contract: Option<GBufferContract>,
 }
 
 /// A cached specialization: the pipeline plus the shader `Arc` it was compiled
@@ -60,6 +62,7 @@ struct PipelineEntry {
 pub struct PipelineCache {
     device: Arc<GraphicsDevice>,
     cache: HashMap<PipelineKey, PipelineEntry>,
+    deferred: HashMap<Guid, GBufferContract>,
 }
 
 impl PipelineCache {
@@ -68,7 +71,55 @@ impl PipelineCache {
         Self {
             device,
             cache: HashMap::new(),
+            deferred: [
+                "shaders/deferred_gbuffer.slang",
+                "shaders/deferred_gbuffer_textured.slang",
+            ]
+            .into_iter()
+            .map(|name| (Guid::stable(name), GBufferContract::V1))
+            .collect(),
         }
+    }
+
+    /// Opt a shader asset into the stock deferred contract. Every encountered
+    /// variant/layout/source version is validated before it can draw. Register
+    /// before rendering; declaration alone does not bypass interface validation.
+    pub fn register_deferred_shader(&mut self, shader: Guid, contract: GBufferContract) {
+        self.deferred.insert(shader, contract);
+    }
+    pub fn supports_deferred(&self, shader: Guid) -> bool {
+        self.deferred.contains_key(&shader)
+    }
+    pub fn get_or_build_deferred(
+        &mut self,
+        guid: Guid,
+        shader: &Arc<Shader>,
+        variant: &VariantKey,
+        layout: &Arc<VertexLayout>,
+        depth: TextureFormat,
+    ) -> Result<Arc<Material>, GraphicsError> {
+        let contract = *self.deferred.get(&guid).ok_or_else(|| {
+            GraphicsError::InvalidParameter("shader has no deferred contract".into())
+        })?;
+        let key = PipelineKey {
+            shader: guid,
+            variant: variant.clone(),
+            layout: Arc::as_ptr(layout) as usize,
+            colors: GBUFFER_FORMATS.to_vec(),
+            depth: Some(depth),
+            contract: Some(contract),
+        };
+        self.get_or_build_with(key, guid, shader, |device, shader| {
+            Self::build(
+                device,
+                shader,
+                variant,
+                layout,
+                &GBUFFER_FORMATS,
+                depth,
+                Some(contract),
+            )
+        })
     }
 
     /// Get (or build + cache) the pipeline specialized for this shader + mesh
@@ -100,9 +151,10 @@ impl PipelineCache {
             layout: Arc::as_ptr(layout) as usize,
             colors: colors.to_vec(),
             depth: Some(depth),
+            contract: None,
         };
         self.get_or_build_with(key, shader_guid, shader, |device, shader| {
-            Self::build(device, shader, variant, layout, colors, depth)
+            Self::build(device, shader, variant, layout, colors, depth, None)
         })
     }
 
@@ -123,6 +175,7 @@ impl PipelineCache {
             layout: Arc::as_ptr(layout) as usize,
             colors: Vec::new(),
             depth: Some(depth),
+            contract: None,
         };
         self.get_or_build_with(key, shader_guid, shader, |device, shader| {
             Self::build_depth_only(device, shader, layout, depth)
@@ -221,6 +274,7 @@ impl PipelineCache {
         layout: &Arc<VertexLayout>,
         colors: &[TextureFormat],
         depth: TextureFormat,
+        contract: Option<GBufferContract>,
     ) -> Result<Arc<Material>, GraphicsError> {
         let mut descriptor = MaterialDescriptor::new()
             .with_shader(ShaderSource::slang(
@@ -238,7 +292,14 @@ impl PipelineCache {
         for &color in colors {
             descriptor = descriptor.with_color_format(color);
         }
-        device.create_material(
+        if let Some(contract) = contract {
+            let resolved = descriptor
+                .clone()
+                .with_variant(variant.clone())
+                .resolve_variant()?;
+            contract.validate_shaders(&resolved.shaders[0], &resolved.shaders[1])?;
+        }
+        let material = device.create_material(
             &descriptor
                 .with_variant(variant.clone())
                 .with_vertex_layout(Arc::clone(layout))
@@ -253,7 +314,11 @@ impl PipelineCache {
                 // shader's [UpdateRate] blocks classify each set through
                 // reflection (Decision 7) — no hardcoded set indices here.
                 .with_label("opaque"),
-        )
+        )?;
+        if let Some(contract) = contract {
+            contract.validate_material(&material)?;
+        }
+        Ok(material)
     }
 
     /// Compile the depth-only pipeline: vertex stage only, no color formats

@@ -91,3 +91,8 @@ fn main() {
 ```
 
 The following chapters cover each feature in depth.
+
+Custom deferred materials can use the stock TAA and motion blur through
+`GBufferContract::V1`, with game-owned deformation history. See the repository
+contract in `docs/DEFERRED_MATERIALS.md` and its GPU acceptance test in
+`ecs/tests/deferred_custom_material.rs`.

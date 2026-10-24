@@ -584,51 +584,7 @@ impl WgpuBackend {
         &self,
         shader: &crate::materials::ShaderSource,
     ) -> Result<String, GraphicsError> {
-        use crate::materials::ShaderSourceLanguage;
-
-        let source_str = std::str::from_utf8(&shader.source).map_err(|e| {
-            GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
-        })?;
-
-        match shader.language {
-            ShaderSourceLanguage::Wgsl => Ok(source_str.to_string()),
-            #[cfg(feature = "slang-shaders")]
-            ShaderSourceLanguage::Slang => {
-                let compiler = crate::shader::SlangCompiler::new()?;
-                // Write standard library modules so `import math;` etc. resolve
-                compiler.write_library_modules(&crate::shader::ShaderLibrary::standard_slang())?;
-                let defines: Vec<(&str, &str)> = shader
-                    .defines
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-                compiler.compile_to_wgsl(source_str, &shader.entry_point, &[], &defines)
-            }
-            // Without the Slang compiler (wasm has no native Slang lib, #33, or
-            // any `--no-default-features` native build), serve the WGSL baked
-            // offline by `xtask bake-shaders`. A miss fails loudly and names the
-            // permutation, so a forgotten rebake is obvious rather than a silent
-            // gray screen.
-            #[cfg(not(feature = "slang-shaders"))]
-            ShaderSourceLanguage::Slang => {
-                let defines: Vec<(&str, &str)> = shader
-                    .defines
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-                crate::shader::baked::lookup(source_str, &shader.entry_point, &defines)
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        GraphicsError::ShaderCompilationFailed(format!(
-                            "no baked WGSL for a Slang shader (entry '{}', defines {:?}); Slang \
-                             cannot compile at runtime on this target — add it to the xtask \
-                             registry and run `cargo run -p xtask --features slang -- \
-                             bake-shaders`, then rebuild",
-                            shader.entry_point, shader.defines
-                        ))
-                    })
-            }
-        }
+        crate::shader::interface::to_wgsl(shader)
     }
 
     /// Create a fence for CPU-GPU synchronization.

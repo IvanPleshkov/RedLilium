@@ -75,6 +75,9 @@ criterion = { workspace = true }
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen = { workspace = true }
 web-time = { workspace = true }
+js-sys = "0.3"
+console_error_panic_hook = { workspace = true }
+console_log = { workspace = true }
 
 [[bench]]
 name = "ecs_benchmarks"
@@ -83,3 +86,7 @@ harness = false
 [[example]]
 name = "physics_checkpoint_probe"
 required-features = ["physics"]
+
+[[example]]
+name = "deferred_material_probe"
+required-features = ["rendering"]

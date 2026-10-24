@@ -157,7 +157,7 @@ impl BindingType {
 }
 
 /// Describes a single binding slot in a layout.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingLayoutEntry {
     /// Binding index within the group.
     pub binding: u32,
@@ -217,7 +217,7 @@ bitflags::bitflags! {
 ///
 /// Layouts are typically wrapped in `Arc` and shared between materials
 /// to enable efficient batching by pointer comparison.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingLayout {
     /// The binding entries in this layout.
     pub entries: Vec<BindingLayoutEntry>,

@@ -168,6 +168,8 @@ pub struct DrawArgs {
     /// material would land in the G-buffer with garbage normals instead of
     /// being skipped. Empty = no filtering.
     pub shader_allowlist: Vec<Guid>,
+    /// Require a registered and validated stock deferred surface contract.
+    pub deferred_contract: bool,
 }
 
 impl DrawArgs {
@@ -185,6 +187,7 @@ impl DrawArgs {
             phase: RenderPhase::Opaque,
             depth_override: None,
             shader_allowlist: Vec::new(),
+            deferred_contract: false,
         }
     }
 
@@ -202,7 +205,14 @@ impl DrawArgs {
             phase: RenderPhase::Opaque,
             depth_override: None,
             shader_allowlist: Vec::new(),
+            deferred_contract: false,
         }
+    }
+
+    /// Draw only registered G-buffer materials, validating all output locations.
+    pub fn with_deferred_contract(mut self) -> Self {
+        self.deferred_contract = true;
+        self
     }
 
     /// Restrict the pass to primitives whose material uses one of `shaders`
@@ -228,6 +238,7 @@ impl DrawArgs {
             phase,
             depth_override: Some((shader_guid, shader)),
             shader_allowlist: Vec::new(),
+            deferred_contract: false,
         }
     }
 }
@@ -311,6 +322,9 @@ impl SceneDrawer {
                 {
                     continue;
                 }
+                if args.deferred_contract && !pipelines.supports_deferred(instance.shader_guid) {
+                    continue;
+                }
                 // Specialize the pipeline for this pass' shader + the mesh's
                 // vertex layout + the target formats (built once, then
                 // cached): the primitive's own material for a color pass, or
@@ -323,6 +337,13 @@ impl SceneDrawer {
                     (Some((guid, shader)), _) => pipelines.get_or_build_depth_only(
                         *guid,
                         shader,
+                        mesh.layout(),
+                        args.depth_format,
+                    ),
+                    (None, false) if args.deferred_contract => pipelines.get_or_build_deferred(
+                        instance.shader_guid,
+                        &instance.shader,
+                        &instance.variant,
                         mesh.layout(),
                         args.depth_format,
                     ),

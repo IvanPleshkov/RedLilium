@@ -1,3 +1,6 @@
+// Single-level render targets / preconvolved irradiance use explicit LOD 0.
+// Sampling after per-pixel rejection/early returns must not require quad
+// derivatives (WebGPU uniform-control-flow validation).
 // Standard deferred resolve/lighting pass (#144) — reads the G-buffer and
 // applies direct + IBL lighting to produce the lit image. Drawn as a
 // fullscreen triangle over the skybox background (background pixels are
@@ -127,8 +130,8 @@ SamplerState ssao_sampler;
 [shader("fragment")]
 float4 fs_main(VsOutput input) : SV_Target {
     // Sample G-buffer
-    float4 albedo_sample = gbuffer_albedo.Sample(gbuffer_sampler, input.uv);
-    float4 normal_metallic_sample = gbuffer_normal_metallic.Sample(gbuffer_sampler, input.uv);
+    float4 albedo_sample = gbuffer_albedo.SampleLevel(gbuffer_sampler, input.uv, 0.0);
+    float4 normal_metallic_sample = gbuffer_normal_metallic.SampleLevel(gbuffer_sampler, input.uv, 0.0);
 
     // RT0 alpha is the AO-as-geometry-marker (ADR-039): 0 = background (the
     // clear value — keep whatever the skybox pass wrote), otherwise
@@ -136,10 +139,15 @@ float4 fs_main(VsOutput input) : SV_Target {
     if (albedo_sample.a < 1.0 / 128.0) {
         discard;
     }
+    // G-buffer V1: a negative metallic tag selects authored linear unlit color.
+    // Coverage/depth/velocity still participate normally in temporal processing.
+    if (normal_metallic_sample.a < 0.0) {
+        return float4(albedo_sample.rgb, 1.0);
+    }
     // Material AO (baked, RT0.a) combined with screen-space AO (#150). The
     // SSAO texture is 1x1 white when the camera has no SSAO, so this is a
     // no-op there.
-    float ao = albedo_sample.a * ssao_texture.Sample(ssao_sampler, input.uv).r;
+    float ao = albedo_sample.a * ssao_texture.SampleLevel(ssao_sampler, input.uv, 0.0).r;
 
     // Decode G-buffer; world position reconstructed from the depth buffer.
     float3 albedo = albedo_sample.rgb;
@@ -147,7 +155,7 @@ float4 fs_main(VsOutput input) : SV_Target {
     float metallic = normal_metallic_sample.a;
     float depth = load_texel_r(depth_texture, input.uv);
     float3 world_position = reconstruct_world(inv_view_proj, input.uv, depth);
-    float roughness = max(gbuffer_roughness.Sample(gbuffer_sampler, input.uv).r, 0.04);
+    float roughness = max(gbuffer_roughness.SampleLevel(gbuffer_sampler, input.uv, 0.0).r, 0.04);
 
     float3 v = normalize(camera_pos.xyz - world_position);
     float3 r = reflect(-v, normal);
@@ -215,14 +223,14 @@ float4 fs_main(VsOutput input) : SV_Target {
     float3 kd_ibl = (float3(1.0) - ks_ibl) * (1.0 - metallic);
 
     // Diffuse IBL from irradiance map
-    float3 irradiance = irradiance_map.Sample(ibl_sampler, normal).rgb;
+    float3 irradiance = irradiance_map.SampleLevel(ibl_sampler, normal, 0.0).rgb;
     float3 diffuse_ibl = irradiance * albedo;
 
     // Specular IBL from pre-filtered environment map + BRDF LUT
     // Highest prefilter mip index rides the environment asset (#145):
     // camera_pos.w = mip_count - 1 of the bound prefilter chain.
     float3 prefiltered_color = prefilter_map.SampleLevel(ibl_sampler, r, roughness * camera_pos.w).rgb;
-    float2 brdf_sample = brdf_lut.Sample(ibl_sampler, float2(n_dot_v, roughness)).rg;
+    float2 brdf_sample = brdf_lut.SampleLevel(ibl_sampler, float2(n_dot_v, roughness), 0.0).rg;
     float3 specular_ibl = prefiltered_color * (f_ibl * brdf_sample.x + brdf_sample.y);
 
     // Ambient occlusion attenuates the image-based terms only — direct
